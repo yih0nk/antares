@@ -65,6 +65,17 @@ def test_simparams_negative_latency_rejected():
         SimParams(latency_frames=-1)
 
 
+def test_simparams_from_model_reads_back_applied_values(arm):
+    assert SimParams.from_model(arm.model) == SimParams()
+    p = SimParams(kp=123.5, kv=0.75, damping=0.3, armature=0.011, frictionloss=0.002, latency_frames=2)
+    arm.apply(p)
+    try:
+        assert SimParams.from_model(arm.model) == p.replace(latency_frames=0)
+        assert SimParams.from_model(arm.model, latency_frames=2) == p
+    finally:
+        arm.apply(SimParams())
+
+
 # -- UnitMap -----------------------------------------------------------------
 
 
@@ -262,6 +273,36 @@ def test_contacts_disabled_by_default():
     assert a.model.opt.disableflags & int(mujoco.mjtDisableBit.mjDSBL_CONTACT)
     b = Arm(contacts=True)
     assert not (b.model.opt.disableflags & int(mujoco.mjtDisableBit.mjDSBL_CONTACT))
+
+
+def test_arm_default_params_come_from_model():
+    a = Arm()
+    assert a.model_path == MODEL_PATH
+    assert a.params == SimParams()
+
+
+def test_arm_model_path(tmp_path):
+    # a copy of the MJCF with different sts3215 values, next to the same meshes
+    xml = MODEL_PATH.read_text().replace(
+        'damping="0.60" frictionloss="0.052" armature="0.028"',
+        'damping="0.3" frictionloss="0.01" armature="0.02"',
+    ).replace('kp="998.22" kv="2.731"', 'kp="200" kv="1.5"')
+    assert xml != MODEL_PATH.read_text()
+    xml = xml.replace('meshdir="assets"', f'meshdir="{MESH_DIR}"')
+    path = tmp_path / "custom.xml"
+    path.write_text(xml)
+
+    a = Arm(model_path=path)
+    assert a.model_path == path
+    assert a.params == SimParams(kp=200.0, kv=1.5, damping=0.3, armature=0.02, frictionloss=0.01)
+    np.testing.assert_allclose(a.model.actuator_gainprm[:, 0], 200.0)
+    np.testing.assert_allclose(a.model.dof_damping, 0.3)
+    # explicit params still win over the file
+    b = Arm(params=SimParams(kp=50.0), model_path=path)
+    assert b.params.kp == 50.0
+    np.testing.assert_allclose(b.model.actuator_gainprm[:, 0], 50.0)
+    with pytest.raises(ValueError):
+        Arm(model_path=tmp_path / "missing.xml")
 
 
 # -- model_geometry ------------------------------------------------------------
