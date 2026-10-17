@@ -255,3 +255,33 @@ def test_seed_restarts_report_spread():
     assert set(out["spread"]) == set(DIMS)
     assert all(v >= 1.0 for k, v in out["spread"].items() if k != "latency_frames")
     assert out["spread"]["latency_frames"] >= 0
+
+
+# --------------------------------------------------------------------------
+# the whole study, on two toy arms
+# --------------------------------------------------------------------------
+
+from antares.specificity import study  # noqa: E402
+
+FAST = TRUE.replace(kp=1500.0, latency_frames=0)
+
+
+def test_study_end_to_end_on_two_toy_arms():
+    data = {"toy/slow": toy_episodes(TRUE, n=8, seed=1), "toy/fast": toy_episodes(FAST, n=8, seed=2)}
+    locks = {"slow": ("toy/slow", TRUE), "fast": ("toy/fast", FAST)}
+    logs = []
+    out = study(data, locks, toy_simulate, n_train=3, n_eval=3, restart_seeds=(1,),
+                max_evaluations=30, truth={"toy/slow": TRUE}, log=logs.append)
+    assert out["matrix"]["cols"] == ["slow", "fast", "default"]
+    assert out["specificity"]["all_specific"] is True
+    slow = out["datasets"]["toy/slow"]
+    assert slow["other_lock"] == "fast"
+    assert len(slow["seed_restarts"]["runs"]) == 2  # the lock itself + one restart
+    assert slow["same_arm_control"]["n_train"] == 2  # 8 - 3 eval - 3 train
+    assert slow["swap"]["params"]["kp"] == FAST.kp
+    assert slow["path_to_other"][0][1] == pytest.approx(0.0, abs=1e-9)
+    assert slow["truth_eval_score"] == pytest.approx(0.0, abs=1e-9)
+    assert "truth" not in out["datasets"]["toy/fast"]
+    assert any("swap" in m for m in logs)
+    import json
+    json.dumps(out)  # serializable as-is

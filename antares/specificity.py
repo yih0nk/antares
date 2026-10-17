@@ -29,7 +29,16 @@ from typing import Any
 
 import numpy as np
 
-from antares.calibrate import DIMS, SPACE, SimulateFn, _safe_score, calibrate, decode, encode
+from antares.calibrate import (
+    DIMS,
+    SPACE,
+    SimulateFn,
+    _safe_score,
+    calibrate,
+    decode,
+    encode,
+    split_episodes,
+)
 from antares.data import Episode
 
 # --------------------------------------------------------------------------
@@ -376,12 +385,124 @@ def interpolate(a, b, episodes: Sequence[Episode], simulate: SimulateFn, n: int 
     return out
 
 
+# --------------------------------------------------------------------------
+# The whole study
+# --------------------------------------------------------------------------
+
+
+def study(
+    datasets: Mapping[str, Sequence[Episode]],
+    locks: Mapping[str, tuple[str, Any]],
+    simulate: SimulateFn,
+    *,
+    n_train: int = 20,
+    n_eval: int = 10,
+    split_seed: int = 0,
+    restart_seeds: Sequence[int] = (1, 2),
+    max_evaluations: int = 150,
+    delta_deg: float = 0.1,
+    truth: Mapping[str, Any] | None = None,
+    log=lambda msg: None,
+) -> dict:
+    """Run every check for a set of arms and their locks.
+
+    ``datasets`` maps a dataset id to its episodes; ``locks`` maps a lock
+    name to ``(dataset id it was fitted on, params)``. Each dataset is
+    split exactly like ``antares calibrate`` splits it, so the cross matrix
+    scores held-out episodes. For every dataset that has both its own lock
+    and a foreign one, the study also runs: identifiability and the latency
+    profile at its own lock (train split), seed restarts, a same-arm
+    control fitted on different training episodes, a swap test that pins
+    the foreign lock's ``kp``/``kv``, and the path from the own lock to the
+    foreign one. ``truth`` (synthetic arms) maps dataset ids to the
+    parameters that generated them.
+    """
+    from antares.calibrate import SimParams, score
+
+    splits = {d: split_episodes(eps, n_train, n_eval, seed=split_seed) for d, eps in datasets.items()}
+    lock_datasets = {name: ds for name, (ds, _) in locks.items()}
+    lock_params = {name: p for name, (_, p) in locks.items()}
+
+    cols = list(locks) + ["default"]
+    col_params = [lock_params[c] for c in locks] + [SimParams()]
+    log("cross matrix")
+    scores = [[float(score(p, splits[d][1], simulate).overall_deg) for p in col_params] for d in datasets]
+    matrix = {"rows": list(datasets), "cols": cols, "scores": scores}
+    summary = summarize_cross(matrix, lock_datasets)
+
+    per_dataset = {}
+    for row in summary["rows"]:
+        d = row["dataset"]
+        if row["own_lock"] is None or row["best_other_lock"] is None:
+            continue
+        train, eval_ = splits[d]
+        own = lock_params[row["own_lock"]]
+        other = lock_params[row["best_other_lock"]]
+        out: dict[str, Any] = {"own_lock": row["own_lock"], "other_lock": row["best_other_lock"]}
+
+        log(f"{d}: identifiability")
+        out["identifiability"] = identifiability(own, train, simulate, delta_deg=delta_deg).to_dict()
+        out["latency_profile"] = latency_profile(own, train, simulate)
+
+        log(f"{d}: seed restarts {list(restart_seeds)}")
+        restarts = seed_restarts(train, eval_, restart_seeds, simulate, max_evaluations=max_evaluations)
+        restarts["runs"].insert(
+            0,
+            {
+                "seed": None,
+                "params": own.to_dict(),
+                "train_score": float(score(own, train, simulate).overall_deg),
+                "eval_score": row["own_score"],
+            },
+        )
+        restarts["spread"] = _spread([r["params"] for r in restarts["runs"]])
+        out["seed_restarts"] = restarts
+
+        held_out = {ep.index for ep in eval_}
+        used = {ep.index for ep in train}
+        fresh = [ep for ep in datasets[d] if ep.index not in held_out and ep.index not in used]
+        if fresh:
+            log(f"{d}: same-arm control on {min(len(fresh), n_train)} fresh episodes")
+            ctrl = calibrate(fresh[:n_train], eval_, simulate=simulate, max_evaluations=max_evaluations)
+            out["same_arm_control"] = {
+                "n_train": min(len(fresh), n_train),
+                "params": ctrl.params.to_dict(),
+                "eval_score": float(ctrl.eval_score),
+            }
+
+        log(f"{d}: swap test with {row['best_other_lock']}'s kp/kv")
+        out["swap"] = pinned_refit(
+            train, eval_, {"kp": other.kp, "kv": other.kv}, simulate, max_evaluations=max_evaluations
+        )
+        out["path_to_other"] = interpolate(own, other, eval_, simulate)
+        if truth and d in truth:
+            out["truth"] = truth[d].to_dict()
+            out["truth_eval_score"] = float(score(truth[d], eval_, simulate).overall_deg)
+        per_dataset[d] = out
+
+    return {
+        "config": {
+            "n_train": n_train,
+            "n_eval": n_eval,
+            "split_seed": split_seed,
+            "restart_seeds": list(restart_seeds),
+            "max_evaluations": max_evaluations,
+            "delta_deg": delta_deg,
+        },
+        "locks": {n: {"dataset": ds, "params": p.to_dict()} for n, (ds, p) in locks.items()},
+        "matrix": matrix,
+        "specificity": summary,
+        "datasets": per_dataset,
+    }
+
+
 __all__ = [
     "CONTINUOUS",
     "interpolate",
     "latency_profile",
     "pinned_refit",
     "seed_restarts",
+    "study",
     "Identifiability",
     "identifiability",
     "jacobian",
