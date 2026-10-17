@@ -337,6 +337,11 @@ class Arm:
 
     # -- replay -------------------------------------------------------------
 
+    @property
+    def ctrl_range(self) -> tuple[np.ndarray, np.ndarray]:
+        """Actuator command limits ``(lo, hi)`` in radians, (6,) each (copies)."""
+        return self._ctrl_lo.copy(), self._ctrl_hi.copy()
+
     def real_q(self, episode: Episode) -> np.ndarray:
         """Measured joint positions in radians, (T,6)."""
         return self.unit_map.to_rad(episode.state)
@@ -347,29 +352,68 @@ class Arm:
         Frame 0 is the real initial state (the sim starts there, at rest).
         For each later frame the command from ``latency_frames`` frames ago
         is applied (per joint, when latency is per joint) and the physics is
-        advanced one dataset frame.
+        advanced one dataset frame. This is :meth:`rollout` with the episode's
+        own commands and initial state.
         """
         fps = float(fps if fps is not None else episode.fps)
-        if fps <= 0:
-            raise ValueError("fps must be positive")
-        T = len(episode)
-        m, d = self.model, self.data
-        nq = m.nq
+        nq = self.model.nq
         if episode.state.shape[1] != nq or episode.action.shape[1] != nq:
             raise ValueError("episode must have 6 joints")
+        ctrl = self.unit_map.to_rad(episode.action)
+        q0 = self.unit_map.to_rad(episode.state[0])
+        return self.rollout(ctrl, q0, fps)
+
+    def rollout(
+        self,
+        ctrl_rad: np.ndarray,
+        q0_rad: np.ndarray,
+        fps: float,
+        latency_frames: int | Sequence[int] | None = None,
+    ) -> np.ndarray:
+        """Drive the sim with an arbitrary command sequence; return joint angles (T,6) rad.
+
+        ``ctrl_rad[t]`` is the command *sent* at frame ``t`` (radians; clipped
+        to the actuator ctrlrange). The servo applies the command sent
+        ``latency_frames`` frames earlier (an int, or one per joint; default: the
+        current ``params.latency_frames``); frames before the first command arrives
+        hold ``ctrl_rad[0]``. The sim starts at rest at ``q0_rad``, which is
+        returned unchanged as row 0.
+        """
+        fps = float(fps)
+        if fps <= 0:
+            raise ValueError("fps must be positive")
+        m, d = self.model, self.data
+        nq = m.nq
+        ctrl = np.asarray(ctrl_rad, dtype=np.float64)
+        q0 = np.asarray(q0_rad, dtype=np.float64).reshape(-1)
+        if ctrl.ndim != 2 or ctrl.shape[1] != nq:
+            raise ValueError(f"ctrl_rad must be (T,{nq}), got {ctrl.shape}")
+        if q0.shape[0] != nq:
+            raise ValueError(f"q0_rad must have {nq} joints, got {q0.shape[0]}")
+        T = ctrl.shape[0]
+        if T == 0:
+            raise ValueError("ctrl_rad must have at least one frame")
+        if latency_frames is None:
+            lat = self.params.per_joint("latency_frames")
+        else:
+            lat = np.asarray(latency_frames, dtype=np.int64).reshape(-1)
+            if lat.size == 1:
+                lat = np.full(nq, lat[0], dtype=np.int64)
+            elif lat.size != nq:
+                raise ValueError(f"latency_frames must be an int or {nq} ints, got {lat.size}")
+        if np.any(lat < 0):
+            raise ValueError("latency_frames must be >= 0")
 
         frame_dt = 1.0 / fps
         n_sub = max(1, int(round(frame_dt / self._base_timestep)))
 
-        ctrl = np.clip(self.unit_map.to_rad(episode.action), self._ctrl_lo, self._ctrl_hi)
+        ctrl = np.clip(ctrl, self._ctrl_lo, self._ctrl_hi)
         # Command index per frame and joint with latency; frames before the
         # first command arrives hold the first command.
-        lat = self.params.per_joint("latency_frames")
         src = np.maximum(np.arange(T)[:, None] - lat[None, :], 0)
         ctrl = np.ascontiguousarray(np.take_along_axis(ctrl, src, axis=0))
 
         sim_q = np.empty((T, nq), dtype=np.float64)
-        q0 = self.unit_map.to_rad(episode.state[0])
 
         old_dt = m.opt.timestep
         m.opt.timestep = frame_dt / n_sub

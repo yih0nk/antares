@@ -201,6 +201,71 @@ class FakeLock:
                    FakeResult(params, FakeParams()), d["created_at"], d.get("antares_version", ""))
 
 
+@dataclass
+class FakeCompReport:
+    fps: float
+    q_des: np.ndarray
+    ctrl_raw: np.ndarray
+    ctrl_comp: np.ndarray
+    q_sim_raw: np.ndarray
+    q_sim_comp: np.ndarray
+    rms: dict
+    gap_raw: FakeGap
+    gap_shift: FakeGap
+    gap_ilc: FakeGap
+    ilc_iterations: int
+    ilc_history_deg: tuple
+    feasibility: dict
+
+
+FAKE_FEAS = {
+    "velocity_factor": 1.5, "ok": True, "flagged_joints": [], "max_range_excess_deg": 0.1,
+    "clipped_frames": 0, "raw_clipped_frames": 0, "per_joint": {},
+}
+
+
+def fake_compensate_episode(arm, ep, params, method="ilc", real_vmax_deg_s=None, **kw):
+    assert method in ("shift", "ilc")
+    assert real_vmax_deg_s is not None and len(real_vmax_deg_s) == 6
+    arm.apply(params)
+    q_des = np.radians(ep.state)
+    q_sim_raw = arm.replay(ep)
+    shift = 0.02 if method == "shift" else 0.01
+    ctrl_comp = q_des + shift
+    gap = fake_tracking_error(q_des, q_sim_raw)
+    return FakeCompReport(
+        fps=ep.fps, q_des=q_des, ctrl_raw=np.radians(ep.action), ctrl_comp=ctrl_comp,
+        q_sim_raw=q_sim_raw, q_sim_comp=q_des + shift / 2, rms={"raw": 3.0, "shift": 2.0, "ilc": 1.0},
+        gap_raw=gap, gap_shift=gap, gap_ilc=gap, ilc_iterations=4, ilc_history_deg=(2.0, 1.5, 1.0),
+        feasibility=dict(FAKE_FEAS),
+    )
+
+
+@dataclass
+class FakeSummary:
+    episodes: tuple
+
+    def to_dict(self):
+        return {
+            "episodes": list(self.episodes), "rms": {"raw": 3.0, "shift": 2.0, "ilc": 1.0},
+            "per_joint_deg": {}, "ilc_iterations": [4] * len(self.episodes),
+            "n_frames": 20 * len(self.episodes), "feasibility": dict(FAKE_FEAS),
+        }
+
+
+def fake_compensate_episodes(arm, episodes, params, method="ilc", **kw):
+    arm.apply(params)
+    return FakeSummary(tuple(e.index for e in episodes))
+
+
+def fake_held_out(ds, idx):
+    by = {e.index: e for e in ds.episodes}
+    missing = [i for i in idx if i not in by]
+    if missing:
+        raise ValueError(f"episodes {missing} not in {ds.repo_id}")
+    return [by[i] for i in idx]
+
+
 def _module(name, **attrs):
     m = types.ModuleType(name)
     m.__dict__.update(attrs)
@@ -236,7 +301,10 @@ def fakes(monkeypatch, tmp_path):
     lock = _module("antares.lock", RobotLock=FakeLock, dataset_digest=lambda eps: "deadbeef",
                    slug=lambda r: r.replace("/", "__"), LOCK_DIR=tmp_path / "locks",
                    LOCK_SUFFIX=LOCK_SUFFIX)
-    for m in (sim, gap, cal, lock):
+    comp = _module("antares.compensate", compensate_episode=fake_compensate_episode,
+                   compensate_episodes=fake_compensate_episodes, held_out_episodes=fake_held_out,
+                   max_joint_velocity=lambda episodes, arm: np.full(6, 100.0))
+    for m in (sim, gap, cal, lock, comp):
         monkeypatch.setitem(sys.modules, m.__name__, m)
 
     monkeypatch.setattr(server, "_arm", FakeArm())
@@ -455,6 +523,97 @@ def test_replay_with_per_joint_param_lists(client, fakes):
     r = client.post("/api/replay", json={"dataset": FAKE_DS, "episode": 0, "params": params})
     assert r.status_code == 200, r.text
     assert r.json()["params"]["damping"] == per_joint
+
+
+def test_compensate_endpoint(client, fakes):
+    write_lock(fakes, "unit-a", kp=50.0)
+    r = client.get("/api/compensate", params={"dataset": FAKE_DS, "episode": 1, "lock": "unit-a"})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    json.dumps(out)
+    assert out["dataset"] == FAKE_DS and out["episode"] == 1 and out["fps"] == 30.0
+    assert out["lock"] == "unit-a" and out["method"] == "ilc"
+    assert out["params"]["kp"] == 50.0
+    assert out["validation"] == "sim-only" and "hardware" in out["note"]
+    assert out["joints"] == list(JOINTS) and out["body_names"] == BODIES
+    T = 20
+    for key in ("q_des", "ctrl_raw", "ctrl_comp", "q_sim_raw", "q_sim_comp"):
+        assert np.asarray(out[key]).shape == (T, 6), key
+    assert np.asarray(out["sim_comp_poses"]).shape == (T, len(BODIES), 7)
+    assert out["rms"] == {"raw": 3.0, "shift": 2.0, "ilc": 1.0}
+    assert set(out["gap"]) == {"raw", "shift", "ilc"}
+    assert out["ilc_iterations"] == 4 and out["ilc_history_deg"] == [2.0, 1.5, 1.0]
+    assert out["feasibility"]["ok"] is True
+    # degrees: q_des is the real measured trajectory
+    ep = server._DATASETS[FAKE_DS].episodes[1]
+    assert out["q_des"][0][0] == pytest.approx(ep.state[0, 0], abs=1e-3)
+    # ILC vs shift differ in which commands come back
+    ilc_comp = np.asarray(out["ctrl_comp"])
+    shift = client.get("/api/compensate", params={"dataset": FAKE_DS, "episode": 1, "lock": "unit-a",
+                                                   "method": "shift"}).json()
+    assert shift["method"] == "shift"
+    assert np.all(np.asarray(shift["ctrl_comp"]) > ilc_comp)
+    # no lock -> default params, lock null
+    bare = client.get("/api/compensate", params={"dataset": FAKE_DS, "episode": 1}).json()
+    assert bare["lock"] is None and bare["params"] == FakeParams().to_dict()
+
+    assert client.get("/api/compensate", params={"dataset": FAKE_DS, "episode": 1, "method": "pid"}).status_code == 400
+    assert client.get("/api/compensate", params={"dataset": FAKE_DS, "episode": 1, "lock": "ghost"}).status_code == 404
+    assert client.get("/api/compensate", params={"dataset": FAKE_DS, "episode": 99}).status_code == 404
+    assert client.get("/api/compensate", params={"dataset": FAKE_DS}).status_code == 422
+
+
+def test_compensate_heldout_helper(fakes):
+    from fastapi import HTTPException
+
+    lock = write_lock(fakes, "unit-a", kp=50.0).to_dict()
+    lock["result"]["eval_episodes"] = [4, 5]
+    out = server.compensate_heldout(server._DATASETS[FAKE_DS], lock)
+    json.dumps(out)
+    assert out["episodes"] == [4, 5] and out["n_frames"] == 40
+    assert out["rms"]["ilc"] < out["rms"]["raw"]
+    assert out["lock"] == "unit-a" and out["params"]["kp"] == 50.0 and out["validation"] == "sim-only"
+    assert out["ilc_iterations"] == [4, 4]
+    assert server._arm.params.kp == 50.0
+
+    lock["result"]["eval_episodes"] = []
+    with pytest.raises(HTTPException) as e:
+        server.compensate_heldout(server._DATASETS[FAKE_DS], lock)
+    assert e.value.status_code == 400
+    lock["result"]["eval_episodes"] = [42]
+    with pytest.raises(HTTPException) as e:
+        server.compensate_heldout(server._DATASETS[FAKE_DS], lock)
+    assert e.value.status_code == 400 and "42" in e.value.detail
+    with pytest.raises(HTTPException):
+        server.compensate_heldout(server._DATASETS[FAKE_DS], lock, method="pid")
+
+
+def test_compensate_real_sim_integration(monkeypatch):
+    """Real MuJoCo Arm + real compensate on a synthetic episode (no network)."""
+    sim = pytest.importorskip("antares.sim")
+    pytest.importorskip("antares.compensate")
+    T = 60
+    t = np.linspace(0, 1, T)
+    ramp = 0.5 * (1 - np.cos(np.pi * np.minimum(t / 0.4, 1.0)))
+    state = np.array([0.0, -40.0, 30.0, 10.0, 0.0, 20.0]) + 25.0 * np.sin(2 * np.pi * t[:, None] + np.arange(6)) * ramp[:, None]
+    state[:, 5] = np.clip(state[:, 5], 0, 100)
+    action = np.vstack([state[3:], np.repeat(state[-1:], 3, axis=0)])
+    ep = Episode(index=0, fps=30.0, joint_names=JOINTS, state=state, action=action)
+    ds = Dataset(repo_id="synthetic/arm", robot_type="so101_follower", fps=30.0,
+                 joint_names=JOINTS, episodes=(ep,))
+    monkeypatch.setattr(server, "_DATASETS", {ds.repo_id: ds})
+    monkeypatch.setattr(server, "_arm", None)  # force a real Arm
+    params = sim.SimParams(kp=90.0, kv=1.5, damping=0.05, armature=0.02, frictionloss=0.025, latency_frames=4)
+    out = server.compensate_episode_dict(ds, 0, params, method="ilc", lock=None)
+    json.dumps(out)
+    assert np.asarray(out["ctrl_comp"]).shape == (T, 6)
+    assert np.asarray(out["sim_comp_poses"]).shape == (T, len(out["body_names"]), 7)
+    # raw reproduces the replay gap exactly
+    replay = server.replay_episode(ds, 0, params)
+    assert out["rms"]["raw"] == pytest.approx(replay["gap"]["overall_deg"], abs=1e-3)
+    assert out["rms"]["ilc"] <= out["rms"]["shift"] < out["rms"]["raw"]
+    assert out["ilc_iterations"] >= 1
+    assert set(out["feasibility"]["per_joint"]) == set(JOINTS)
 
 
 def test_calibrate_job_lifecycle(client, fakes):
