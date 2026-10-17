@@ -437,9 +437,11 @@ def _evaluate_candidates(
 #: per evaluation (20 episodes) this is about a minute.
 PER_JOINT_MAX_EVALUATIONS = 600
 
-#: Default CMA-ES step size (in unit coordinates) of the per-joint stage; it
-#: starts at the shared optimum, so it only needs to move locally.
-PER_JOINT_SIGMA0 = 0.1
+#: Default CMA-ES step size (in unit coordinates) of the per-joint stage. It
+#: starts at the shared optimum, so it only needs to move locally: on both
+#: demo datasets 0.05 beat 0.1 clearly within 600 evaluations, and 0.2
+#: never produced a candidate better than the warm start.
+PER_JOINT_SIGMA0 = 0.05
 
 
 @dataclass
