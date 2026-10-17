@@ -294,6 +294,10 @@ body {
   font-family: "JetBrains Mono", monospace;
 }
 
+.bad {
+  color: #ff8fa3;
+}
+
 .bars {
   display: flex;
   flex-direction: column;
@@ -356,6 +360,52 @@ body {
   text-align: right;
 }
 
+.calib-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.spark {
+  width: 100%;
+  height: 64px;
+}
+
+.spark-line {
+  fill: none;
+  stroke: var(--sim);
+  stroke-width: 1.5;
+}
+
+.spark-fill {
+  fill: var(--sim);
+  opacity: 0.12;
+}
+
+.spark-base {
+  stroke: var(--muted);
+  stroke-dasharray: 3 3;
+  stroke-width: 1;
+}
+
+.result {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.result b {
+  color: #9fd8a8;
+  font-weight: 500;
+}
+
 .params {
   width: 100%;
   border-collapse: collapse;
@@ -404,6 +454,12 @@ body {
   font: inherit;
   font-weight: 500;
   cursor: pointer;
+}
+
+.cta.secondary {
+  background: transparent;
+  border: 1px solid var(--accent);
+  color: var(--text);
 }
 
 .cta:disabled {

@@ -51,3 +51,27 @@ export function JointTrace({ real, sim, frame, onSeek }: TraceProps) {
     </svg>
   );
 }
+
+type SparkProps = { values: number[]; total: number; baseline?: number | null };
+
+// Best-so-far error over evaluations, on a fixed x range so the line grows.
+export function Sparkline({ values, total, baseline }: SparkProps) {
+  const W = 280;
+  const H = 64;
+  if (!values.length) return <svg className="spark" viewBox={`0 0 ${W} ${H}`} />;
+  const hi = Math.max(baseline ?? 0, ...values);
+  const lo = 0;
+  const n = Math.max(total, values.length);
+  const y = (v: number) => H - 2 - ((v - lo) / (hi - lo || 1)) * (H - 4);
+  const d = values.map((v, i) => `${i ? "L" : "M"}${((i / Math.max(1, n - 1)) * W).toFixed(1)},${y(v).toFixed(1)}`).join("");
+  const lastX = ((values.length - 1) / Math.max(1, n - 1)) * W;
+  return (
+    <svg className="spark" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none">
+      {baseline != null && (
+        <line x1={0} x2={W} y1={y(baseline)} y2={y(baseline)} className="spark-base" vectorEffect="non-scaling-stroke" />
+      )}
+      <path d={`${d}L${lastX.toFixed(1)},${H}L0,${H}Z`} className="spark-fill" />
+      <path d={d} className="spark-line" vectorEffect="non-scaling-stroke" />
+    </svg>
+  );
+}

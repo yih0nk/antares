@@ -3,24 +3,39 @@ import { Canvas, useFrame } from "@react-three/fiber";
 import { Grid, OrbitControls } from "@react-three/drei";
 import {
   api,
+  lockNameFor,
+  type CalibrationResult,
   type DatasetInfo,
   type EpisodeInfo,
   type Geometry,
+  type JobEvent,
   type LockSummary,
   type Params,
+  type ProgressEvent,
   type Replay,
 } from "./api";
 import { Arm, ghostMaterial, realMaterial, type Playhead } from "./Arm";
-import { JointTrace } from "./Charts";
+import { JointTrace, Sparkline } from "./Charts";
 
 // Layout: 3D viewer (real arm + ghost sim arm) on the left, gap panel on
 // the right, episode timeline along the bottom. The ghost is the simulator
-// replaying the real commands with either the default parameters or a
-// saved robot lock.
+// replaying the real commands with either the default parameters, a saved
+// robot lock, or (while calibrating) the best fit so far.
 
 const DEFAULT = "default";
+const LIVE = "live";
 const PARAM_KEYS: (keyof Params)[] = ["kp", "kv", "damping", "armature", "frictionloss", "latency_frames"];
 const SPEEDS = [0.25, 0.5, 1, 2];
+
+type Calibration = {
+  jobId: string;
+  name: string;
+  status: "running" | "done" | "error" | "cancelled";
+  progress: ProgressEvent[];
+  best: number[];
+  result?: CalibrationResult;
+  error?: string;
+};
 
 const deg = (v: number | null | undefined, digits = 2) => (v == null || !isFinite(v) ? "--" : `${v.toFixed(digits)}°`);
 
@@ -78,6 +93,7 @@ export default function App() {
   const [speed, setSpeed] = useState(1);
   const [frame, setFrame] = useState(0);
   const [joint, setJoint] = useState("shoulder_pan");
+  const [calib, setCalib] = useState<Calibration | null>(null);
 
   const playhead = useMemo<Playhead>(() => ({ frame: 0 }), []);
 
@@ -144,7 +160,7 @@ export default function App() {
 
   // ---- ghost replay for a saved lock ----------------------------------------
   useEffect(() => {
-    if (!dataset || episode == null) return;
+    if (!dataset || episode == null || ghost === LIVE) return;
     if (ghost === DEFAULT) {
       setReplay(baseline);
       return;
@@ -163,8 +179,113 @@ export default function App() {
     };
   }, [dataset, episode, ghost, baseline]);
 
+  // ---- live ghost while calibrating: replay the best params so far ----------
+  // One request in flight at a time; when it lands, the newest best (if it
+  // changed meanwhile) goes next. Each landing eases the ghost to the new fit.
+  const liveWanted = useRef<Params | null>(null);
+  const liveInFlight = useRef(false);
+  const liveKey = useRef("");
+  const where = useRef({ dataset, episode });
+  where.current = { dataset, episode };
+  const pumpLive = useCallback(() => {
+    const { dataset: ds, episode: ep } = where.current;
+    if (liveInFlight.current || !liveWanted.current || ep == null) return;
+    const params = liveWanted.current;
+    const key = `${ds}#${ep}#${JSON.stringify(params)}`;
+    if (key === liveKey.current) return;
+    liveInFlight.current = true;
+    liveKey.current = key;
+    setReplayBusy(true);
+    api
+      .replayParams(ds, ep, params)
+      .then(
+        (r) => {
+          if (where.current.dataset === ds && where.current.episode === ep) setReplay(r);
+        },
+        () => {},
+      )
+      .finally(() => {
+        liveInFlight.current = false;
+        setReplayBusy(false);
+        pumpLive();
+      });
+  }, []);
+
+  useEffect(() => {
+    if (ghost === LIVE) pumpLive(); // also re-runs the latest best on a new episode
+  }, [ghost, dataset, episode, pumpLive]);
+
+  // ---- calibration -----------------------------------------------------------
+  const sourceRef = useRef<EventSource | null>(null);
+  useEffect(() => () => sourceRef.current?.close(), []);
+
+  const startCalibration = async () => {
+    if (!dataset) return;
+    setError(null);
+    const name = lockNameFor(dataset);
+    let jobId: string;
+    try {
+      ({ job_id: jobId } = await api.calibrate(dataset, name));
+    } catch (e) {
+      setError(`Could not start calibration: ${(e as Error).message}`);
+      return;
+    }
+    setCalib({ jobId, name, status: "running", progress: [], best: [] });
+    liveWanted.current = null;
+    liveKey.current = "";
+    setGhost(LIVE);
+    setPlaying(true);
+
+    sourceRef.current?.close();
+    const src = api.events(jobId);
+    sourceRef.current = src;
+    let lastBest = Infinity;
+    src.onmessage = (msg) => {
+      const ev = JSON.parse(msg.data) as JobEvent;
+      if (ev.type === "progress") {
+        setCalib((c) =>
+          c && c.jobId === jobId
+            ? { ...c, progress: [...c.progress, ev], best: [...c.best, ev.best_score ?? NaN] }
+            : c,
+        );
+        if (ev.best_score != null && ev.best_score < lastBest - 1e-9) {
+          lastBest = ev.best_score;
+          liveWanted.current = ev.best_params;
+          pumpLive();
+        }
+      } else if (ev.type === "done") {
+        src.close();
+        setCalib((c) => (c && c.jobId === jobId ? { ...c, status: "done", result: ev.result } : c));
+        api.locks().then((ls) => {
+          setLocks(ls);
+          setGhost(ev.lock.name);
+        });
+      } else if (ev.type === "error") {
+        src.close();
+        setCalib((c) => (c && c.jobId === jobId ? { ...c, status: "error", error: ev.message } : c));
+      }
+    };
+    src.onerror = () => {
+      // EventSource reconnects on its own; a closed stream after "done" is fine.
+      if (src.readyState === EventSource.CLOSED) {
+        setCalib((c) =>
+          c && c.jobId === jobId && c.status === "running" ? { ...c, status: "error", error: "lost the progress stream" } : c,
+        );
+      }
+    };
+  };
+
+  const stopCalibration = async () => {
+    if (!calib) return;
+    await api.cancel(calib.jobId).catch(() => {});
+    setCalib((c) => (c ? { ...c, status: c.status === "running" ? "cancelled" : c.status } : c));
+    // The worker still finishes its current generation and saves the best fit;
+    // the stream's "done" event then selects that lock.
+  };
+
   // ---- derived ---------------------------------------------------------------
   const dsLocks = locks.filter((l) => l.dataset === dataset);
+  const running = calib?.status === "running" || calib?.status === "cancelled";
   const fps = baseline?.fps ?? 30;
   const frames = baseline?.real_poses.length ?? 0;
   const ghostGap = replay?.gap ?? null;
@@ -173,11 +294,13 @@ export default function App() {
   const scored = new Set(baseGap?.scored_joints ?? []);
   const jIndex = Math.max(0, jointNames.indexOf(joint));
   const maxJointErr = Math.max(1e-6, ...Object.values(baseGap?.per_joint_deg ?? {}), ...Object.values(ghostGap?.per_joint_deg ?? {}));
+  const lastProgress = calib?.progress[calib.progress.length - 1];
   const shownParams = replay?.params ?? null;
   const defaultParams = baseline?.params ?? null;
   const currentDs = datasets.find((d) => d.id === dataset);
 
-  const ghostLabel = ghost === DEFAULT ? "default sim" : `lock ${ghost}`;
+  const ghostLabel =
+    ghost === DEFAULT ? "default sim" : ghost === LIVE ? "best fit so far" : `lock ${ghost}`;
 
   const seek = (f: number) => {
     playhead.frame = f;
@@ -194,7 +317,7 @@ export default function App() {
           <select
             className="picker"
             value={dataset}
-            disabled={!datasets.length}
+            disabled={!datasets.length || running}
             onChange={(e) => setDataset(e.target.value)}
           >
             {datasets.map((d) => (
@@ -280,14 +403,20 @@ export default function App() {
         <section>
           <div className="label">Ghost parameters</div>
           <div className="segmented">
-            <button className={ghost === DEFAULT ? "on" : ""} onClick={() => setGhost(DEFAULT)}>
+            <button className={ghost === DEFAULT ? "on" : ""} onClick={() => setGhost(DEFAULT)} disabled={running}>
               Default
             </button>
+            {calib && (running || ghost === LIVE) && (
+              <button className={ghost === LIVE ? "on" : ""} onClick={() => setGhost(LIVE)}>
+                Live fit
+              </button>
+            )}
             {dsLocks.map((l) => (
               <button
                 key={l.name}
                 className={ghost === l.name ? "on" : ""}
                 onClick={() => setGhost(l.name)}
+                disabled={running}
                 title={`created ${l.created_at}`}
               >
                 {l.name}
@@ -319,6 +448,48 @@ export default function App() {
               );
             })}
           </div>
+        </section>
+
+        <section className="calib">
+          {!running ? (
+            <button className="cta" disabled={dsState !== "ready" || !baseline} onClick={startCalibration}>
+              {calib?.status === "done" ? "Calibrate again" : "Calibrate"}
+            </button>
+          ) : (
+            <button className="cta secondary" onClick={stopCalibration} disabled={calib?.status === "cancelled"}>
+              {calib?.status === "cancelled" ? "Stopping…" : "Stop and keep best fit"}
+            </button>
+          )}
+          {calib && (
+            <div className="calib-body">
+              <div className="row">
+                <span className="muted small">
+                  {calib.status === "running" && `fitting on train episodes · eval ${lastProgress?.evaluation ?? 0}`}
+                  {calib.status === "cancelled" && "stopping after this generation"}
+                  {calib.status === "done" && `saved as ${calib.name}`}
+                  {calib.status === "error" && <span className="bad">{calib.error}</span>}
+                </span>
+                <span className="mono small">{deg(lastProgress?.best_score)}</span>
+              </div>
+              <Sparkline values={calib.best.filter((v) => isFinite(v))} total={150} baseline={calib.best[0]} />
+              {calib.result && (
+                <div className="result">
+                  <div>
+                    <span className="muted small">held-out episodes</span>
+                    <div className="mono">
+                      {deg(calib.result.baseline_eval_score)} → <b>{deg(calib.result.eval_score)}</b>
+                    </div>
+                  </div>
+                  <div>
+                    <span className="muted small">train episodes</span>
+                    <div className="mono">
+                      {deg(calib.result.baseline_train_score)} → {deg(calib.result.train_score)}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </section>
 
         {shownParams && defaultParams && (
