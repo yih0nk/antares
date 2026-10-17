@@ -138,6 +138,101 @@ def cmd_cross(args: argparse.Namespace) -> int:
     return 0
 
 
+def _pct(v) -> str:
+    return "-" if v is None else f"{100 * v:.0f}%"
+
+
+def _event_rows(events: list[dict], fps: float) -> list[list[str]]:
+    return [
+        [
+            f"{ev['start']}-{ev['end']}",
+            f"{ev['start'] / fps:.2f}-{ev['end'] / fps:.2f}",
+            ev["kind"],
+            ",".join(ev["joints"]),
+            f"{ev['peak_z']:.1f}",
+            f"{ev['peak_deg']:+.2f}",
+        ]
+        for ev in events
+    ]
+
+
+def _print_summary(title: str, s: dict) -> None:
+    print(title)
+    print(
+        f"  {s['n_episodes']} episodes, {s['n_grasps']} grasps, {s['n_events']} events; "
+        f"recall {_pct(s['recall'])} ({s['n_grasps_hit']}/{s['n_grasps']} grasps hit), "
+        f"precision {_pct(s['precision'])} ({s['n_events_in_grasp']}/{s['n_events']} events in a grasp window), "
+        f"near any transition {_pct(s['near_transition'])}, far {_pct(s['far_fraction'])} ({s['n_events_far']})"
+    )
+    lift = "-" if s["lift"] is None else f"{s['lift']:.2f}x"
+    print(
+        f"  residual energy inside grasp windows: {_pct(s['energy_in_grasp_fraction'])} "
+        f"(windows cover {_pct(s['chance'])} of frames, lift {lift})"
+    )
+
+
+def cmd_events(args: argparse.Namespace) -> int:
+    from antares import server
+
+    ds = server.get_dataset(args.repo_id)
+    label = f"lock {args.lock}" if args.lock else "default params"
+    if args.episode is None and not args.all:
+        print("error: give --episode N or --all", file=sys.stderr)
+        return 2
+
+    if args.all:
+        out = server.events_summary(ds, args.lock, z=args.z, min_frames=args.min_frames)
+        bl = out["baseline"]
+        print(
+            f"{ds.repo_id} ({label}): z >= {args.z:g} for >= {args.min_frames} frames; "
+            f"baseline from {bl['n_frames']} free-motion frames of episodes {bl['episodes']}"
+        )
+        rows = [
+            [
+                str(r["episode"]) + ("*" if r["held_out"] else ""),
+                str(r["n_frames"]),
+                str(r["n_grasps"]),
+                str(r["n_grasps_hit"]),
+                str(r["n_events"]),
+                str(r["n_events_in_grasp"]),
+                str(r["n_events_far"]),
+                _pct(r["energy_in_grasp"] / r["energy_total"] if r["energy_total"] else None),
+            ]
+            for r in out["episodes"]
+        ]
+        print(_table(["episode", "frames", "grasps", "hit", "events", "in grasp", "far", "energy in grasp"], rows))
+        print("(* = held out of the fit)")
+        _print_summary("all episodes:", out["summary"])
+        _print_summary("held-out episodes:", out["summary_held_out"])
+        return 0
+
+    out = server.residual_episode(ds, args.episode, args.lock, z=args.z, min_frames=args.min_frames)
+    fps = out["fps"]
+    thr = out["gripper_thresholds"]
+    print(
+        f"{ds.repo_id} episode {out['episode']} ({len(out['residual'])} frames, {label}); "
+        f"gripper closed < {thr['closed_below']:.1f}, open > {thr['open_above']:.1f}"
+    )
+    print(f"grasps at frames {out['grasps']}, releases at {out['releases']}")
+    bl = out["baseline"]
+    print(
+        "baseline scale (deg): "
+        + ", ".join(f"{j} {s:.2f}" for j, s in zip(bl["joints"], bl["scale_deg"]))
+    )
+    if not out["events"]:
+        print("no events")
+    else:
+        print(_table(["frames", "seconds", "kind", "joints", "peak z", "peak deg"], _event_rows(out["events"], fps)))
+    v = out["validation"]
+    print(
+        f"{v['n_grasps_hit']}/{v['n_grasps']} grasps hit, {v['n_events_in_grasp']}/{v['n_events']} events in a "
+        f"grasp window, {v['n_events_far']} far from any gripper transition; "
+        f"{_pct(v['energy_in_grasp'] / v['energy_total'] if v['energy_total'] else None)} of residual energy "
+        f"in grasp windows ({_pct(v['n_frames_in_grasp'] / v['n_frames'])} of frames)"
+    )
+    return 0
+
+
 def cmd_locks(args: argparse.Namespace) -> int:
     from antares import server
 
@@ -209,6 +304,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--n-eval", type=int, default=10)
     p.add_argument("--seed", type=int, default=0)
     p.set_defaults(func=cmd_cross)
+
+    p = sub.add_parser("events", help="detect contact events from the real-sim residual")
+    p.add_argument("repo_id")
+    p.add_argument("--episode", type=int, default=None)
+    p.add_argument("--lock", default=None, help="use a saved lock's parameters")
+    p.add_argument("--all", action="store_true", help="summarize across every episode")
+    p.add_argument("--z", type=float, default=4.0, help="robust z-score to enter an event (exit at z/2)")
+    p.add_argument("--min-frames", type=int, default=5, help="shortest event kept")
+    p.set_defaults(func=cmd_events)
 
     p = sub.add_parser("locks", help="list saved locks")
     p.set_defaults(func=cmd_locks)
