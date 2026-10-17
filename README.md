@@ -299,6 +299,77 @@ tests in `tests/test_check.py` prove the gate bites: real episodes pass,
 the same episodes with 3 frames of extra lag or excursions scaled to 0.9
 (a weak servo) fail.
 
+## Contact detection from the residual
+
+Once the sim reproduces the arm's free-space motion (the SO-101 lock
+tracks held-out episodes to 1.05 deg RMSE), whatever is left in
+`real - sim` is something the sim does not model. In a pick-and-place
+log that should be the arm touching, grasping or pushing an object, so a
+sustained deviation is a contact event read off the joint encoders alone,
+with no force sensor. `antares/events.py` implements this, pure numpy:
+
+1. **Residual.** `residuals(real_q, sim_q)` is the signed per-joint
+   difference in degrees.
+2. **Baseline.** `residual_baseline(episodes, arm)` replays the lock's
+   held-out episodes and takes, per joint, the median and `1.4826 * MAD`
+   of the residual on *free-motion* frames (nothing in the gripper, at
+   least 15 frames from any gripper open/close), plus its lag-1
+   autocorrelation. The gripper command is binarized with hysteresis
+   around thresholds fitted by 2-means on the dataset's own command
+   values, so no fixed 0..100 convention is assumed.
+3. **Events.** `detect_events(residual, baseline, z=4, min_frames=5)`
+   z-scores the scored joints, enters an event at `|z| >= z`, leaves at
+   `z/2`, bridges gaps of up to 3 frames and drops runs shorter than
+   `min_frames`. Each event carries the joints that crossed, the peak z,
+   the signed peak residual, and a kind: `contact` for a long one-sided
+   deviation, `anomaly` for a brief or sign-flipping one.
+4. **Proxy label.** The gripper command closing (open -> closed) marks a
+   grasp. `validate_episode` counts grasps whose +-15 frame window holds
+   an event (recall), events inside a grasp window (precision), events
+   far from any gripper transition, and the share of residual energy that
+   falls inside grasp windows against the share of frames there.
+
+```sh
+.venv/bin/antares events lerobot/svla_so101_pickplace --episode 8 --lock svla_so101_pickplace
+.venv/bin/antares events lerobot/svla_so101_pickplace --all --lock svla_so101_pickplace
+```
+
+`GET /api/residual?dataset=&episode=&lock=` returns `residual` and `z`
+as `(T, 6)` arrays in degrees, `events`, `gripper_cmd`, `grasps`,
+`releases`, `grasp_windows` and the `baseline`, so the UI can draw the
+residual on the timeline and flash the ghost when it separates from the
+real arm. `GET /api/events?dataset=&lock=` runs every episode and pools
+the validation.
+
+What the two demo datasets give, at `z=4`, `min_frames=5`, all 50
+episodes (held-out episodes in parentheses):
+
+| | SO-101 lock | SO-100 lock |
+|---|---|---|
+| grasps / events | 68 / 92 | 89 / 213 |
+| recall (grasps with an event in +-15 frames) | 100% (100%) | 57% (59%) |
+| precision (events in a grasp window) | 61% (55%) | 33% (34%) |
+| events far from any gripper transition | 21% | 44% |
+| residual energy inside grasp windows | 23% (22%) | 11% (10%) |
+| frames inside grasp windows (chance) | 18% (16%) | 14% (14%) |
+| lift | 1.29x (1.37x) | 0.79x (0.74x) |
+
+Read these with care. On the SO-101 the residual does concentrate around
+grasps, but weakly (1.3x chance), and the perfect recall comes from
+events that are long: the sim deviates by 3-5 deg on the elbow for the
+whole stretch where the arm is out over the table, from before the grasp
+until after the release, so one event covers both. On the SO-100 the
+residual is *less* concentrated in grasp windows than chance. In both
+datasets the dominant unmodelled effect is pose-dependent (the real elbow
+sags or lags differently when the arm is extended) rather than contact
+with a light object, and the free-motion baseline, estimated mostly on
+frames where the arm rests, makes every reach look like an excursion. The
+detector is a faithful "the sim and the robot disagree here" sensor; the
+claim that the disagreement *is* contact needs a baseline conditioned on
+pose and speed, or heavier objects, before it holds up. The gripper
+command is itself only a proxy: it also closes after a release, so some
+of the "false" positives and misses are label noise.
+
 ## Layout
 
 | Path | What |
@@ -317,6 +388,8 @@ the same episodes with 3 frames of extra lag or excursions scaled to 0.9
 
 | `antares/check.py` | Pre-deploy drift gate (`antares check`, `/api/check`) |
 | `action.yml` | Composite GitHub Action running the gate in CI |
+
+| `antares/events.py` | Contact events from the real-sim residual |
 | `antares/server.py` | FastAPI backend for the UI |
 | `examples/` | `randomize_env.py`: DR ranges in a training loop |
 | `web/` | React + three.js viewer |
