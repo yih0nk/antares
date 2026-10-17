@@ -6,6 +6,7 @@ import {
   type DatasetInfo,
   type EpisodeInfo,
   type Geometry,
+  type LockSummary,
   type Params,
   type Replay,
 } from "./api";
@@ -14,8 +15,10 @@ import { JointTrace } from "./Charts";
 
 // Layout: 3D viewer (real arm + ghost sim arm) on the left, gap panel on
 // the right, episode timeline along the bottom. The ghost is the simulator
-// replaying the real commands with the default parameters.
+// replaying the real commands with either the default parameters or a
+// saved robot lock.
 
+const DEFAULT = "default";
 const PARAM_KEYS: (keyof Params)[] = ["kp", "kv", "damping", "armature", "frictionloss", "latency_frames"];
 const SPEEDS = [0.25, 0.5, 1, 2];
 
@@ -65,7 +68,11 @@ export default function App() {
   const [episodes, setEpisodes] = useState<EpisodeInfo[]>([]);
   const [episode, setEpisode] = useState<number | null>(null);
   const [geometry, setGeometry] = useState<Geometry | null>(null);
+  const [locks, setLocks] = useState<LockSummary[]>([]);
+  const [ghost, setGhost] = useState<string>(DEFAULT);
   const [baseline, setBaseline] = useState<Replay | null>(null);
+  const [replay, setReplay] = useState<Replay | null>(null);
+  const [replayBusy, setReplayBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [playing, setPlaying] = useState(true);
   const [speed, setSpeed] = useState(1);
@@ -84,6 +91,7 @@ export default function App() {
       (e) => setError(`API unreachable: ${e.message}. Is \`antares serve\` running?`),
     );
     api.model().then(setGeometry, (e) => setError(`Could not load the arm model: ${e.message}`));
+    api.locks().then(setLocks, () => setLocks([]));
   }, []);
 
   // ---- dataset -> episodes ---------------------------------------------------
@@ -93,7 +101,9 @@ export default function App() {
     setDsState("loading");
     setEpisodes([]);
     setEpisode(null);
+    setReplay(null);
     setBaseline(null);
+    setGhost(DEFAULT);
     api
       .loadDataset(dataset)
       .then((info) => {
@@ -132,8 +142,29 @@ export default function App() {
     };
   }, [dataset, episode, playhead]);
 
+  // ---- ghost replay for a saved lock ----------------------------------------
+  useEffect(() => {
+    if (!dataset || episode == null) return;
+    if (ghost === DEFAULT) {
+      setReplay(baseline);
+      return;
+    }
+    let live = true;
+    setReplayBusy(true);
+    api
+      .replay(dataset, episode, ghost)
+      .then(
+        (r) => live && setReplay(r),
+        (e) => live && setError(`Replay with ${ghost} failed: ${e.message}`),
+      )
+      .finally(() => live && setReplayBusy(false));
+    return () => {
+      live = false;
+    };
+  }, [dataset, episode, ghost, baseline]);
+
   // ---- derived ---------------------------------------------------------------
-  const replay = baseline;
+  const dsLocks = locks.filter((l) => l.dataset === dataset);
   const fps = baseline?.fps ?? 30;
   const frames = baseline?.real_poses.length ?? 0;
   const ghostGap = replay?.gap ?? null;
@@ -141,12 +172,12 @@ export default function App() {
   const jointNames = baseline?.joints ?? [];
   const scored = new Set(baseGap?.scored_joints ?? []);
   const jIndex = Math.max(0, jointNames.indexOf(joint));
-  const maxJointErr = Math.max(1e-6, ...Object.values(ghostGap?.per_joint_deg ?? {}));
+  const maxJointErr = Math.max(1e-6, ...Object.values(baseGap?.per_joint_deg ?? {}), ...Object.values(ghostGap?.per_joint_deg ?? {}));
   const shownParams = replay?.params ?? null;
   const defaultParams = baseline?.params ?? null;
   const currentDs = datasets.find((d) => d.id === dataset);
 
-  const ghostLabel = "default sim";
+  const ghostLabel = ghost === DEFAULT ? "default sim" : `lock ${ghost}`;
 
   const seek = (f: number) => {
     playhead.frame = f;
@@ -208,6 +239,7 @@ export default function App() {
           </span>
           <span>
             <i className="swatch sim" /> sim ghost, {ghostLabel}
+            {replayBusy && <span className="dot" />}
           </span>
         </div>
 
@@ -236,6 +268,31 @@ export default function App() {
           <div className="score">{deg(ghostGap?.overall_deg)}</div>
           <div className="muted small">
             RMS joint error on episode {episode ?? "--"}, ghost = {ghostLabel}
+            {ghost !== DEFAULT && baseGap && (
+              <>
+                <br />
+                default sim was {deg(baseGap.overall_deg)}
+              </>
+            )}
+          </div>
+        </section>
+
+        <section>
+          <div className="label">Ghost parameters</div>
+          <div className="segmented">
+            <button className={ghost === DEFAULT ? "on" : ""} onClick={() => setGhost(DEFAULT)}>
+              Default
+            </button>
+            {dsLocks.map((l) => (
+              <button
+                key={l.name}
+                className={ghost === l.name ? "on" : ""}
+                onClick={() => setGhost(l.name)}
+                title={`created ${l.created_at}`}
+              >
+                {l.name}
+              </button>
+            ))}
           </div>
         </section>
 
@@ -243,6 +300,7 @@ export default function App() {
           <div className="label">Per joint</div>
           <div className="bars">
             {jointNames.map((j) => {
+              const b = baseGap?.per_joint_deg[j];
               const g = ghostGap?.per_joint_deg[j];
               return (
                 <button
@@ -253,6 +311,7 @@ export default function App() {
                 >
                   <span className="bar-name">{j}</span>
                   <span className="bar-track">
+                    {ghost !== DEFAULT && b != null && <span className="bar base" style={{ width: `${(b / maxJointErr) * 100}%` }} />}
                     {g != null && <span className="bar ghost" style={{ width: `${(g / maxJointErr) * 100}%` }} />}
                   </span>
                   <span className="bar-val">{deg(g, 1)}</span>
@@ -287,9 +346,6 @@ export default function App() {
             </table>
           </section>
         )}
-        <button className="cta" disabled>
-          Calibrate
-        </button>
       </aside>
 
       <footer className="timeline">

@@ -113,6 +113,23 @@ body {
   background: var(--sim);
 }
 
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--sim);
+  animation: pulse 0.9s ease-in-out infinite alternate;
+}
+
+@keyframes pulse {
+  from {
+    opacity: 0.2;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
 .overlay {
   position: absolute;
   inset: 0;
@@ -214,11 +231,23 @@ body {
   cursor: pointer;
 }
 
+.segmented button {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .speeds button.on,
 .segmented button.on {
   color: var(--text);
   border-color: var(--sim);
   background: #172036;
+}
+
+.segmented button:disabled:not(.on) {
+  opacity: 0.4;
+  cursor: default;
 }
 
 .icon {
@@ -312,6 +341,10 @@ body {
   bottom: 0;
   border-radius: 4px;
   transition: width 0.4s ease;
+}
+
+.bar.base {
+  background: #3a4256;
 }
 
 .bar.ghost {
