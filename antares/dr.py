@@ -334,11 +334,75 @@ def _json_float(v: float) -> float | None:
     return v if math.isfinite(v) else None
 
 
+def uniform_ranges(nominal: Any, frac: float = 0.3, name: str | None = None) -> DRRanges:
+    """The hand-picked alternative: ``nominal * [1 - frac, 1 + frac]`` per parameter.
+
+    Latency is widened to the rounded integer bounds. Useful as the baseline
+    data-derived ranges are compared against; it carries no provenance.
+    """
+    if not 0 <= frac < 1:
+        raise ValueError("frac must be in [0, 1)")
+    nominal = _as_params(nominal)
+    ranges = {}
+    for dim in DIMS:
+        v = float(getattr(nominal, dim))
+        scale = SPACE[dim][2]
+        lo, hi = v * (1 - frac), v * (1 + frac)
+        if scale == "int":
+            lo, hi = max(0, int(round(lo))), int(round(hi))
+        ranges[dim] = ParamRange(nominal=v, lo=min(lo, v), hi=max(hi, v), scale=scale)
+    return DRRanges(name=name or f"pm{int(round(frac * 100))}", nominal=nominal, ranges=ranges)
+
+
+# --------------------------------------------------------------------------
+# Sampling
+# --------------------------------------------------------------------------
+
+
+def sample(ranges: DRRanges, rng: np.random.Generator | int | None, n: int) -> list[SimParams]:
+    """Draw ``n`` parameter sets: log-uniform inside ``[lo, hi]`` for log-scale
+    parameters, uniform integers (inclusive) for latency.
+
+    Sets are drawn one at a time, so ``sample(r, rng, n)[:k]`` equals
+    ``sample(r, rng_copy, k)``: drawing in a loop or in a batch gives the
+    same sequence for the same generator state.
+    """
+    rng = np.random.default_rng(rng)
+    if n < 0:
+        raise ValueError("n must be >= 0")
+    out: list[SimParams] = []
+    for _ in range(n):
+        kwargs: dict[str, float | int] = {}
+        for dim in DIMS:
+            r = ranges[dim]
+            if r.scale == "int":
+                kwargs[dim] = int(rng.integers(int(r.lo), int(r.hi) + 1))
+            else:
+                kwargs[dim] = float(10 ** rng.uniform(math.log10(r.lo), math.log10(r.hi)))
+        out.append(SimParams(**kwargs))
+    return out
+
+
+def apply(arm: Any, params: SimParams) -> SimParams:
+    """Write ``params`` into ``arm`` (an :class:`antares.sim.Arm`) and return them."""
+    arm.apply(params)
+    return params
+
+
+def randomize(arm: Any, ranges: DRRanges, rng: np.random.Generator | int | None = None) -> SimParams:
+    """Sample one parameter set from ``ranges`` and apply it to ``arm``."""
+    return apply(arm, sample(ranges, rng, 1)[0])
+
+
 __all__ = [
     "DR_SUFFIX",
     "PERCENTILES",
     "DRRanges",
     "FitProgress",
     "ParamRange",
+    "apply",
     "bootstrap_fits",
+    "randomize",
+    "sample",
+    "uniform_ranges",
 ]

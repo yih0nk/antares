@@ -10,7 +10,17 @@ import pytest
 from test_calibrate import TRUE, fake_simulate, make_episodes
 
 from antares.calibrate import DIMS, SPACE, SimParams
-from antares.dr import DR_SUFFIX, DRRanges, FitProgress, ParamRange, bootstrap_fits
+from antares.dr import (
+    DR_SUFFIX,
+    DRRanges,
+    FitProgress,
+    ParamRange,
+    apply,
+    bootstrap_fits,
+    randomize,
+    sample,
+    uniform_ranges,
+)
 from antares.lock import LOCK_DIR
 
 # A plausible lock: close to TRUE, not exactly on it.
@@ -187,3 +197,66 @@ def test_ranges_nan_scores_serialise_as_null(fits):
     assert d["fit_train_scores"] == [None, 1.0]
     back = DRRanges.from_dict(json.loads(json.dumps(d)))
     assert math.isnan(back.fit_train_scores[0]) and back.fit_train_scores[1] == 1.0
+
+
+# --------------------------------------------------------------------------
+# sampling
+# --------------------------------------------------------------------------
+
+
+def test_sample_within_ranges_and_reproducible(fits):
+    dr = DRRanges.from_fits(fits, START, dataset="org/arm")
+    params = sample(dr, 7, 50)
+    assert len(params) == 50 and all(isinstance(p, SimParams) for p in params)
+    for p in params:
+        for dim in DIMS:
+            r = dr[dim]
+            v = getattr(p, dim)
+            assert r.lo <= v <= r.hi
+            if r.scale == "int":
+                assert isinstance(v, int)
+            else:
+                assert isinstance(v, float)
+    assert sample(dr, 7, 50) == params
+    assert sample(dr, 8, 50) != params
+    assert sample(dr, np.random.default_rng(7), 3) == params[:3]
+    assert sample(dr, None, 0) == []
+
+
+def test_sample_is_log_uniform():
+    r = ParamRange(nominal=10.0, lo=1.0, hi=100.0, scale="log")
+    dr = DRRanges(name="t", nominal=SimParams(kp=10.0), ranges={**uniform_ranges(SimParams()).ranges, "kp": r})
+    kp = np.array([p.kp for p in sample(dr, 0, 4000)])
+    assert np.median(np.log10(kp)) == pytest.approx(1.0, abs=0.05)  # geometric centre, not 50.5
+    assert np.mean(kp < 10) == pytest.approx(0.5, abs=0.03)
+
+
+def test_uniform_ranges_pm30():
+    nominal = SimParams(kp=100.0, kv=2.0, damping=0.5, armature=0.02, frictionloss=0.05, latency_frames=4)
+    dr = uniform_ranges(nominal, 0.3)
+    assert dr.name == "pm30" and dr.nominal == nominal and dr.n_fits == 0
+    assert dr["kp"].lo == pytest.approx(70.0) and dr["kp"].hi == pytest.approx(130.0)
+    assert dr["frictionloss"].hi == pytest.approx(0.065)
+    assert (dr["latency_frames"].lo, dr["latency_frames"].hi) == (3, 5)
+    assert all(r.samples == () for r in dr.ranges.values())
+    zero = uniform_ranges(SimParams(latency_frames=0), 0.3)
+    assert (zero["latency_frames"].lo, zero["latency_frames"].hi) == (0, 0)
+    assert sample(zero, 0, 3)[0].latency_frames == 0
+    with pytest.raises(ValueError):
+        uniform_ranges(nominal, 1.0)
+
+
+def test_apply_and_randomize(fits):
+    class FakeArm:
+        def __init__(self):
+            self.params = None
+
+        def apply(self, params):
+            self.params = params
+
+    dr = DRRanges.from_fits(fits, START, dataset="org/arm")
+    arm = FakeArm()
+    p = SimParams(kp=123.0)
+    assert apply(arm, p) is p and arm.params is p
+    q = randomize(arm, dr, 3)
+    assert arm.params == q == sample(dr, 3, 1)[0]
