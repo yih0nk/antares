@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import tempfile
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -23,7 +24,7 @@ from typing import Any, Callable, Iterator
 import numpy as np
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -231,6 +232,32 @@ def load_lock_dict(name: str) -> dict:
 def save_lock(lock) -> Path:
     """Write a RobotLock to ``LOCK_DIR/<name>.lock.json``."""
     return lock.save(_lock_path(str(lock.name)))
+
+
+def load_lock(name: str):
+    """``load_lock_dict`` parsed into a RobotLock."""
+    from antares.lock import RobotLock
+
+    try:
+        return RobotLock.from_dict(load_lock_dict(name))
+    except (KeyError, TypeError, ValueError) as e:
+        raise HTTPException(status_code=500, detail=f"lock {name!r} is malformed: {e}")
+
+
+def export_lock_xml(name: str) -> bytes:
+    """The calibrated MJCF for ``name`` as bytes (meshdir = package assets)."""
+    from antares.export import export_mjcf
+
+    lock = load_lock(name)
+    with tempfile.TemporaryDirectory() as tmp:
+        return export_mjcf(lock, Path(tmp) / f"{lock.name}.xml", bundle_assets=False).read_bytes()
+
+
+def export_lock_zip(name: str) -> bytes:
+    """``<name>/`` with the MJCF, sidecar, scene.xml and STL meshes, zipped."""
+    from antares.export import export_zip
+
+    return export_zip(load_lock(name))
 
 
 def lock_summary(lock: dict) -> dict:
@@ -575,6 +602,32 @@ def locks() -> list[dict]:
 @app.get("/api/locks/{name}")
 def lock_get(name: str) -> dict:
     return load_lock_dict(name)
+
+
+def _attachment(filename: str) -> dict[str, str]:
+    return {"Content-Disposition": f'attachment; filename="{filename}"'}
+
+
+@app.get("/api/locks/{name}/export")
+def lock_export(name: str) -> Response:
+    """Calibrated MJCF as a download. ``meshdir`` is the absolute package
+    assets dir; use ``export.zip`` for a self-contained bundle."""
+    return Response(
+        export_lock_xml(name),
+        media_type="application/xml",
+        headers=_attachment(f"{name}.xml"),
+    )
+
+
+@app.get("/api/locks/{name}/export.zip")
+def lock_export_zip(name: str) -> Response:
+    """Zip of ``<name>/<name>.xml``, ``<name>.antares.json``, ``scene.xml``
+    and ``assets/*.stl``."""
+    return Response(
+        export_lock_zip(name),
+        media_type="application/zip",
+        headers=_attachment(f"{name}.zip"),
+    )
 
 
 @app.delete("/api/locks/{name}")
