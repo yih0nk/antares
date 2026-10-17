@@ -80,6 +80,7 @@ export default function App() {
   const [datasets, setDatasets] = useState<DatasetInfo[]>([]);
   const [dataset, setDataset] = useState<string>("");
   const [dsState, setDsState] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [loadSeconds, setLoadSeconds] = useState(0);
   const [episodes, setEpisodes] = useState<EpisodeInfo[]>([]);
   const [episode, setEpisode] = useState<number | null>(null);
   const [geometry, setGeometry] = useState<Geometry | null>(null);
@@ -142,6 +143,16 @@ export default function App() {
       live = false;
     };
   }, [dataset]);
+
+  // The first load downloads the dataset's parquet files and the API reports
+  // no progress, so at least show that time is passing.
+  useEffect(() => {
+    if (dsState !== "loading") return;
+    const t0 = performance.now();
+    setLoadSeconds(0);
+    const id = setInterval(() => setLoadSeconds(Math.floor((performance.now() - t0) / 1000)), 1000);
+    return () => clearInterval(id);
+  }, [dsState]);
 
   // ---- baseline replay (real arm + default-params ghost) --------------------
   useEffect(() => {
@@ -368,11 +379,20 @@ export default function App() {
 
         {(dsState === "loading" || (!baseline && !error)) && (
           <div className="overlay">
-            {dsState === "loading"
-              ? currentDs?.loaded
-                ? "Loading episodes…"
-                : "Downloading the dataset from the Hugging Face Hub…"
-              : "Replaying episode…"}
+            {dsState === "loading" ? (
+              currentDs?.loaded ? (
+                "Loading episodes…"
+              ) : (
+                <div className="loading">
+                  <div>Downloading the dataset from the Hugging Face Hub… {loadSeconds}s</div>
+                  <div className="muted small">
+                    The first load of a dataset can take a couple of minutes. After that it is cached.
+                  </div>
+                </div>
+              )
+            ) : (
+              "Replaying episode…"
+            )}
           </div>
         )}
         {error && (
