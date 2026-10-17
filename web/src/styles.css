@@ -564,6 +564,96 @@ body {
   cursor: default;
 }
 
+.dot.light {
+  display: inline-block;
+  background: white;
+  margin-left: 4px;
+}
+
+/* ---- cross matrix modal ---- */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(5, 7, 11, 0.7);
+  display: grid;
+  place-items: center;
+  z-index: 10;
+  padding: 16px;
+}
+
+.modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px;
+  width: min(820px, 100%);
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.modal .row {
+  align-items: flex-start;
+}
+
+.modal .row:last-child {
+  align-items: center;
+}
+
+.modal .cta {
+  white-space: nowrap;
+}
+
+.cross-empty {
+  padding: 28px 0;
+  text-align: center;
+}
+
+.cross {
+  border-collapse: separate;
+  border-spacing: 3px;
+  font-size: 12px;
+  width: 100%;
+}
+
+.cross th {
+  color: var(--muted);
+  font-weight: 400;
+  text-align: left;
+  padding: 4px 6px;
+  vertical-align: bottom;
+  overflow-wrap: break-word;
+}
+
+.cross thead th {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 11px;
+}
+
+.cross th.corner {
+  font-family: Inter, system-ui, sans-serif;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+.cross td {
+  font-family: "JetBrains Mono", monospace;
+  text-align: center;
+  padding: 14px 8px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  color: var(--text);
+  min-width: 72px;
+}
+
+.cross td.own {
+  border-color: var(--text);
+  box-shadow: inset 0 0 0 1px var(--text);
+}
+
 @media (max-width: 800px) {
   .shell {
     grid-template-columns: 1fr;

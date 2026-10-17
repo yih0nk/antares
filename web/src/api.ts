@@ -123,6 +123,15 @@ export type Residual = {
   grasp_windows: number[][]; // [[start, end], ...]
 };
 
+// GET /api/cross: every lock (plus the default sim) scored on every dataset's
+// held-out split, RMS degrees.
+export type CrossMatrix = {
+  rows: string[]; // datasets
+  cols: string[]; // locks + "default"
+  scores: number[][]; // [row][col]
+  per_joint: Record<string, number>[][];
+};
+
 export type JobEvent =
   | ProgressEvent
   | { type: "done"; lock: { name: string; params: Params }; result: CalibrationResult }
@@ -181,6 +190,10 @@ export const api = {
     fetch(`/api/residual?${q(lock ? { dataset, episode, lock } : { dataset, episode })}`).then((r) =>
       json<Residual>(r),
     ),
+  cross: (datasets: string[], locks: string[], nTrain = 20, nEval = 10) =>
+    fetch(
+      `/api/cross?${q({ datasets: datasets.join(","), locks: locks.join(","), n_train: nTrain, n_eval: nEval })}`,
+    ).then((r) => json<CrossMatrix>(r)),
 };
 
 // antares.lock.slug(dataset) plus a timestamp, so a run from the UI never

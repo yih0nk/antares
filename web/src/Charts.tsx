@@ -126,6 +126,85 @@ export function ResidualStrip({ sum, events, grasps, frames, frame, onSeek }: Re
   );
 }
 
+type CrossProps = {
+  rows: string[];
+  cols: string[];
+  scores: number[][];
+  perJoint?: Record<string, number>[][];
+  // Which dataset each lock was fitted on; a lock on its own dataset is the
+  // diagonal and gets outlined.
+  home: Record<string, string>;
+};
+
+const GOOD = [0x5b, 0x8c, 0xff]; // --sim
+const MID = [0x4a, 0x52, 0x66]; // neutral between
+const BAD = [0xff, 0x8a, 0x5b]; // --warm
+
+function mix(a: number[], b: number[], t: number) {
+  return a.map((v, i) => Math.round(v + (b[i] - v) * t));
+}
+
+// Blue (good) through gray to warm (bad), positioned on a log scale over the
+// matrix's own range so a 6° default and a 0.7° lock both get a readable cell.
+function cellColor(v: number, lo: number, hi: number) {
+  const l = (x: number) => Math.log(Math.max(1e-3, x));
+  const t = hi > lo ? Math.min(1, Math.max(0, (l(v) - l(lo)) / (l(hi) - l(lo)))) : 0.5;
+  const c = t < 0.5 ? mix(GOOD, MID, t * 2) : mix(MID, BAD, (t - 0.5) * 2);
+  return `rgba(${c[0]}, ${c[1]}, ${c[2]}, 0.55)`;
+}
+
+const short = (id: string) => id.split("/").pop() ?? id;
+
+// Every lock scored on every dataset: a lock transfers poorly to another unit.
+export function CrossHeatmap({ rows, cols, scores, perJoint, home }: CrossProps) {
+  const flat = scores.flat().filter((v) => isFinite(v));
+  const lo = Math.min(...flat);
+  const hi = Math.max(...flat);
+  return (
+    <table className="cross">
+      <thead>
+        <tr>
+          <th className="corner">
+            dataset <span className="muted">↓</span> · lock <span className="muted">→</span>
+          </th>
+          {cols.map((c) => (
+            <th key={c} title={c === "default" ? "MJCF defaults, uncalibrated" : `lock ${c}, fitted on ${short(home[c] ?? "?")}`}>
+              {c === "default" ? "default sim" : c.replace(/_/g, "_​")}
+            </th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((r, i) => (
+          <tr key={r}>
+            <th title={r}>{short(r)}</th>
+            {cols.map((c, j) => {
+              const v = scores[i]?.[j];
+              const own = home[c] === r;
+              const pj = perJoint?.[i]?.[j];
+              const tip = pj
+                ? Object.entries(pj)
+                    .map(([k, d]) => `${k} ${d.toFixed(2)}°`)
+                    .join("\n")
+                : undefined;
+              return (
+                <td
+                  key={c}
+                  className={own ? "own" : ""}
+                  style={{ background: v != null ? cellColor(v, lo, hi) : undefined }}
+                  title={`${short(r)} × ${c}${own ? " (its own robot)" : ""}\n${tip ?? ""}`}
+                >
+                  {v == null ? "--" : `${v.toFixed(2)}°`}
+                </td>
+              );
+            })}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
 type SparkProps = {
   values: number[];
   total: number;

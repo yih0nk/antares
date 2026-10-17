@@ -5,6 +5,7 @@ import {
   api,
   lockNameFor,
   type CalibrationResult,
+  type CrossMatrix,
   type DatasetInfo,
   type EpisodeInfo,
   type Geometry,
@@ -17,7 +18,7 @@ import {
   type Residual,
 } from "./api";
 import { Arm, ghostMaterial, realMaterial, type Playhead } from "./Arm";
-import { JointTrace, ResidualStrip, Sparkline } from "./Charts";
+import { CrossHeatmap, JointTrace, ResidualStrip, Sparkline } from "./Charts";
 
 // Layout: 3D viewer (real arm + ghost sim arm) on the left, gap panel on
 // the right, episode timeline along the bottom. The ghost is the simulator
@@ -45,6 +46,8 @@ type Calibration = {
   result?: CalibrationResult;
   error?: string;
 };
+
+const short = (id: string) => id.split("/").pop() ?? id;
 
 const deg = (v: number | null | undefined, digits = 2) => (v == null || !isFinite(v) ? "--" : `${v.toFixed(digits)}°`);
 
@@ -126,6 +129,11 @@ export default function App() {
   const [calib, setCalib] = useState<Calibration | null>(null);
   const [perJoint, setPerJoint] = useState(false);
   const [residual, setResidual] = useState<Residual | null>(null);
+  const [crossOpen, setCrossOpen] = useState(false);
+  // Cached per (loaded datasets × saved locks); cleared when either changes.
+  const [cross, setCross] = useState<{ key: string; data: CrossMatrix } | null>(null);
+  const [crossBusy, setCrossBusy] = useState(false);
+  const [crossError, setCrossError] = useState<string | null>(null);
 
   const playhead = useMemo<Playhead>(() => ({ frame: 0 }), []);
 
@@ -347,8 +355,33 @@ export default function App() {
     // the stream's "done" event then selects that lock.
   };
 
+  // ---- cross matrix: every lock on every loaded dataset ----------------------
+  const loadedIds = datasets.filter((d) => d.loaded).map((d) => d.id);
+  const lockNames = locks.map((l) => l.name);
+  const crossKey = `${loadedIds.join(",")}|${lockNames.join(",")}`;
+  const crossData = cross?.key === crossKey ? cross.data : null;
+  const runCross = async () => {
+    setCrossBusy(true);
+    setCrossError(null);
+    try {
+      const data = await api.cross(loadedIds, lockNames);
+      setCross({ key: crossKey, data });
+    } catch (e) {
+      setCrossError((e as Error).message);
+    } finally {
+      setCrossBusy(false);
+    }
+  };
+  useEffect(() => {
+    if (!crossOpen) return;
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setCrossOpen(false);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [crossOpen]);
+
   // ---- derived ---------------------------------------------------------------
   const dsLocks = locks.filter((l) => l.dataset === dataset);
+  const lockHome = Object.fromEntries(locks.map((l) => [l.name, l.dataset]));
   const running = calib?.status === "running" || calib?.status === "cancelled";
   const fps = baseline?.fps ?? 30;
   const frames = baseline?.real_poses.length ?? 0;
@@ -603,6 +636,18 @@ export default function App() {
           )}
         </section>
 
+        <section>
+          <div className="label">Every robot is different</div>
+          <button className="cta secondary" onClick={() => setCrossOpen(true)} disabled={!locks.length}>
+            Compare locks across robots
+          </button>
+          <div className="muted small">
+            {loadedIds.length} dataset{loadedIds.length === 1 ? "" : "s"} loaded × {locks.length} lock
+            {locks.length === 1 ? "" : "s"}
+            {loadedIds.length < 2 && " · pick another dataset above to add a row"}
+          </div>
+        </section>
+
         {shownParams && defaultParams && (
           <section>
             <div className="label">Parameters</div>
@@ -632,6 +677,57 @@ export default function App() {
           </section>
         )}
       </aside>
+
+      {crossOpen && (
+        <div className="modal-backdrop" onClick={() => setCrossOpen(false)}>
+          <div className="modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
+            <div className="row">
+              <div>
+                <div className="label">Every robot is different</div>
+                <div className="muted small">
+                  Each saved lock replayed on each loaded dataset's held-out episodes (20 train / 10 eval, seed 0). RMS joint
+                  error in degrees; lower is better. The outlined cell is a lock on the robot it was fitted on.
+                </div>
+              </div>
+              <button className="icon" onClick={() => setCrossOpen(false)} aria-label="Close">
+                ×
+              </button>
+            </div>
+            {crossData ? (
+              <CrossHeatmap
+                rows={crossData.rows}
+                cols={crossData.cols}
+                scores={crossData.scores}
+                perJoint={crossData.per_joint}
+                home={lockHome}
+              />
+            ) : (
+              <div className="muted small cross-empty">
+                {crossBusy
+                  ? `Replaying ${loadedIds.length * (locks.length + 1)} lock × dataset pairs…`
+                  : "Nothing computed yet for this set of datasets and locks."}
+              </div>
+            )}
+            {crossError && <div className="bad small">{crossError}</div>}
+            <div className="row">
+              <span className="muted small">
+                {loadedIds.map(short).join(", ")} × {lockNames.join(", ")}, default
+              </span>
+              <button className="cta" onClick={runCross} disabled={crossBusy || !loadedIds.length}>
+                {crossBusy ? (
+                  <>
+                    Scoring… <span className="dot light" />
+                  </>
+                ) : crossData ? (
+                  "Run again"
+                ) : (
+                  "Run"
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <footer className="timeline">
         <div className="controls">
