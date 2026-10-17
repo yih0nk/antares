@@ -7,6 +7,12 @@
   --real: #e8eaf0;
   --sim: #5b8cff;
   --accent: #7c5cff;
+  /* where the sim disagrees with the arm */
+  --warm: #ff8a5b;
+  --contact: #ff8a5b;
+  --anomaly: #e2b35a;
+  /* the sim driven by lag-compensated commands */
+  --comp: #3fd6b8;
 }
 
 * {
@@ -29,7 +35,7 @@ body {
 .shell {
   display: grid;
   grid-template-columns: 1fr 320px;
-  grid-template-rows: 56px 1fr 140px;
+  grid-template-rows: 56px 1fr 190px;
   grid-template-areas:
     "top top"
     "viewer panel"
@@ -111,6 +117,33 @@ body {
 
 .swatch.sim {
   background: var(--sim);
+}
+
+.swatch.warm {
+  background: var(--warm);
+}
+
+.swatch.comp {
+  background: var(--comp);
+}
+
+.swatch.contact {
+  background: var(--contact);
+  opacity: 0.6;
+}
+
+.swatch.anomaly {
+  background: var(--anomaly);
+  opacity: 0.6;
+}
+
+.swatch.grasp {
+  background: var(--real);
+  opacity: 0.18;
+}
+
+.legend .warm {
+  color: var(--warm);
 }
 
 .dot {
@@ -290,6 +323,37 @@ body {
   stroke-width: 1;
 }
 
+.residual {
+  width: 100%;
+  height: 36px;
+  flex: none;
+  cursor: ew-resize;
+  touch-action: none;
+  border-top: 1px solid var(--border);
+}
+
+.res-area {
+  fill: var(--sim);
+  opacity: 0.45;
+}
+
+.res-grasp {
+  fill: var(--real);
+  opacity: 0.08;
+}
+
+.res-event {
+  opacity: 0.28;
+}
+
+.res-event.contact {
+  fill: var(--contact);
+}
+
+.res-event.anomaly {
+  fill: var(--anomaly);
+}
+
 .muted {
   color: var(--muted);
 }
@@ -404,6 +468,36 @@ body {
   stroke-width: 1;
 }
 
+.spark-stage {
+  stroke: var(--accent);
+  stroke-dasharray: 2 3;
+  stroke-width: 1;
+}
+
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.toggle.locked {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.toggle input {
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.toggle .muted {
+  margin-left: auto;
+  font-family: "JetBrains Mono", monospace;
+}
+
 .result {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -413,6 +507,20 @@ body {
 .result b {
   color: #9fd8a8;
   font-weight: 500;
+}
+
+.rms {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 8px;
+}
+
+.rms .good {
+  color: var(--comp);
+}
+
+.rms-note {
+  grid-column: 1 / -1;
 }
 
 .params {
@@ -476,10 +584,114 @@ body {
   cursor: default;
 }
 
+.export {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.export .cta {
+  padding: 6px 10px;
+  font-size: 12px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.dot.light {
+  display: inline-block;
+  background: white;
+  margin-left: 4px;
+}
+
+/* ---- cross matrix modal ---- */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(5, 7, 11, 0.7);
+  display: grid;
+  place-items: center;
+  z-index: 10;
+  padding: 16px;
+}
+
+.modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px;
+  width: min(820px, 100%);
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.modal .row {
+  align-items: flex-start;
+}
+
+.modal .row:last-child {
+  align-items: center;
+}
+
+.modal .cta {
+  white-space: nowrap;
+}
+
+.cross-empty {
+  padding: 28px 0;
+  text-align: center;
+}
+
+.cross {
+  border-collapse: separate;
+  border-spacing: 3px;
+  font-size: 12px;
+  width: 100%;
+}
+
+.cross th {
+  color: var(--muted);
+  font-weight: 400;
+  text-align: left;
+  padding: 4px 6px;
+  vertical-align: bottom;
+  overflow-wrap: break-word;
+}
+
+.cross thead th {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 11px;
+}
+
+.cross th.corner {
+  font-family: Inter, system-ui, sans-serif;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+.cross td {
+  font-family: "JetBrains Mono", monospace;
+  text-align: center;
+  padding: 14px 8px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  color: var(--text);
+  min-width: 72px;
+}
+
+.cross td.own {
+  border-color: var(--text);
+  box-shadow: inset 0 0 0 1px var(--text);
+}
+
 @media (max-width: 800px) {
   .shell {
     grid-template-columns: 1fr;
-    grid-template-rows: 56px 50vh 160px auto;
+    grid-template-rows: 56px 50vh 210px auto;
     grid-template-areas: "top" "viewer" "timeline" "panel";
     height: auto;
     min-height: 100%;

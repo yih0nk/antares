@@ -11,6 +11,8 @@ export type Params = {
   armature: ParamValue;
   frictionloss: ParamValue;
   latency_frames: ParamValue;
+  // Actuator force limit; searched by the per-joint stage only.
+  forcerange?: ParamValue;
 };
 
 export type DatasetInfo = {
@@ -70,6 +72,9 @@ export type LockSummary = {
 
 export type ProgressEvent = {
   type: "progress";
+  // Which CMA-ES search space produced this evaluation; `evaluation` keeps
+  // counting across stages.
+  stage: "shared" | "per_joint";
   evaluation: number;
   generation: number;
   candidate_score: number | null;
@@ -87,6 +92,59 @@ export type CalibrationResult = {
   baseline_eval_score: number;
   n_evaluations: number;
   elapsed_s: number;
+};
+
+export type ResidualEvent = {
+  start: number; // half-open [start, end) frame range
+  end: number;
+  joints: string[];
+  peak_z: number;
+  peak_deg: number;
+  kind: "contact" | "anomaly";
+};
+
+// GET /api/residual: real - sim per frame for one episode, with the events
+// where the sim disagrees with the arm and the gripper's grasp windows.
+export type Residual = {
+  dataset: string;
+  episode: number;
+  fps: number;
+  lock: string | null;
+  joints: string[];
+  scored_joints: string[];
+  z_threshold: number;
+  warmup_frames: number;
+  residual: number[][]; // (T, 6) deg
+  z: number[][]; // (T, 6)
+  events: ResidualEvent[];
+  gripper_cmd: number[];
+  grasps: number[];
+  releases: number[];
+  grasp_windows: number[][]; // [[start, end], ...]
+};
+
+// GET /api/compensate: commands that make the calibrated sim follow the real
+// trajectory, judged in the sim only (no hardware was driven).
+export type Compensation = {
+  dataset: string;
+  episode: number;
+  fps: number;
+  lock: string | null;
+  method: "shift" | "ilc";
+  validation: "sim-only";
+  note: string;
+  sim_comp_poses: number[][][]; // (T, nbody, 7)
+  rms: { raw: number; shift: number; ilc: number }; // deg, gripper excluded
+  ilc_iterations: number;
+};
+
+// GET /api/cross: every lock (plus the default sim) scored on every dataset's
+// held-out split, RMS degrees.
+export type CrossMatrix = {
+  rows: string[]; // datasets
+  cols: string[]; // locks + "default"
+  scores: number[][]; // [row][col]
+  per_joint: Record<string, number>[][];
 };
 
 export type JobEvent =
@@ -129,14 +187,34 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ dataset, episode, params }),
     }).then((r) => json<Replay>(r)),
-  calibrate: (dataset: string, name: string, maxEvaluations: number) =>
+  // `perJoint` adds the per-joint refinement stage after the shared fit.
+  calibrate: (dataset: string, name: string, maxEvaluations: number, perJoint?: { maxEvaluations: number }) =>
     fetch("/api/calibrate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ dataset, name, max_evaluations: maxEvaluations }),
+      body: JSON.stringify({
+        dataset,
+        name,
+        max_evaluations: maxEvaluations,
+        ...(perJoint ? { per_joint: true, per_joint_max_evaluations: perJoint.maxEvaluations } : {}),
+      }),
     }).then((r) => json<{ job_id: string }>(r)),
   cancel: (jobId: string) => fetch(`/api/calibrate/${jobId}/cancel`, { method: "POST" }).then((r) => json(r)),
   events: (jobId: string) => new EventSource(`/api/calibrate/${jobId}/events`),
+  residual: (dataset: string, episode: number, lock: string | null) =>
+    fetch(`/api/residual?${q(lock ? { dataset, episode, lock } : { dataset, episode })}`).then((r) =>
+      json<Residual>(r),
+    ),
+  compensate: (dataset: string, episode: number, lock: string | null, method: "shift" | "ilc" = "ilc") =>
+    fetch(`/api/compensate?${q(lock ? { dataset, episode, lock, method } : { dataset, episode, method })}`).then(
+      (r) => json<Compensation>(r),
+    ),
+  cross: (datasets: string[], locks: string[], nTrain = 20, nEval = 10) =>
+    fetch(
+      `/api/cross?${q({ datasets: datasets.join(","), locks: locks.join(","), n_train: nTrain, n_eval: nEval })}`,
+    ).then((r) => json<CrossMatrix>(r)),
+  // Zip of the lock as a standalone MJCF (model, sidecar, scene, meshes).
+  exportZipUrl: (lock: string) => `/api/locks/${encodeURIComponent(lock)}/export.zip`,
 };
 
 // antares.lock.slug(dataset) plus a timestamp, so a run from the UI never

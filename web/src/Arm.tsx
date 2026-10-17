@@ -20,14 +20,21 @@ type Props = {
   playhead: Playhead;
   material: THREE.Material;
   snapSeconds?: number;
+  // Half-open [start, end) frame spans where the arm runs warm: while the
+  // playhead is inside one, the material's emissive eases toward `warm`.
+  // Only meaningful for a MeshStandardMaterial.
+  hotSpans?: number[][] | null;
 };
+
+const WARM = new THREE.Color("#ff8a5b");
+const WARM_INTENSITY = 0.9;
 
 // MuJoCo quaternions are [w, x, y, z].
 const toQuat = (q: number[]) => new THREE.Quaternion(q[1], q[2], q[3], q[0]);
 
 const easeOut = (t: number) => 1 - Math.pow(1 - t, 3);
 
-export function Arm({ geometry, poses, clip, playhead, material, snapSeconds = 0.6 }: Props) {
+export function Arm({ geometry, poses, clip, playhead, material, snapSeconds = 0.6, hotSpans = null }: Props) {
   const files = useMemo(() => [...new Set(geometry.geoms.map((g) => g.mesh))], [geometry]);
   const loaded = useLoader(STLLoader, files.map(api.meshUrl));
   const meshes = useMemo(() => new Map(files.map((f, i) => [f, loaded[i]])), [files, loaded]);
@@ -54,10 +61,31 @@ export function Arm({ geometry, poses, clip, playhead, material, snapSeconds = 0
     [],
   );
 
-  useFrame(() => {
+  // The material's resting emissive, captured once so heat can ease back to it.
+  const std = material instanceof THREE.MeshStandardMaterial ? material : null;
+  const rest = useMemo(
+    () => (std ? { emissive: std.emissive.clone(), intensity: std.emissiveIntensity } : null),
+    [std],
+  );
+  const heat = useRef(0);
+  const spans = useRef<number[][] | null>(null);
+  spans.current = hotSpans;
+
+  useFrame((_, dt) => {
     const cur = shown.current;
     if (!cur || !cur.length) return;
     const f = Math.min(cur.length - 1, Math.max(0, Math.floor(playhead.frame)));
+    if (std && rest) {
+      const s = spans.current;
+      let hot = false;
+      if (s) for (let i = 0; i < s.length && !hot; i++) hot = f >= s[i][0] && f < s[i][1];
+      const target = hot ? 1 : 0;
+      const k = Math.min(1, dt * 8);
+      heat.current += (target - heat.current) * k;
+      if (Math.abs(heat.current - target) < 0.005) heat.current = target;
+      std.emissive.lerpColors(rest.emissive, WARM, heat.current);
+      std.emissiveIntensity = rest.intensity + (WARM_INTENSITY - rest.intensity) * heat.current;
+    }
     let alpha = 1;
     const tw = tween.current;
     if (tw.active && prev.current) {
@@ -116,6 +144,18 @@ export const realMaterial = new THREE.MeshStandardMaterial({
   color: "#d9dce4",
   roughness: 0.55,
   metalness: 0.1,
+});
+
+// The sim driven by lag-compensated commands: where the arm would go if it
+// were sent what the calibrated model says it needs.
+export const compMaterial = new THREE.MeshStandardMaterial({
+  color: "#3fd6b8",
+  emissive: "#1c8f78",
+  emissiveIntensity: 0.3,
+  roughness: 0.4,
+  transparent: true,
+  opacity: 0.3,
+  depthWrite: false,
 });
 
 export const ghostMaterial = new THREE.MeshStandardMaterial({

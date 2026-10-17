@@ -5,6 +5,8 @@ import {
   api,
   lockNameFor,
   type CalibrationResult,
+  type Compensation,
+  type CrossMatrix,
   type DatasetInfo,
   type EpisodeInfo,
   type Geometry,
@@ -14,9 +16,10 @@ import {
   type ParamValue,
   type ProgressEvent,
   type Replay,
+  type Residual,
 } from "./api";
-import { Arm, ghostMaterial, realMaterial, type Playhead } from "./Arm";
-import { JointTrace, Sparkline } from "./Charts";
+import { Arm, compMaterial, ghostMaterial, realMaterial, type Playhead } from "./Arm";
+import { CrossHeatmap, JointTrace, ResidualStrip, Sparkline } from "./Charts";
 
 // Layout: 3D viewer (real arm + ghost sim arm) on the left, gap panel on
 // the right, episode timeline along the bottom. The ghost is the simulator
@@ -25,20 +28,27 @@ import { JointTrace, Sparkline } from "./Charts";
 
 const DEFAULT = "default";
 const LIVE = "live";
-const PARAM_KEYS: (keyof Params)[] = ["kp", "kv", "damping", "armature", "frictionloss", "latency_frames"];
+const PARAM_KEYS: (keyof Params)[] = ["kp", "kv", "damping", "armature", "frictionloss", "latency_frames", "forcerange"];
 const SPEEDS = [0.25, 0.5, 1, 2];
 // CMA-ES budget for a UI run; also sizes the sparkline's x axis.
 const MAX_EVALUATIONS = 150;
+// Budget of the optional per-joint refinement stage (the API's default).
+const PER_JOINT_EVALUATIONS = 600;
 
 type Calibration = {
   jobId: string;
   name: string;
+  // Evaluations the run was asked for over all its stages; sizes the sparkline.
+  total: number;
+  perJoint: boolean;
   status: "running" | "done" | "error" | "cancelled";
   progress: ProgressEvent[];
   best: number[];
   result?: CalibrationResult;
   error?: string;
 };
+
+const short = (id: string) => id.split("/").pop() ?? id;
 
 const deg = (v: number | null | undefined, digits = 2) => (v == null || !isFinite(v) ? "--" : `${v.toFixed(digits)}°`);
 
@@ -118,6 +128,16 @@ export default function App() {
   const [frame, setFrame] = useState(0);
   const [joint, setJoint] = useState("shoulder_pan");
   const [calib, setCalib] = useState<Calibration | null>(null);
+  const [perJoint, setPerJoint] = useState(false);
+  const [residual, setResidual] = useState<Residual | null>(null);
+  const [crossOpen, setCrossOpen] = useState(false);
+  // Cached per (loaded datasets × saved locks); cleared when either changes.
+  const [cross, setCross] = useState<{ key: string; data: CrossMatrix } | null>(null);
+  const [crossBusy, setCrossBusy] = useState(false);
+  const [crossError, setCrossError] = useState<string | null>(null);
+  const [showComp, setShowComp] = useState(false);
+  const [comp, setComp] = useState<Compensation | null>(null);
+  const [compBusy, setCompBusy] = useState(false);
 
   const playhead = useMemo<Playhead>(() => ({ frame: 0 }), []);
 
@@ -213,6 +233,42 @@ export default function App() {
     };
   }, [dataset, episode, ghost, baseline]);
 
+  // ---- residual (real - sim) for the ghost's parameters ---------------------
+  // The strip follows whatever lock the ghost is showing; the live fit has no
+  // saved baseline to z-score against, so it keeps the last strip.
+  useEffect(() => {
+    if (!dataset || episode == null || ghost === LIVE) return;
+    let live = true;
+    setResidual(null);
+    api.residual(dataset, episode, ghost === DEFAULT ? null : ghost).then(
+      (r) => live && setResidual(r),
+      () => {}, // the strip is a bonus; replay errors are already reported
+    );
+    return () => {
+      live = false;
+    };
+  }, [dataset, episode, ghost]);
+
+  // ---- lag-compensated ghost (sim-validated only) ---------------------------
+  // ILC runs in the calibrated sim for the ghost's parameters; a few hundred
+  // ms per episode, so it is fetched only while the toggle is on.
+  useEffect(() => {
+    if (!showComp || !dataset || episode == null || ghost === LIVE) return;
+    let live = true;
+    setComp(null);
+    setCompBusy(true);
+    api
+      .compensate(dataset, episode, ghost === DEFAULT ? null : ghost)
+      .then(
+        (c) => live && setComp(c),
+        (e) => live && setError(`Lag compensation failed: ${e.message}`),
+      )
+      .finally(() => live && setCompBusy(false));
+    return () => {
+      live = false;
+    };
+  }, [showComp, dataset, episode, ghost]);
+
   // ---- live ghost while calibrating: replay the best params so far ----------
   // One request in flight at a time; when it lands, the newest best (if it
   // changed meanwhile) goes next. Each landing eases the ghost to the new fit.
@@ -258,13 +314,19 @@ export default function App() {
     setError(null);
     const name = lockNameFor(dataset);
     let jobId: string;
+    const total = MAX_EVALUATIONS + (perJoint ? PER_JOINT_EVALUATIONS : 0);
     try {
-      ({ job_id: jobId } = await api.calibrate(dataset, name, MAX_EVALUATIONS));
+      ({ job_id: jobId } = await api.calibrate(
+        dataset,
+        name,
+        MAX_EVALUATIONS,
+        perJoint ? { maxEvaluations: PER_JOINT_EVALUATIONS } : undefined,
+      ));
     } catch (e) {
       setError(`Could not start calibration: ${(e as Error).message}`);
       return;
     }
-    setCalib({ jobId, name, status: "running", progress: [], best: [] });
+    setCalib({ jobId, name, total, perJoint, status: "running", progress: [], best: [] });
     liveWanted.current = null;
     liveKey.current = "";
     setGhost(LIVE);
@@ -317,8 +379,33 @@ export default function App() {
     // the stream's "done" event then selects that lock.
   };
 
+  // ---- cross matrix: every lock on every loaded dataset ----------------------
+  const loadedIds = datasets.filter((d) => d.loaded).map((d) => d.id);
+  const lockNames = locks.map((l) => l.name);
+  const crossKey = `${loadedIds.join(",")}|${lockNames.join(",")}`;
+  const crossData = cross?.key === crossKey ? cross.data : null;
+  const runCross = async () => {
+    setCrossBusy(true);
+    setCrossError(null);
+    try {
+      const data = await api.cross(loadedIds, lockNames);
+      setCross({ key: crossKey, data });
+    } catch (e) {
+      setCrossError((e as Error).message);
+    } finally {
+      setCrossBusy(false);
+    }
+  };
+  useEffect(() => {
+    if (!crossOpen) return;
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setCrossOpen(false);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [crossOpen]);
+
   // ---- derived ---------------------------------------------------------------
   const dsLocks = locks.filter((l) => l.dataset === dataset);
+  const lockHome = Object.fromEntries(locks.map((l) => [l.name, l.dataset]));
   const running = calib?.status === "running" || calib?.status === "cancelled";
   const fps = baseline?.fps ?? 30;
   const frames = baseline?.real_poses.length ?? 0;
@@ -329,6 +416,7 @@ export default function App() {
   const jIndex = Math.max(0, jointNames.indexOf(joint));
   const maxJointErr = Math.max(1e-6, ...Object.values(baseGap?.per_joint_deg ?? {}), ...Object.values(ghostGap?.per_joint_deg ?? {}));
   const lastProgress = calib?.progress[calib.progress.length - 1];
+  const stageLabel = lastProgress?.stage === "per_joint" ? "per-joint refinement" : "fitting shared params";
   const shownParams = replay?.params ?? null;
   const defaultParams = baseline?.params ?? null;
   const currentDs = datasets.find((d) => d.id === dataset);
@@ -337,6 +425,15 @@ export default function App() {
   // The trace arrays only change with the replay or the joint, not per frame.
   const traceReal = useMemo(() => baseline?.real_q.map((r) => r[jIndex]) ?? [], [baseline, jIndex]);
   const traceSim = useMemo(() => (replay ?? baseline)?.sim_q.map((r) => r[jIndex]) ?? [], [replay, baseline, jIndex]);
+  // Summed |residual| over the scored joints (the gripper is not simulated).
+  const residualSum = useMemo(() => {
+    if (!residual) return [];
+    const cols = residual.scored_joints.map((j) => residual.joints.indexOf(j)).filter((i) => i >= 0);
+    return residual.residual.map((row) => cols.reduce((s, i) => s + Math.abs(row[i]), 0));
+  }, [residual]);
+  const hotSpans = useMemo(() => residual?.events.map((e) => [e.start, e.end]) ?? null, [residual]);
+  const inEvent = residual?.events.find((e) => frame >= e.start && frame < e.end);
+  const compPoses = showComp && ghost !== LIVE && comp ? comp.sim_comp_poses : null;
 
   const ghostLabel =
     ghost === DEFAULT ? "default sim" : ghost === LIVE ? "best fit so far" : `lock ${ghost}`;
@@ -387,7 +484,15 @@ export default function App() {
               {/* MuJoCo is z-up; three.js is y-up. */}
               <group rotation={[-Math.PI / 2, 0, 0]}>
                 <Arm geometry={geometry} poses={baseline?.real_poses ?? null} clip={clip} playhead={playhead} material={realMaterial} />
-                <Arm geometry={geometry} poses={replay?.sim_poses ?? null} clip={clip} playhead={playhead} material={ghostMaterial} />
+                <Arm
+                  geometry={geometry}
+                  poses={replay?.sim_poses ?? null}
+                  clip={clip}
+                  playhead={playhead}
+                  material={ghostMaterial}
+                  hotSpans={hotSpans}
+                />
+                <Arm geometry={geometry} poses={compPoses} clip={clip} playhead={playhead} material={compMaterial} />
               </group>
             </Suspense>
           )}
@@ -403,6 +508,18 @@ export default function App() {
             <i className="swatch sim" /> sim ghost, {ghostLabel}
             {replayBusy && <span className="dot" />}
           </span>
+          {showComp && ghost !== LIVE && (
+            <span>
+              <i className="swatch comp" /> sim with lag-compensated commands (sim-validated only)
+              {compBusy && <span className="dot" />}
+            </span>
+          )}
+          {inEvent && (
+            <span className="warm">
+              <i className="swatch warm" /> sim disagrees here: {inEvent.kind} on {inEvent.joints.join(", ")} (peak{" "}
+              {inEvent.peak_deg.toFixed(1)}°)
+            </span>
+          )}
         </div>
 
         {(dsState === "loading" || (!baseline && !error)) && (
@@ -471,6 +588,14 @@ export default function App() {
               </button>
             ))}
           </div>
+          {ghost !== DEFAULT && ghost !== LIVE && (
+            <div className="export">
+              <a className="cta secondary" href={api.exportZipUrl(ghost)} download={`${ghost}.zip`}>
+                Download MJCF
+              </a>
+              <span className="muted small">standalone MuJoCo model with the fitted physics</span>
+            </div>
+          )}
         </section>
 
         <section>
@@ -508,18 +633,29 @@ export default function App() {
               {calib?.status === "cancelled" ? "Stopping…" : "Stop and keep best fit"}
             </button>
           )}
+          <label className={`toggle ${running ? "locked" : ""}`} title="After the shared fit, refine one value per joint (7 params × 6 joints, +600 evaluations, about a minute)">
+            <input type="checkbox" checked={perJoint} disabled={running} onChange={(e) => setPerJoint(e.target.checked)} />
+            per-joint refinement
+            <span className="muted">+{PER_JOINT_EVALUATIONS} evals</span>
+          </label>
           {calib && (
             <div className="calib-body">
               <div className="row">
                 <span className="muted small">
-                  {calib.status === "running" && `fitting on train episodes · eval ${lastProgress?.evaluation ?? 0}`}
+                  {calib.status === "running" &&
+                    `${stageLabel} · eval ${lastProgress?.evaluation ?? 0}${calib.perJoint ? ` / ${calib.total}` : ""}`}
                   {calib.status === "cancelled" && "stopping after this generation"}
                   {calib.status === "done" && `saved as ${calib.name}`}
                   {calib.status === "error" && <span className="bad">{calib.error}</span>}
                 </span>
                 <span className="mono small">{deg(lastProgress?.best_score)}</span>
               </div>
-              <Sparkline values={calib.best.filter((v) => isFinite(v))} total={MAX_EVALUATIONS} baseline={calib.best[0]} />
+              <Sparkline
+                values={calib.best.filter((v) => isFinite(v))}
+                total={calib.total}
+                baseline={calib.best[0]}
+                stageAt={calib.perJoint ? MAX_EVALUATIONS : null}
+              />
               {calib.result && (
                 <div className="result">
                   <div>
@@ -540,6 +676,41 @@ export default function App() {
           )}
         </section>
 
+        <section>
+          <div className="label">Lag compensation</div>
+          <label className={`toggle ${running ? "locked" : ""}`} title="ILC in the calibrated sim: commands that make the model follow the real trajectory despite servo latency">
+            <input type="checkbox" checked={showComp} disabled={running} onChange={(e) => setShowComp(e.target.checked)} />
+            show lag-compensated commands
+          </label>
+          {showComp && (
+            <div className="rms">
+              {(["raw", "shift", "ilc"] as const).map((k) => (
+                <div key={k}>
+                  <span className="muted small">{k === "raw" ? "raw" : k === "shift" ? "shifted" : "ILC"}</span>
+                  <div className={`mono ${k === "ilc" && comp ? "good" : ""}`}>{compBusy ? "…" : deg(comp?.rms[k])}</div>
+                </div>
+              ))}
+              <div className="muted small rms-note">
+                RMS tracking error of the sim on the real trajectory: raw commands, commands shifted by the lock's latency,
+                and iterative learning control{comp && ` (${comp.ilc_iterations} iterations)`}. Sim-validated only: judged
+                in the calibrated MuJoCo model, no hardware driven.
+              </div>
+            </div>
+          )}
+        </section>
+
+        <section>
+          <div className="label">Every robot is different</div>
+          <button className="cta secondary" onClick={() => setCrossOpen(true)} disabled={!locks.length}>
+            Compare locks across robots
+          </button>
+          <div className="muted small">
+            {loadedIds.length} dataset{loadedIds.length === 1 ? "" : "s"} loaded × {locks.length} lock
+            {locks.length === 1 ? "" : "s"}
+            {loadedIds.length < 2 && " · pick another dataset above to add a row"}
+          </div>
+        </section>
+
         {shownParams && defaultParams && (
           <section>
             <div className="label">Parameters</div>
@@ -552,20 +723,74 @@ export default function App() {
                 </tr>
               </thead>
               <tbody>
-                {PARAM_KEYS.map((k) => (
-                  <tr key={k}>
-                    <td>{k}</td>
-                    <td>{fmtParam(k, defaultParams[k])}</td>
-                    <td className={sameParam(shownParams[k], defaultParams[k]) ? "" : "changed"}>
-                      {fmtParam(k, shownParams[k])}
-                    </td>
-                  </tr>
-                ))}
+                {PARAM_KEYS.map((k) => {
+                  const d = defaultParams[k];
+                  const g = shownParams[k];
+                  if (d == null || g == null) return null; // older locks have no forcerange
+                  return (
+                    <tr key={k}>
+                      <td>{k}</td>
+                      <td>{fmtParam(k, d)}</td>
+                      <td className={sameParam(g, d) ? "" : "changed"}>{fmtParam(k, g)}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </section>
         )}
       </aside>
+
+      {crossOpen && (
+        <div className="modal-backdrop" onClick={() => setCrossOpen(false)}>
+          <div className="modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
+            <div className="row">
+              <div>
+                <div className="label">Every robot is different</div>
+                <div className="muted small">
+                  Each saved lock replayed on each loaded dataset's held-out episodes (20 train / 10 eval, seed 0). RMS joint
+                  error in degrees; lower is better. The outlined cell is a lock on the robot it was fitted on.
+                </div>
+              </div>
+              <button className="icon" onClick={() => setCrossOpen(false)} aria-label="Close">
+                ×
+              </button>
+            </div>
+            {crossData ? (
+              <CrossHeatmap
+                rows={crossData.rows}
+                cols={crossData.cols}
+                scores={crossData.scores}
+                perJoint={crossData.per_joint}
+                home={lockHome}
+              />
+            ) : (
+              <div className="muted small cross-empty">
+                {crossBusy
+                  ? `Replaying ${loadedIds.length * (locks.length + 1)} lock × dataset pairs…`
+                  : "Nothing computed yet for this set of datasets and locks."}
+              </div>
+            )}
+            {crossError && <div className="bad small">{crossError}</div>}
+            <div className="row">
+              <span className="muted small">
+                {loadedIds.map(short).join(", ")} × {lockNames.join(", ")}, default
+              </span>
+              <button className="cta" onClick={runCross} disabled={crossBusy || !loadedIds.length}>
+                {crossBusy ? (
+                  <>
+                    Scoring… <span className="dot light" />
+                  </>
+                ) : crossData ? (
+                  "Run again"
+                ) : (
+                  "Run"
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <footer className="timeline">
         <div className="controls">
@@ -590,6 +815,10 @@ export default function App() {
           <span className="muted small trace-label">
             {joint}: <i className="swatch real" /> real <i className="swatch sim" /> sim
           </span>
+          <span className="muted small trace-label">
+            |real − sim| <i className="swatch contact" /> contact <i className="swatch anomaly" /> anomaly{" "}
+            <i className="swatch grasp" /> gripper closed
+          </span>
           <div className="speeds">
             {SPEEDS.map((s) => (
               <button key={s} className={s === speed ? "on" : ""} onClick={() => setSpeed(s)}>
@@ -599,7 +828,17 @@ export default function App() {
           </div>
         </div>
         {baseline && (
-          <JointTrace real={traceReal} sim={traceSim} frame={frame} onSeek={seek} />
+          <>
+            <JointTrace real={traceReal} sim={traceSim} frame={frame} onSeek={seek} />
+            <ResidualStrip
+              sum={residualSum}
+              events={residual?.events ?? []}
+              grasps={residual?.grasp_windows ?? []}
+              frames={frames}
+              frame={frame}
+              onSeek={seek}
+            />
+          </>
         )}
       </footer>
     </div>
