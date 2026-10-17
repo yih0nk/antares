@@ -333,6 +333,10 @@ export default function App() {
   const defaultParams = baseline?.params ?? null;
   const currentDs = datasets.find((d) => d.id === dataset);
 
+  // The trace arrays only change with the replay or the joint, not per frame.
+  const traceReal = useMemo(() => baseline?.real_q.map((r) => r[jIndex]) ?? [], [baseline, jIndex]);
+  const traceSim = useMemo(() => (replay ?? baseline)?.sim_q.map((r) => r[jIndex]) ?? [], [replay, baseline, jIndex]);
+
   const ghostLabel =
     ghost === DEFAULT ? "default sim" : ghost === LIVE ? "best fit so far" : `lock ${ghost}`;
 
@@ -594,12 +598,7 @@ export default function App() {
           </div>
         </div>
         {baseline && (
-          <JointTrace
-            real={baseline.real_q.map((r) => r[jIndex])}
-            sim={(replay ?? baseline).sim_q.map((r) => r[jIndex])}
-            frame={frame}
-            onSeek={seek}
-          />
+          <JointTrace real={traceReal} sim={traceSim} frame={frame} onSeek={seek} />
         )}
       </footer>
     </div>

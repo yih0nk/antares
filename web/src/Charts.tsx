@@ -2,6 +2,8 @@
 // width through viewBox + preserveAspectRatio="none" and keep strokes crisp
 // with vector-effect.
 
+import { useMemo } from "react";
+
 type TraceProps = {
   real: number[];
   sim: number[];
@@ -20,14 +22,22 @@ function path(values: number[], n: number, lo: number, hi: number, w: number, h:
   return d;
 }
 
+const W = 1000;
+const H = 100;
+
 export function JointTrace({ real, sim, frame, onSeek }: TraceProps) {
-  const W = 1000;
-  const H = 100;
-  const all = real.concat(sim);
-  const lo = Math.min(...all);
-  const hi = Math.max(...all);
-  const pad = (hi - lo) * 0.08 || 1;
   const n = Math.max(real.length, sim.length);
+  // The playhead moves every frame; the paths only change with the data.
+  const paths = useMemo(() => {
+    const all = real.concat(sim);
+    const lo = Math.min(...all);
+    const hi = Math.max(...all);
+    const pad = (hi - lo) * 0.08 || 1;
+    return {
+      real: path(real, n, lo - pad, hi + pad, W, H),
+      sim: path(sim, n, lo - pad, hi + pad, W, H),
+    };
+  }, [real, sim, n]);
   const x = (frame / Math.max(1, n - 1)) * W;
 
   const seek = (e: React.PointerEvent<SVGSVGElement>) => {
@@ -45,8 +55,8 @@ export function JointTrace({ real, sim, frame, onSeek }: TraceProps) {
       onPointerDown={seek}
       onPointerMove={seek}
     >
-      <path d={path(real, n, lo - pad, hi + pad, W, H)} className="trace-real" vectorEffect="non-scaling-stroke" />
-      <path d={path(sim, n, lo - pad, hi + pad, W, H)} className="trace-sim" vectorEffect="non-scaling-stroke" />
+      <path d={paths.real} className="trace-real" vectorEffect="non-scaling-stroke" />
+      <path d={paths.sim} className="trace-sim" vectorEffect="non-scaling-stroke" />
       <line x1={x} x2={x} y1={0} y2={H} className="trace-head" vectorEffect="non-scaling-stroke" />
     </svg>
   );
