@@ -3,10 +3,15 @@ lookups are injected."""
 
 from __future__ import annotations
 
+import json
+import math
+
+import numpy as np
 import pytest
 
 from antares import fleet
-from antares.fleet import Candidate, check_info, discover
+from antares.data import Dataset, Episode
+from antares.fleet import Candidate, FleetReport, RobotEntry, check_info, discover, plan_split, scan
 
 SO101_NAMES = [f"{j}.pos" for j in fleet.JOINTS]
 SO100_NAMES = [f"main_{j}" for j in fleet.JOINTS]
@@ -211,3 +216,180 @@ def test_discover_pinned_come_first_and_skip_owner_rule():
     # a pinned dataset missing from the search is still inspected
     cands = discover(limit=5, pinned=("ghost/arm",), search=search, fetch_info=get_info, fetch_size=get_size)
     assert cands[0].repo_id == "ghost/arm" and not cands[0].accepted
+
+
+# --------------------------------------------------------------------------
+# scan (toy simulator, no MuJoCo, no network)
+# --------------------------------------------------------------------------
+
+
+def toy_response(p, action, fps):
+    """First-order lag with a pure delay; dataset units treated as radians."""
+    dt = 1.0 / fps
+    tau = 20.0 * (p.kv + p.damping) / p.kp + p.armature
+    alpha = dt / (tau + dt)
+    out = np.empty_like(action)
+    out[0] = action[0]
+    for t in range(1, len(action)):
+        target = action[max(t - p.latency_frames, 0)]
+        out[t] = out[t - 1] + alpha * (target - out[t - 1])
+    return out
+
+
+def toy_simulate(params, ep):
+    return ep.state, toy_response(params, ep.action, ep.fps)
+
+
+def make_dataset(repo_id, n=12, T=40, fps=30.0, robot_type="so101_follower", seed=0, true=None):
+    from antares.sim import SimParams
+
+    true = true or SimParams(kp=300.0, kv=3.0, damping=1.0, armature=0.05, frictionloss=0.05, latency_frames=2)
+    rng = np.random.default_rng(seed)
+    t = np.arange(T) / fps
+    eps = []
+    for i in range(n):
+        action = np.zeros((T, 6))
+        for j in range(6):
+            action[:, j] = rng.uniform(-0.5, 0.5) * np.sin(2 * np.pi * rng.uniform(0.3, 1.0) * t + rng.uniform(0, 6))
+        eps.append(Episode(index=i, fps=fps, joint_names=fleet.JOINTS, state=toy_response(true, action, fps), action=action))
+    return Dataset(repo_id=repo_id, robot_type=robot_type, fps=fps, joint_names=fleet.JOINTS, episodes=tuple(eps))
+
+
+def cand(repo_id, accepted=True, **kw):
+    return Candidate(repo_id=repo_id, accepted=accepted, reason="" if accepted else "nope",
+                     robot_type="so101_follower", fps=30.0, n_episodes=12, **kw)
+
+
+def test_plan_split():
+    assert plan_split(50, 20, 10) == (20, 10)
+    assert plan_split(30, 20, 10) == (20, 10)
+    assert plan_split(15, 20, 10) == (10, 5)
+    assert plan_split(16, 20, 10) == (11, 5)
+    assert plan_split(2, 20, 10) == (1, 1)
+    with pytest.raises(ValueError):
+        plan_split(1, 20, 10)
+
+
+def test_lock_name():
+    assert fleet.lock_name("Some-User/so101 arm!") == "some-user__so101_arm"
+    assert fleet.lock_name("plain") == "plain"
+
+
+def test_load_with_retries_only_retries_network_errors():
+    calls = []
+
+    def flaky(rid):
+        calls.append(rid)
+        if len(calls) < 3:
+            raise ConnectionError("down")
+        return "ok"
+
+    waits = []
+    assert fleet.load_with_retries("a/b", flaky, retries=3, wait_s=1.0, sleep=waits.append) == "ok"
+    assert waits == [1.0, 2.0]
+
+    def bad(rid):
+        raise ValueError("corrupt")
+
+    with pytest.raises(ValueError):
+        fleet.load_with_retries("a/b", bad, retries=3, sleep=waits.append)
+    assert waits == [1.0, 2.0]  # no sleeps for a non-network error
+
+    def always_down(rid):
+        raise OSError("down")
+
+    with pytest.raises(OSError):
+        fleet.load_with_retries("a/b", always_down, retries=2, wait_s=0.5, sleep=waits.append)
+    assert waits[-1] == 0.5
+
+
+def test_scan_calibrates_each_robot_and_tolerates_failures(tmp_path):
+    datasets = {
+        "alice/so101_a": make_dataset("alice/so101_a", seed=1),
+        "carol/so101_c": make_dataset("carol/so101_c", n=15, seed=3),
+    }
+
+    def load(rid):
+        if rid == "bob/broken":
+            raise ValueError("no parquet data")
+        return datasets[rid]
+
+    events = []
+    cands = [cand("alice/so101_a", data_bytes=123, downloads=9), cand("bob/broken"),
+             cand("zed/koch", accepted=False), cand("carol/so101_c")]
+    rep = scan(cands, n_train=20, n_eval=10, max_evaluations=12, time_budget_s=600,
+               on_progress=events.append, lock_dir=tmp_path / "fleet", load=load, simulate=toy_simulate, retries=1)
+
+    assert [r.dataset for r in rep.robots] == ["alice/so101_a", "carol/so101_c"]
+    assert rep.failures == [{"dataset": "bob/broken", "error": "ValueError: no parquet data"}]
+    assert rep.rejected == [{"dataset": "zed/koch", "reason": "nope"}]
+    assert rep.skipped == []
+    a = rep.robots[0]
+    assert (a.n_train, a.n_eval) == (8, 4)  # 12 episodes: a third held out
+    assert rep.robots[1].n_train == 10 and rep.robots[1].n_eval == 5
+    assert a.robot_type == "so101_follower" and a.fps == 30.0 and a.n_episodes == 12
+    assert a.data_bytes == 123 and a.downloads == 9
+    assert a.n_evaluations == 12 and a.lock == "alice__so101_a"
+    assert set(a.params) >= {"kp", "kv", "latency_frames"}
+    assert a.calibrated_eval <= a.baseline_eval
+    assert a.improvement == pytest.approx(1 - a.calibrated_eval / a.baseline_eval)
+    assert a.latency_ms == pytest.approx(a.params["latency_frames"] / 30.0 * 1000)
+    assert set(a.per_joint_after) == set(fleet.JOINTS)
+
+    # locks on disk, loadable by the lock module, digest over the train split
+    from antares.lock import RobotLock
+
+    lock = RobotLock.load(tmp_path / "fleet" / "alice__so101_a.lock.json")
+    assert lock.dataset == "alice/so101_a" and lock.params.to_dict() == a.params
+    assert sorted(p.name for p in (tmp_path / "fleet").glob("*.lock.json")) == ["alice__so101_a.lock.json", "carol__so101_c.lock.json"]
+
+    # report saved and round-trips
+    saved = json.loads((tmp_path / "fleet" / "fleet.json").read_text())
+    assert saved["summary"]["n_robots"] == 2 and saved["summary"]["n_failed"] == 1
+    assert saved["settings"]["n_candidates"] == 3
+    back = FleetReport.load(tmp_path / "fleet" / "fleet.json")
+    assert [r.dataset for r in back.robots] == [r.dataset for r in rep.robots]
+    assert back.robots[0].params == a.params
+    assert back.to_dict()["robots"] == rep.to_dict()["robots"]
+
+    types_ = [e["type"] for e in events]
+    assert types_[0] == "start" and types_[-1] == "done"
+    assert types_.count("robot") == 2 and types_.count("failed") == 1 and "fit" in types_
+    assert events[-1]["summary"]["n_robots"] == 2
+
+
+def test_scan_stops_when_the_budget_is_spent(tmp_path, monkeypatch):
+    ds = make_dataset("alice/so101_a", seed=1)
+    clock = {"t": 0.0}
+
+    def monotonic():
+        clock["t"] += 100.0  # every call burns 100 s
+        return clock["t"]
+
+    monkeypatch.setattr(fleet.time, "monotonic", monotonic)
+    cands = [cand("alice/so101_a"), cand("bob/so101_b"), cand("carol/so101_c")]
+    rep = scan(cands, max_evaluations=2, time_budget_s=250, lock_dir=tmp_path, load=lambda rid: ds, simulate=toy_simulate)
+    assert [r.dataset for r in rep.robots] == ["alice/so101_a"]
+    assert [s["dataset"] for s in rep.skipped] == ["bob/so101_b", "carol/so101_c"]
+    assert all(s["reason"] == "time budget exhausted" for s in rep.skipped)
+    assert rep.elapsed_s > 0
+
+
+def test_scan_rejects_wrong_joints_and_unusable_episodes(tmp_path):
+    ds = make_dataset("a/x", seed=2)
+    wrong = Dataset(repo_id="a/x", robot_type="so101", fps=30.0, joint_names=tuple(reversed(fleet.JOINTS)), episodes=ds.episodes)
+    bad_ep = Episode(index=99, fps=30.0, joint_names=fleet.JOINTS, state=np.full((5, 6), np.nan), action=np.zeros((5, 6)))
+    short_ep = Episode(index=98, fps=30.0, joint_names=fleet.JOINTS, state=np.zeros((1, 6)), action=np.zeros((1, 6)))
+    dirty = Dataset(repo_id="b/y", robot_type="so101", fps=30.0, joint_names=fleet.JOINTS, episodes=ds.episodes + (bad_ep, short_ep))
+    loads = {"a/x": wrong, "b/y": dirty}
+    rep = scan([cand("a/x"), cand("b/y")], max_evaluations=2, lock_dir=tmp_path, load=lambda rid: loads[rid], simulate=toy_simulate)
+    assert [f["dataset"] for f in rep.failures] == ["a/x"] and "joints" in rep.failures[0]["error"]
+    assert rep.robots[0].dataset == "b/y" and rep.robots[0].n_episodes == 12  # the two unusable episodes dropped
+
+
+def test_robot_entry_nan_round_trip():
+    e = RobotEntry("a/x", "so101", 10, 30.0, 6, 4, float("nan"), 1.0, float("nan"), {"latency_frames": 3}, "a__x")
+    d = e.to_dict()
+    assert d["baseline_eval"] is None and d["latency_ms"] == pytest.approx(100.0)
+    back = RobotEntry.from_dict(json.loads(json.dumps(d)))
+    assert math.isnan(back.baseline_eval) and back.calibrated_eval == 1.0
