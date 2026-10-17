@@ -26,7 +26,7 @@ def test_help_exits_zero(capsys):
         cli.main(["--help"])
     assert e.value.code == 0
     out = capsys.readouterr().out
-    for cmd in ("serve", "inspect", "replay", "calibrate", "cross", "drift", "dr", "locks", "export", "check", "events", "compensate"):
+    for cmd in ("serve", "inspect", "replay", "calibrate", "cross", "drift", "dr", "locks", "export", "check", "events", "compensate", "fleet"):
         assert cmd in out
 
 
@@ -572,3 +572,77 @@ def test_events_all_summary(monkeypatch, capsys):
     assert "recall 75% (3/4 grasps hit)" in out
     assert "precision 60% (3/5 events in a grasp window)" in out
     assert "23%" in out and "18% of frames" in out and "lift 1.29x" in out
+
+
+FLEET_REPORT = {
+    "summary": {"n_robots": 2, "n_failed": 1, "n_skipped": 0, "n_rejected": 5, "median_improvement": 0.6},
+    "robots": [
+        {"dataset": "alice/so101_a", "robot_type": "so101_follower", "n_episodes": 50, "fps": 30.0,
+         "n_train": 20, "n_eval": 10, "lock": "alice__so101_a", "baseline_eval": 4.0, "calibrated_eval": 1.5, "improvement": 0.625, "latency_ms": 100.0,
+         "params": {"kp": 1200.0, "latency_frames": 3}},
+        {"dataset": "bob/so100_b", "robot_type": "so100", "n_episodes": 40, "fps": 30.0,
+         "n_train": 20, "n_eval": 10, "lock": "bob__so100_b", "baseline_eval": 3.0, "calibrated_eval": 1.2, "improvement": 0.6, "latency_ms": 66.7,
+         "params": {"kp": 800.0, "latency_frames": 2}},
+    ],
+    "stats": {"kp": {"median": 1000.0, "q25": 900.0, "q75": 1100.0, "min": 800.0, "max": 1200.0, "n": 2}},
+    "outliers": [{"dataset": "alice/so101_a", "param": "kp", "z": 2.7, "note": "kp 1.2e+03 is 1.2x the fleet median 1e+03"}],
+    "cross": {"rows": ["alice/so101_a", "bob/so100_b"], "cols": ["alice__so101_a", "bob__so100_b", "default"],
+              "scores": [[1.5, 2.5, 4.0], [2.0, 1.2, 3.0]],
+              "summary": {"n": 2, "mean_diagonal": 1.35, "mean_off_diagonal": 2.25, "mean_default": 3.5,
+                          "off_over_diagonal": 1.67, "default_over_diagonal": 2.59, "own_lock_is_best": 2}},
+    "failures": [{"dataset": "carol/broken", "error": "ValueError: no parquet data"}],
+}
+
+
+def test_fleet_list(tmp_path, capsys):
+    assert cli.main(["fleet", "list", "--path", str(tmp_path / "missing.json")]) == 1
+    assert "no fleet report" in capsys.readouterr().out
+
+    path = tmp_path / "fleet.json"
+    path.write_text(json.dumps(FLEET_REPORT))
+    assert cli.main(["fleet", "list", "--path", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "2 robots calibrated, 1 failed" in out and "median gap closed 60%" in out
+    assert "alice/so101_a" in out and "4.000" in out and "1.500" in out and "62%" in out
+    assert "3 (100 ms)" in out and "1200" in out
+    assert "fitted parameters" in out and "kp" in out
+    assert "outliers" in out and "+2.7" in out
+    assert "cross matrix" in out and "1.67x" in out and "own lock best for 2/2" in out
+    assert "carol/broken" in out
+
+
+def test_fleet_scan_wires_discover_and_scan(monkeypatch, capsys, tmp_path):
+    from antares import fleet
+
+    cands = [fleet.Candidate("alice/so101_a", True, robot_type="so101", n_episodes=50, data_bytes=2**20),
+             fleet.Candidate("zed/koch", False, "robot_type 'koch' is not an SO-100/101")]
+    seen = {}
+
+    def fake_discover(limit, max_inspect=None, on_progress=None):
+        seen["discover"] = (limit, max_inspect)
+        for c in cands:
+            on_progress(c)
+        return cands
+
+    def fake_scan(candidates, n_train, n_eval, max_evaluations, time_budget_s, on_progress, lock_dir, seed, cross_n):
+        seen["scan"] = (list(candidates), n_train, n_eval, max_evaluations, time_budget_s, lock_dir, seed, cross_n)
+        on_progress({"type": "start", "dataset": "alice/so101_a", "index": 0, "total": 1})
+        on_progress({"type": "fit", "dataset": "alice/so101_a", "evaluation": 25, "best_score": 2.0, "elapsed_s": 1.0})
+        on_progress({"type": "robot", "dataset": "alice/so101_a", "entry": {**FLEET_REPORT["robots"][0], "elapsed_s": 12.0}})
+        on_progress({"type": "failed", "dataset": "bob/x", "error": "boom"})
+        on_progress({"type": "skipped", "dataset": "carol/y", "reason": "time budget exhausted"})
+        on_progress({"type": "done", "summary": {}, "path": str(tmp_path / "fleet.json")})
+        return fleet.FleetReport.from_dict({**FLEET_REPORT, "created_at": "", "antares_version": ""})
+
+    monkeypatch.setattr(fleet, "discover", fake_discover)
+    monkeypatch.setattr(fleet, "scan", fake_scan)
+    assert cli.main(["fleet", "scan", "--limit", "7", "--budget-s", "90", "--max-evaluations", "5",
+                     "--lock-dir", str(tmp_path), "--cross-n", "3"]) == 0
+    out = capsys.readouterr().out
+    assert seen["discover"] == (7, None)
+    assert seen["scan"] == (cands, 20, 10, 5, 90.0, str(tmp_path), 0, 3)
+    assert "1 accepted, 1 rejected" in out and "koch" in out
+    assert "[1/1] alice/so101_a" in out and "eval   25" in out
+    assert "4.000 -> 1.500 deg (62% closed), latency 3 frames, kp 1200" in out
+    assert "FAILED bob/x: boom" in out and "skipped carol/y" in out and "saved" in out
+    assert "2 robots calibrated" in out  # final tables

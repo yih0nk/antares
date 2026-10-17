@@ -58,6 +58,11 @@ except Exception:  # module not written yet
 # Domain-randomization ranges live next to the locks as ``<name>.dr.json``.
 DR_SUFFIX = ".dr.json"
 
+
+# Fleet scan output: ``<FLEET_DIR>/fleet.json`` plus one lock per robot.
+FLEET_DIR: Path = Path(os.environ.get("ANTARES_FLEET_DIR", Path(LOCK_DIR) / "fleet"))
+FLEET_REPORT_NAME = "fleet.json"
+
 # Override for the STL directory (tests). None means MODEL_PATH.parent / "assets".
 MESH_DIR: Path | None = None
 
@@ -94,6 +99,12 @@ def get_dataset(repo_id: str) -> Dataset:
     with _DATASETS_LOCK:
         _DATASETS.setdefault(repo_id, ds)
         return _DATASETS[repo_id]
+
+
+def put_dataset(ds: Dataset) -> None:
+    """Register an already loaded dataset so ``get_dataset`` finds it."""
+    with _DATASETS_LOCK:
+        _DATASETS.setdefault(ds.repo_id, ds)
 
 
 def dataset_summary(repo_id: str) -> dict:
@@ -350,10 +361,10 @@ def events_summary(ds: Dataset, lock_name: str | None = None, z: float = 4.0, mi
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
-def _lock_path(name: str) -> Path:
+def _lock_path(name: str, lock_dir: Path | str | None = None) -> Path:
     if not _NAME_RE.match(name) or ".." in name:
         raise HTTPException(status_code=400, detail="invalid lock name")
-    return Path(LOCK_DIR) / f"{name}{LOCK_SUFFIX}"
+    return Path(lock_dir if lock_dir is not None else LOCK_DIR) / f"{name}{LOCK_SUFFIX}"
 
 
 def list_lock_dicts() -> list[dict]:
@@ -370,8 +381,8 @@ def list_lock_dicts() -> list[dict]:
     return out
 
 
-def load_lock_dict(name: str) -> dict:
-    p = _lock_path(name)
+def load_lock_dict(name: str, lock_dir: Path | str | None = None) -> dict:
+    p = _lock_path(name, lock_dir)
     if not p.is_file():
         raise HTTPException(status_code=404, detail=f"no lock named {name!r}")
     return json.loads(p.read_text())
@@ -865,14 +876,19 @@ def cross_matrix(
     n_train: int = 20,
     n_eval: int = 10,
     seed: int = 0,
+    lock_dir: Path | str | None = None,
 ) -> dict:
-    """Score every lock (and default params) on every dataset's eval split."""
+    """Score every lock (and default params) on every dataset's eval split.
+
+    Locks are read from ``lock_dir`` (default ``LOCK_DIR``); the fleet scan
+    passes its own ``locks/fleet`` directory.
+    """
     from antares.calibrate import split_episodes
 
     if n_train < 1:
         raise HTTPException(status_code=400, detail="n_train must be >= 1")
     cols = list(locks) + ["default"]
-    col_params = [params_from_dict(load_lock_dict(n)["params"]) for n in locks]
+    col_params = [params_from_dict(load_lock_dict(n, lock_dir)["params"]) for n in locks]
     col_params.append(default_params())
 
     scores: list[list[float]] = []
@@ -1323,6 +1339,30 @@ def drift_list() -> list[dict]:
 @app.get("/api/drift/{name}")
 def drift_get(name: str) -> dict:
     return load_drift_dict(name)
+
+
+def load_fleet_dict() -> dict:
+    """Contents of ``FLEET_DIR/fleet.json`` (the last fleet scan)."""
+    p = Path(FLEET_DIR) / FLEET_REPORT_NAME
+    if not p.is_file():
+        raise HTTPException(status_code=404, detail=f"no fleet report at {p}; run `antares fleet scan`")
+    try:
+        return json.loads(p.read_text())
+    except (OSError, ValueError) as e:
+        raise HTTPException(status_code=500, detail=f"unreadable fleet report: {e}")
+
+
+@app.get("/api/fleet")
+def fleet_report() -> dict:
+    return load_fleet_dict()
+
+
+@app.get("/api/fleet/cross")
+def fleet_cross() -> dict:
+    cross = load_fleet_dict().get("cross")
+    if not cross:
+        raise HTTPException(status_code=404, detail="the fleet report has no cross matrix")
+    return cross
 
 
 def _csv(s: str | None) -> list[str]:
