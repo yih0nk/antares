@@ -232,6 +232,11 @@ class Arm:
 
     # -- replay -------------------------------------------------------------
 
+    @property
+    def ctrl_range(self) -> tuple[np.ndarray, np.ndarray]:
+        """Actuator command limits ``(lo, hi)`` in radians, (6,) each (copies)."""
+        return self._ctrl_lo.copy(), self._ctrl_hi.copy()
+
     def real_q(self, episode: Episode) -> np.ndarray:
         """Measured joint positions in radians, (T,6)."""
         return self.unit_map.to_rad(episode.state)
@@ -241,28 +246,61 @@ class Arm:
 
         Frame 0 is the real initial state (the sim starts there, at rest).
         For each later frame the command from ``latency_frames`` frames ago
-        is applied and the physics is advanced one dataset frame.
+        is applied and the physics is advanced one dataset frame. This is
+        :meth:`rollout` with the episode's own commands and initial state.
         """
         fps = float(fps if fps is not None else episode.fps)
-        if fps <= 0:
-            raise ValueError("fps must be positive")
-        T = len(episode)
-        m, d = self.model, self.data
-        nq = m.nq
+        nq = self.model.nq
         if episode.state.shape[1] != nq or episode.action.shape[1] != nq:
             raise ValueError("episode must have 6 joints")
+        ctrl = self.unit_map.to_rad(episode.action)
+        q0 = self.unit_map.to_rad(episode.state[0])
+        return self.rollout(ctrl, q0, fps)
+
+    def rollout(
+        self,
+        ctrl_rad: np.ndarray,
+        q0_rad: np.ndarray,
+        fps: float,
+        latency_frames: int | None = None,
+    ) -> np.ndarray:
+        """Drive the sim with an arbitrary command sequence; return joint angles (T,6) rad.
+
+        ``ctrl_rad[t]`` is the command *sent* at frame ``t`` (radians; clipped
+        to the actuator ctrlrange). The servo applies the command sent
+        ``latency_frames`` frames earlier (default: the current
+        ``params.latency_frames``); frames before the first command arrives
+        hold ``ctrl_rad[0]``. The sim starts at rest at ``q0_rad``, which is
+        returned unchanged as row 0.
+        """
+        fps = float(fps)
+        if fps <= 0:
+            raise ValueError("fps must be positive")
+        m, d = self.model, self.data
+        nq = m.nq
+        ctrl = np.asarray(ctrl_rad, dtype=np.float64)
+        q0 = np.asarray(q0_rad, dtype=np.float64).reshape(-1)
+        if ctrl.ndim != 2 or ctrl.shape[1] != nq:
+            raise ValueError(f"ctrl_rad must be (T,{nq}), got {ctrl.shape}")
+        if q0.shape[0] != nq:
+            raise ValueError(f"q0_rad must have {nq} joints, got {q0.shape[0]}")
+        T = ctrl.shape[0]
+        if T == 0:
+            raise ValueError("ctrl_rad must have at least one frame")
+        latency = self.params.latency_frames if latency_frames is None else int(latency_frames)
+        if latency < 0:
+            raise ValueError("latency_frames must be >= 0")
 
         frame_dt = 1.0 / fps
         n_sub = max(1, int(round(frame_dt / self._base_timestep)))
 
-        ctrl = np.clip(self.unit_map.to_rad(episode.action), self._ctrl_lo, self._ctrl_hi)
+        ctrl = np.clip(ctrl, self._ctrl_lo, self._ctrl_hi)
         # Command index per frame with latency; frames before the first
         # command arrives hold the first command.
-        src = np.maximum(np.arange(T) - self.params.latency_frames, 0)
+        src = np.maximum(np.arange(T) - latency, 0)
         ctrl = np.ascontiguousarray(ctrl[src])
 
         sim_q = np.empty((T, nq), dtype=np.float64)
-        q0 = self.unit_map.to_rad(episode.state[0])
 
         old_dt = m.opt.timestep
         m.opt.timestep = frame_dt / n_sub

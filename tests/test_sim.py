@@ -209,6 +209,53 @@ def test_latency_shifts_response_later(arm):
     assert abs(s0[t_step + 4, 0] - q_start) > 1e-2
 
 
+def test_rollout_reproduces_replay(arm):
+    rng = np.random.default_rng(7)
+    n = 90
+    state = np.cumsum(rng.normal(0, 0.5, size=(n, 6)), axis=0)
+    state[:, 5] = np.abs(state[:, 5])
+    ep = make_episode(state, state + rng.normal(0, 1.0, size=(n, 6)))
+    for latency in (0, 4):
+        arm.apply(SimParams(latency_frames=latency))
+        ref = arm.replay(ep)
+        out = arm.rollout(arm.unit_map.to_rad(ep.action), arm.unit_map.to_rad(ep.state[0]), FPS)
+        np.testing.assert_array_equal(out, ref)
+        # explicit latency overrides the params' latency
+        arm.apply(SimParams(latency_frames=0))
+        out2 = arm.rollout(arm.unit_map.to_rad(ep.action), arm.unit_map.to_rad(ep.state[0]), FPS, latency_frames=latency)
+        np.testing.assert_array_equal(out2, ref)
+    arm.apply(SimParams())
+
+
+def test_rollout_shape_start_and_clipping(arm):
+    arm.apply(SimParams())
+    q0 = arm.unit_map.to_rad(np.array([0.0, -50.0, 40.0, 20.0, 0.0, 5.0]))
+    ctrl = np.tile(q0, (30, 1))
+    ctrl[:, 0] = 1e6  # far outside the ctrlrange -> clipped, not propagated
+    out = arm.rollout(ctrl, q0, FPS)
+    assert out.shape == (30, 6)
+    np.testing.assert_allclose(out[0], q0)
+    assert np.all(np.isfinite(out))
+    assert out[-1, 0] <= arm.ctrl_range[1][0] + 1e-6
+    assert arm.model.opt.timestep == pytest.approx(0.005)
+    lo, hi = arm.ctrl_range
+    assert lo.shape == (6,) and np.all(lo < hi)
+
+
+def test_rollout_rejects_bad_input(arm):
+    q0 = np.zeros(6)
+    with pytest.raises(ValueError):
+        arm.rollout(np.zeros((10, 5)), q0, FPS)
+    with pytest.raises(ValueError):
+        arm.rollout(np.zeros((10, 6)), np.zeros(5), FPS)
+    with pytest.raises(ValueError):
+        arm.rollout(np.zeros((0, 6)), q0, FPS)
+    with pytest.raises(ValueError):
+        arm.rollout(np.zeros((10, 6)), q0, 0.0)
+    with pytest.raises(ValueError):
+        arm.rollout(np.zeros((10, 6)), q0, FPS, latency_frames=-1)
+
+
 def test_apply_changes_model_arrays(arm):
     p = SimParams(kp=300.0, kv=1.5, damping=0.2, armature=0.01, frictionloss=0.0, latency_frames=1)
     arm.apply(p)
