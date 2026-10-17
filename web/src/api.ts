@@ -129,11 +129,11 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ dataset, episode, params }),
     }).then((r) => json<Replay>(r)),
-  calibrate: (dataset: string, name: string) =>
+  calibrate: (dataset: string, name: string, maxEvaluations: number) =>
     fetch("/api/calibrate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ dataset, name }),
+      body: JSON.stringify({ dataset, name, max_evaluations: maxEvaluations }),
     }).then((r) => json<{ job_id: string }>(r)),
   cancel: (jobId: string) => fetch(`/api/calibrate/${jobId}/cancel`, { method: "POST" }).then((r) => json(r)),
   events: (jobId: string) => new EventSource(`/api/calibrate/${jobId}/events`),

@@ -27,6 +27,8 @@ const DEFAULT = "default";
 const LIVE = "live";
 const PARAM_KEYS: (keyof Params)[] = ["kp", "kv", "damping", "armature", "frictionloss", "latency_frames"];
 const SPEEDS = [0.25, 0.5, 1, 2];
+// CMA-ES budget for a UI run; also sizes the sparkline's x axis.
+const MAX_EVALUATIONS = 150;
 
 type Calibration = {
   jobId: string;
@@ -257,7 +259,7 @@ export default function App() {
     const name = lockNameFor(dataset);
     let jobId: string;
     try {
-      ({ job_id: jobId } = await api.calibrate(dataset, name));
+      ({ job_id: jobId } = await api.calibrate(dataset, name, MAX_EVALUATIONS));
     } catch (e) {
       setError(`Could not start calibration: ${(e as Error).message}`);
       return;
@@ -512,7 +514,7 @@ export default function App() {
                 </span>
                 <span className="mono small">{deg(lastProgress?.best_score)}</span>
               </div>
-              <Sparkline values={calib.best.filter((v) => isFinite(v))} total={150} baseline={calib.best[0]} />
+              <Sparkline values={calib.best.filter((v) => isFinite(v))} total={MAX_EVALUATIONS} baseline={calib.best[0]} />
               {calib.result && (
                 <div className="result">
                   <div>
