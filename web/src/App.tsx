@@ -6,6 +6,7 @@ import {
   type DatasetInfo,
   type EpisodeInfo,
   type Geometry,
+  type Params,
   type Replay,
 } from "./api";
 import { Arm, ghostMaterial, realMaterial, type Playhead } from "./Arm";
@@ -15,9 +16,17 @@ import { JointTrace } from "./Charts";
 // the right, episode timeline along the bottom. The ghost is the simulator
 // replaying the real commands with the default parameters.
 
+const PARAM_KEYS: (keyof Params)[] = ["kp", "kv", "damping", "armature", "frictionloss", "latency_frames"];
 const SPEEDS = [0.25, 0.5, 1, 2];
 
 const deg = (v: number | null | undefined, digits = 2) => (v == null || !isFinite(v) ? "--" : `${v.toFixed(digits)}°`);
+
+function fmtParam(k: keyof Params, v: number) {
+  if (k === "latency_frames") return `${Math.round(v)} fr`;
+  if (Math.abs(v) >= 100) return v.toFixed(1);
+  if (Math.abs(v) >= 1) return v.toFixed(3);
+  return v.toFixed(4);
+}
 
 // Advances the shared playhead inside the render loop so playback never
 // waits on React; the UI copy of the frame is updated when it changes.
@@ -128,8 +137,13 @@ export default function App() {
   const fps = baseline?.fps ?? 30;
   const frames = baseline?.real_poses.length ?? 0;
   const ghostGap = replay?.gap ?? null;
+  const baseGap = baseline?.gap ?? null;
   const jointNames = baseline?.joints ?? [];
+  const scored = new Set(baseGap?.scored_joints ?? []);
   const jIndex = Math.max(0, jointNames.indexOf(joint));
+  const maxJointErr = Math.max(1e-6, ...Object.values(ghostGap?.per_joint_deg ?? {}));
+  const shownParams = replay?.params ?? null;
+  const defaultParams = baseline?.params ?? null;
   const currentDs = datasets.find((d) => d.id === dataset);
 
   const ghostLabel = "default sim";
@@ -217,8 +231,62 @@ export default function App() {
       </main>
 
       <aside className="panel">
-        <div className="label">Sim-to-real gap</div>
-        <div className="score">{deg(ghostGap?.overall_deg)}</div>
+        <section>
+          <div className="label">Sim-to-real gap</div>
+          <div className="score">{deg(ghostGap?.overall_deg)}</div>
+          <div className="muted small">
+            RMS joint error on episode {episode ?? "--"}, ghost = {ghostLabel}
+          </div>
+        </section>
+
+        <section>
+          <div className="label">Per joint</div>
+          <div className="bars">
+            {jointNames.map((j) => {
+              const g = ghostGap?.per_joint_deg[j];
+              return (
+                <button
+                  key={j}
+                  className={`bar-row ${j === joint ? "sel" : ""} ${scored.has(j) ? "" : "unscored"}`}
+                  onClick={() => setJoint(j)}
+                  title={scored.has(j) ? "" : "not scored (gripper contact isn't simulated)"}
+                >
+                  <span className="bar-name">{j}</span>
+                  <span className="bar-track">
+                    {g != null && <span className="bar ghost" style={{ width: `${(g / maxJointErr) * 100}%` }} />}
+                  </span>
+                  <span className="bar-val">{deg(g, 1)}</span>
+                </button>
+              );
+            })}
+          </div>
+        </section>
+
+        {shownParams && defaultParams && (
+          <section>
+            <div className="label">Parameters</div>
+            <table className="params">
+              <thead>
+                <tr>
+                  <th />
+                  <th>default</th>
+                  <th>ghost</th>
+                </tr>
+              </thead>
+              <tbody>
+                {PARAM_KEYS.map((k) => (
+                  <tr key={k}>
+                    <td>{k}</td>
+                    <td>{fmtParam(k, defaultParams[k])}</td>
+                    <td className={Math.abs(shownParams[k] - defaultParams[k]) > 1e-9 ? "changed" : ""}>
+                      {fmtParam(k, shownParams[k])}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </section>
+        )}
         <button className="cta" disabled>
           Calibrate
         </button>
