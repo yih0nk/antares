@@ -641,15 +641,17 @@ def cmd_specificity(args: argparse.Namespace) -> int:
 
 
 def _default_locks(server, datasets: list[str]) -> list[str]:
-    """The newest saved lock for each dataset."""
+    """The newest saved shared (not per-joint) lock for each dataset."""
     by_ds: dict[str, dict] = {}
     for l in server.list_lock_dicts():
         ds = l.get("dataset")
+        if any(isinstance(v, (list, tuple)) for v in l.get("params", {}).values()):
+            continue
         if ds in datasets and str(l.get("created_at", "")) >= str(by_ds.get(ds, {}).get("created_at", "")):
             by_ds[ds] = l
     missing = [d for d in datasets if d not in by_ds]
     if missing:
-        raise SystemExit(f"no saved lock for {', '.join(missing)}; run antares calibrate first")
+        raise SystemExit(f"no saved shared lock for {', '.join(missing)}; run antares calibrate first")
     return [by_ds[d]["name"] for d in datasets]
 
 

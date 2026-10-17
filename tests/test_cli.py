@@ -712,6 +712,7 @@ def test_specificity_writes_report(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(server, "list_lock_dicts", lambda: [
         {"name": "a-old", "dataset": "lab/a", "created_at": "2026-01-01"},
         {"name": "a-new", "dataset": "lab/a", "created_at": "2026-02-01"},
+        {"name": "a-perjoint", "dataset": "lab/a", "created_at": "2026-03-01", "params": {"kp": [1.0] * 6}},
         {"name": "b", "dataset": "lab/b", "created_at": "2026-01-01"},
     ])
     monkeypatch.setattr(server, "load_lock_dict", lambda n: {
@@ -732,5 +733,5 @@ def test_specificity_needs_a_lock_per_dataset(monkeypatch):
     from antares import server
 
     monkeypatch.setattr(server, "list_lock_dicts", lambda: [])
-    with pytest.raises(SystemExit, match="no saved lock for lab/a"):
+    with pytest.raises(SystemExit, match="no saved shared lock for lab/a"):
         cli.main(["specificity", "--datasets", "lab/a"])
