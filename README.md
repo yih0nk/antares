@@ -37,6 +37,33 @@ Inspect a dataset from the CLI:
 .venv/bin/antares inspect lerobot/svla_so101_pickplace
 ```
 
+### Export
+
+A calibration is saved as a lock (`locks/<name>.lock.json`). Export one as
+a standalone MJCF to use it in any MuJoCo / RL pipeline without Antares:
+
+```sh
+.venv/bin/antares locks                               # list saved locks
+.venv/bin/antares export svla_so101_pickplace         # -> export/svla_so101_pickplace/
+.venv/bin/antares export svla_so101_pickplace -o out/ --no-bundle   # meshdir -> package assets
+python -m mujoco.viewer --mjcf export/svla_so101_pickplace/scene.xml
+```
+
+The output directory holds:
+
+| File | What |
+|---|---|
+| `<name>.xml` | the SO-101 MJCF with the fitted `kp`/`kv`, `damping`/`armature`/`frictionloss` baked into the `sts3215` class, plus a header comment with the lock's provenance and held-out scores |
+| `<name>.antares.json` | sidecar: all params including `latency_frames` (MJCF cannot express command latency; delay each `ctrl` by this many dataset frames in your control loop), the dataset-unit -> radian map, scores |
+| `scene.xml` | the arm plus floor and light, for the viewer |
+| `assets/*.stl` | the meshes (omitted with `--no-bundle`, which points `meshdir` at the package's copy) |
+
+The same files come from the API: `GET /api/locks/<name>/export` is the XML
+as a download and `GET /api/locks/<name>/export.zip` is a zip of the whole
+directory. From Python, `antares.export.export_mjcf(lock, path)` /
+`export_scene(lock, dir)`; `load_exported_arm(path)` builds an `Arm` from
+an export, and its replay matches `Arm(params=lock.params)` to 1e-9.
+
 ## Layout
 
 | Path | What |
@@ -45,6 +72,8 @@ Inspect a dataset from the CLI:
 | `antares/sim.py` | MuJoCo model, unit mapping, replay |
 | `antares/calibrate.py` | CMA-ES parameter fit |
 | `antares/gap.py` | Tracking-error metrics |
+| `antares/lock.py` | Calibrated sim saved per robot as a lock file |
+| `antares/export.py` | Lock -> standalone MJCF, sidecar, scene, zip |
 | `antares/server.py` | FastAPI backend for the UI |
 | `web/` | React + three.js viewer |
 
