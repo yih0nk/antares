@@ -646,3 +646,22 @@ def test_fleet_scan_wires_discover_and_scan(monkeypatch, capsys, tmp_path):
     assert "4.000 -> 1.500 deg (62% closed), latency 3 frames, kp 1200" in out
     assert "FAILED bob/x: boom" in out and "skipped carol/y" in out and "saved" in out
     assert "2 robots calibrated" in out  # final tables
+
+
+def test_cross_prints_specificity_and_writes_json(monkeypatch, tmp_path, capsys):
+    from antares import server
+
+    m = {"rows": ["lab/a", "lab/b"], "cols": ["lock-a", "lock-b", "default"],
+         "scores": [[1.0, 2.0, 5.0], [3.0, 0.5, 4.0]], "per_joint": [[{}] * 3] * 2}
+    monkeypatch.setattr(server, "cross_matrix", lambda *a, **k: m)
+    monkeypatch.setattr(server, "load_lock_dict",
+                        lambda name: {"dataset": {"lock-a": "lab/a", "lock-b": "lab/b"}[name]})
+    out_path = tmp_path / "out" / "cross.json"
+    assert cli.main(["cross", "--datasets", "lab/a,lab/b", "--locks", "lock-a,lock-b",
+                     "--json", str(out_path)]) == 0
+    out = capsys.readouterr().out
+    assert "robot specificity" in out
+    assert "2.00x" in out and "6.00x" in out
+    saved = json.loads(out_path.read_text())
+    assert saved["specificity"]["all_specific"] is True
+    assert saved["matrix"]["cols"] == m["cols"]

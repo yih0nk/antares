@@ -165,6 +165,10 @@ def cmd_cross(args: argparse.Namespace) -> int:
     ]
     print("eval tracking RMSE (deg), rows = datasets, cols = locks")
     print(_table(["dataset"] + m["cols"], rows))
+    lock_datasets = {n: server.load_lock_dict(n).get("dataset", "") for n in locks}
+    summary = _print_specificity(m, lock_datasets)
+    if args.json:
+        _write_json(args.json, {"matrix": m, "specificity": summary})
     return 0
 
 
@@ -352,8 +356,6 @@ def cmd_check(args: argparse.Namespace) -> int:
     return EXIT_USAGE
 
 
-
-
 def _frac(v) -> str:
     return "-" if v is None else f"{100 * v:.0f}%"
 
@@ -512,6 +514,42 @@ def cmd_compensate(args: argparse.Namespace) -> int:
         np.save(args.out, cmds)
         print(f"saved {args.method} commands ({cmds.shape[0]}x{cmds.shape[1]}, dataset units) -> {args.out}")
     return 0
+
+
+def _print_specificity(m: dict, lock_datasets: dict[str, str]) -> dict:
+    """Print whether each dataset's own lock beats every other arm's lock."""
+    from antares.specificity import summarize_cross
+
+    s = summarize_cross(m, lock_datasets)
+    if not any(r["specific"] is not None for r in s["rows"]):
+        return s
+
+    def f(v):
+        return "-" if v is None else f"{v:.3f}"
+
+    rows = [
+        [
+            r["dataset"],
+            f"{r['own_lock'] or '-'} {f(r['own_score'])}",
+            f"{r['best_other_lock'] or '-'} {f(r['best_other_score'])}",
+            "-" if r["margin"] is None else f"{r['margin']:.2f}x",
+            {True: "yes", False: "NO", None: "-"}[r["specific"]],
+        ]
+        for r in s["rows"]
+    ]
+    print()
+    print("robot specificity (own lock vs best lock fitted on another dataset)")
+    print(_table(["dataset", "own lock", "best other lock", "margin", "own wins"], rows))
+    return s
+
+
+def _write_json(path: str, obj: dict) -> None:
+    import json
+    from pathlib import Path
+
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_text(json.dumps(obj, indent=2) + "\n")
+    print(f"wrote {path}")
 
 
 def cmd_locks(args: argparse.Namespace) -> int:
@@ -772,6 +810,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--n-train", type=int, default=20)
     p.add_argument("--n-eval", type=int, default=10)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--json", default=None, help="also write the matrix and summary here")
     p.set_defaults(func=cmd_cross)
 
     p = sub.add_parser("drift", help="refit a lock on sliding episode windows to spot drift")
