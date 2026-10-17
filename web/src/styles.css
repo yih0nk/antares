@@ -176,6 +176,12 @@ body {
   flex-wrap: wrap;
 }
 
+.trace-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .speeds,
 .segmented {
   display: flex;
@@ -210,6 +216,32 @@ body {
 .icon {
   width: 34px;
   color: var(--text);
+}
+
+.trace {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  cursor: ew-resize;
+  touch-action: none;
+}
+
+.trace path {
+  fill: none;
+  stroke-width: 1.5;
+}
+
+.trace-real {
+  stroke: var(--real);
+}
+
+.trace-sim {
+  stroke: var(--sim);
+}
+
+.trace-head {
+  stroke: var(--accent);
+  stroke-width: 1;
 }
 
 .muted {

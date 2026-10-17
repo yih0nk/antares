@@ -9,11 +9,13 @@ import {
   type Replay,
 } from "./api";
 import { Arm, ghostMaterial, realMaterial, type Playhead } from "./Arm";
+import { JointTrace } from "./Charts";
 
 // Layout: 3D viewer (real arm + ghost sim arm) on the left, gap panel on
 // the right, episode timeline along the bottom. The ghost is the simulator
 // replaying the real commands with the default parameters.
 
+const SPEEDS = [0.25, 0.5, 1, 2];
 
 const deg = (v: number | null | undefined, digits = 2) => (v == null || !isFinite(v) ? "--" : `${v.toFixed(digits)}°`);
 
@@ -57,7 +59,9 @@ export default function App() {
   const [baseline, setBaseline] = useState<Replay | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [playing, setPlaying] = useState(true);
+  const [speed, setSpeed] = useState(1);
   const [frame, setFrame] = useState(0);
+  const [joint, setJoint] = useState("shoulder_pan");
 
   const playhead = useMemo<Playhead>(() => ({ frame: 0 }), []);
 
@@ -124,9 +128,16 @@ export default function App() {
   const fps = baseline?.fps ?? 30;
   const frames = baseline?.real_poses.length ?? 0;
   const ghostGap = replay?.gap ?? null;
+  const jointNames = baseline?.joints ?? [];
+  const jIndex = Math.max(0, jointNames.indexOf(joint));
   const currentDs = datasets.find((d) => d.id === dataset);
 
   const ghostLabel = "default sim";
+
+  const seek = (f: number) => {
+    playhead.frame = f;
+    setFrame(Math.floor(f));
+  };
 
   return (
     <div className="shell">
@@ -173,7 +184,7 @@ export default function App() {
               </group>
             </Suspense>
           )}
-          <Driver playhead={playhead} playing={playing} fps={fps} frames={frames} speed={1} onFrame={setFrame} />
+          <Driver playhead={playhead} playing={playing} fps={fps} frames={frames} speed={speed} onFrame={setFrame} />
           <OrbitControls makeDefault target={[0, 0.16, 0]} />
         </Canvas>
 
@@ -233,7 +244,25 @@ export default function App() {
           <span className="mono small">
             {(frame / fps).toFixed(2)}s / {(frames / fps).toFixed(2)}s
           </span>
+          <span className="muted small trace-label">
+            {joint}: <i className="swatch real" /> real <i className="swatch sim" /> sim
+          </span>
+          <div className="speeds">
+            {SPEEDS.map((s) => (
+              <button key={s} className={s === speed ? "on" : ""} onClick={() => setSpeed(s)}>
+                {s}×
+              </button>
+            ))}
+          </div>
         </div>
+        {baseline && (
+          <JointTrace
+            real={baseline.real_q.map((r) => r[jIndex])}
+            sim={(replay ?? baseline).sim_q.map((r) => r[jIndex])}
+            frame={frame}
+            onSeek={seek}
+          />
+        )}
       </footer>
     </div>
   );
