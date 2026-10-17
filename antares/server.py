@@ -5,8 +5,8 @@ Heavy modules (``antares.sim``, ``antares.gap``, ``antares.calibrate``,
 ``antares.lock``) are imported lazily inside the functions that need them,
 so the app imports quickly and tests can stub them through ``sys.modules``.
 
-The pure helpers (``replay_episode``, ``run_calibration``, ``cross_matrix``,
-lock file I/O) are shared with the CLI.
+The pure helpers (``replay_episode``, ``run_calibration``, ``run_drift``,
+``cross_matrix``, lock and drift-scan file I/O) are shared with the CLI.
 """
 
 from __future__ import annotations
@@ -266,6 +266,117 @@ def build_lock(ds: Dataset, train: list, result, name: str | None):
         result=result,
         name=name,
     )
+
+
+def load_lock(name: str):
+    """The RobotLock object for ``name`` (404 if missing, 400 if the name is bad)."""
+    from antares.lock import RobotLock
+
+    return RobotLock.from_dict(load_lock_dict(name))
+
+
+# --------------------------------------------------------------------------
+# Drift scans (``LOCK_DIR/<lock>.drift.json``, one per lock)
+# --------------------------------------------------------------------------
+
+DRIFT_SUFFIX = ".drift.json"
+
+
+def _drift_path(name: str) -> Path:
+    if not _NAME_RE.match(name) or ".." in name:
+        raise HTTPException(status_code=400, detail="invalid lock name")
+    return Path(LOCK_DIR) / f"{name}{DRIFT_SUFFIX}"
+
+
+def load_drift_dict(name: str) -> dict:
+    p = _drift_path(name)
+    if not p.is_file():
+        raise HTTPException(status_code=404, detail=f"no drift scan for lock {name!r}")
+    return json.loads(p.read_text())
+
+
+def list_drift_dicts() -> list[dict]:
+    d = Path(LOCK_DIR)
+    if not d.is_dir():
+        return []
+    out = []
+    for p in sorted(d.glob(f"*{DRIFT_SUFFIX}")):
+        try:
+            out.append(json.loads(p.read_text()))
+        except (OSError, ValueError):
+            continue
+    out.sort(key=lambda s: str(s.get("created_at", "")), reverse=True)
+    return out
+
+
+def drift_summary(scan: dict) -> dict:
+    return {
+        "lock": scan.get("lock"),
+        "dataset": scan.get("dataset"),
+        "window": scan.get("window"),
+        "step": scan.get("step"),
+        "n_windows": len(scan.get("windows") or []),
+        "drifting": [k for k, v in (scan.get("drifting") or {}).items() if v],
+        "verdict": scan.get("verdict"),
+        "created_at": scan.get("created_at"),
+    }
+
+
+def run_drift(
+    ds: Dataset,
+    lock_name: str,
+    *,
+    window: int = 10,
+    step: int = 5,
+    max_evaluations: int = 60,
+    seed: int = 0,
+    on_progress: Callable[[Any], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
+) -> tuple[Any, Path]:
+    """Sliding-window refits of ``lock_name`` over ``ds``; saves and returns (DriftScan, path)."""
+    from antares.drift import drift_scan
+
+    lock = load_lock(lock_name)
+    path = _drift_path(lock_name)
+    try:
+        scan = drift_scan(
+            ds.episodes,
+            lock,
+            window=window,
+            step=step,
+            max_evaluations=max_evaluations,
+            seed=seed,
+            on_progress=on_progress,
+            should_stop=should_stop,
+        )
+    except ValueError as e:  # e.g. fewer episodes than one window
+        raise HTTPException(status_code=400, detail=str(e))
+    scan.save(path)
+    return scan, path
+
+
+def _drift_worker(job: Job, req: "DriftRequest") -> None:
+    try:
+        ds = get_dataset(req.dataset)
+
+        def on_progress(ev) -> None:
+            job.push({"type": "window", **ev.to_dict()})
+
+        scan, _ = run_drift(
+            ds,
+            req.lock,
+            window=req.window,
+            step=req.step,
+            max_evaluations=req.max_evaluations,
+            seed=req.seed,
+            on_progress=on_progress,
+            should_stop=job.stop.is_set,
+        )
+        scan_d = scan.to_dict()
+        job.push({"type": "done", "scan": scan_d})
+        job.finish("done", result=scan_d)
+    except Exception as e:  # noqa: BLE001 - report to the client
+        job_fail(job, e)
 
 
 # --------------------------------------------------------------------------
@@ -606,6 +717,32 @@ def lock_delete(name: str) -> dict:
         raise HTTPException(status_code=404, detail=f"no lock named {name!r}")
     p.unlink()
     return {"deleted": name}
+
+
+class DriftRequest(BaseModel):
+    dataset: str
+    lock: str
+    window: int = Field(10, ge=1)
+    step: int = Field(5, ge=1)
+    max_evaluations: int = Field(60, ge=1)
+    seed: int = 0
+
+
+@app.post("/api/drift")
+def drift_start(req: DriftRequest) -> dict:
+    load_lock_dict(req.lock)  # 400/404 before a thread is spent
+    job = start_job("drift", req.dataset, _drift_worker, req)
+    return {"job_id": job.id}
+
+
+@app.get("/api/drift")
+def drift_list() -> list[dict]:
+    return [drift_summary(s) for s in list_drift_dicts()]
+
+
+@app.get("/api/drift/{name}")
+def drift_get(name: str) -> dict:
+    return load_drift_dict(name)
 
 
 def _csv(s: str | None) -> list[str]:
