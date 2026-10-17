@@ -10,10 +10,9 @@ passes; otherwise something physical changed (servo wear, a loose belt, a
 recalibration) and the check fails, like a test suite failing before a
 deploy.
 
-Pure bookkeeping on top of :func:`antares.calibrate.score`; the simulator is
-injected as a ``simulate(params, episode) -> (real_q, sim_q)`` callable so
-this module does not import MuJoCo and the gate can be tested with a toy
-servo.
+Pure bookkeeping on top of :mod:`antares.gap`; the simulator is injected as
+a ``simulate(params, episode) -> (real_q, sim_q)`` callable so this module
+does not import MuJoCo and the gate can be tested with a toy servo.
 """
 
 from __future__ import annotations
@@ -242,9 +241,13 @@ def check(
             f"lock {name!r} has no finite eval score; pass threshold_deg to check against it"
         )
 
-    from antares.calibrate import default_simulate, score
+    from antares.gap import aggregate, tracking_error
 
-    report = score(params, eps, simulate if simulate is not None else default_simulate())
+    if simulate is None:
+        from antares.calibrate import default_simulate
+
+        simulate = default_simulate()
+    report = aggregate([tracking_error(*simulate(params, ep)) for ep in eps])
     overall = float(report.overall_deg)
     scored = tuple(report.scored_joints)
 
