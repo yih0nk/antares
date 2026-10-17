@@ -427,6 +427,94 @@ def cross_matrix(
 
 
 # --------------------------------------------------------------------------
+# Lag compensation (sim-only validation)
+# --------------------------------------------------------------------------
+
+COMPENSATE_METHODS = ("shift", "ilc")
+SIM_ONLY_NOTE = (
+    "Tracking is judged in the calibrated MuJoCo sim against the real measured "
+    "trajectory; no hardware was driven with these commands."
+)
+
+
+def _check_method(method: str) -> str:
+    if method not in COMPENSATE_METHODS:
+        raise HTTPException(
+            status_code=400, detail=f"method must be one of {list(COMPENSATE_METHODS)}, got {method!r}"
+        )
+    return method
+
+
+def compensate_episode_dict(
+    ds: Dataset, episode: int, params=None, method: str = "ilc", lock: str | None = None
+) -> dict:
+    """Raw vs shift vs ILC commands for one episode, judged in the calibrated sim.
+
+    The desired trajectory is the episode's real measured trajectory. Angles
+    are degrees; ``ctrl_comp``/``q_sim_comp`` follow ``method``. Poses of the
+    compensated ghost are included so the viewer can overlay it.
+    """
+    from antares.compensate import compensate_episode, max_joint_velocity
+    from antares.sim import JOINTS
+
+    _check_method(method)
+    ep = find_episode(ds, episode)
+    if params is None:
+        params = default_params()
+    arm = get_arm()
+    with _ARM_LOCK:
+        vmax = max_joint_velocity(ds.episodes, arm)
+        rep = compensate_episode(arm, ep, params, method=method, real_vmax_deg_s=vmax)
+        comp_poses = np.asarray(arm.fk(rep.q_sim_comp))
+        body_names = list(arm.body_names)
+    return {
+        "dataset": ds.repo_id,
+        "episode": ep.index,
+        "fps": rep.fps,
+        "joints": list(JOINTS),
+        "lock": lock,
+        "method": method,
+        "params": params.to_dict(),
+        "validation": "sim-only",
+        "note": SIM_ONLY_NOTE,
+        "q_des": _rounded(np.degrees(rep.q_des)),
+        "ctrl_raw": _rounded(np.degrees(rep.ctrl_raw)),
+        "ctrl_comp": _rounded(np.degrees(rep.ctrl_comp)),
+        "q_sim_raw": _rounded(np.degrees(rep.q_sim_raw)),
+        "q_sim_comp": _rounded(np.degrees(rep.q_sim_comp)),
+        "body_names": body_names,
+        "sim_comp_poses": _rounded(comp_poses),
+        "rms": {k: round(float(v), ROUND) for k, v in rep.rms.items()},
+        "gap": {"raw": rep.gap_raw.to_dict(), "shift": rep.gap_shift.to_dict(), "ilc": rep.gap_ilc.to_dict()},
+        "ilc_iterations": int(rep.ilc_iterations),
+        "ilc_history_deg": [round(float(h), ROUND) for h in rep.ilc_history_deg],
+        "feasibility": rep.feasibility,
+    }
+
+
+def compensate_heldout(ds: Dataset, lock_dict: dict, method: str = "ilc") -> dict:
+    """Aggregate raw/shift/ILC tracking over the lock's held-out episodes (sim-only)."""
+    from antares.compensate import compensate_episodes, held_out_episodes
+
+    _check_method(method)
+    eval_idx = (lock_dict.get("result") or {}).get("eval_episodes") or []
+    if not eval_idx:
+        raise HTTPException(status_code=400, detail="lock has no held-out episodes to evaluate on")
+    try:
+        episodes = held_out_episodes(ds, eval_idx)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    params = params_from_dict(lock_dict["params"])
+    arm = get_arm()
+    with _ARM_LOCK:
+        summary = compensate_episodes(arm, episodes, params, method=method)
+    out = summary.to_dict()
+    out.update(dataset=ds.repo_id, lock=lock_dict.get("name"), method=method, params=params.to_dict(),
+               validation="sim-only", note=SIM_ONLY_NOTE)
+    return out
+
+
+# --------------------------------------------------------------------------
 # App
 # --------------------------------------------------------------------------
 
@@ -500,6 +588,25 @@ def replay(
     out = replay_episode(ds, episode, params)
     out["lock"] = lock if (lock and not baseline) else None
     return out
+
+
+@app.get("/api/compensate")
+def compensate(
+    dataset: str = Query(...),
+    episode: int = Query(...),
+    lock: str | None = None,
+    method: str = Query("ilc", description="which compensated commands to return: shift | ilc"),
+) -> dict:
+    """Commands that make the calibrated sim track the episode's real trajectory.
+
+    Sim-only validation: ``rms`` compares each command set's sim rollout with
+    the real measured trajectory. Without ``lock`` the default parameters
+    (latency 0) are used and ``shift`` degenerates to the raw commands.
+    """
+    _check_method(method)
+    ds = get_dataset(dataset)
+    params = params_from_dict(load_lock_dict(lock)["params"]) if lock else None
+    return compensate_episode_dict(ds, episode, params, method=method, lock=lock or None)
 
 
 class CalibrateRequest(BaseModel):
