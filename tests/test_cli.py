@@ -26,7 +26,7 @@ def test_help_exits_zero(capsys):
         cli.main(["--help"])
     assert e.value.code == 0
     out = capsys.readouterr().out
-    for cmd in ("serve", "inspect", "replay", "calibrate", "cross", "locks"):
+    for cmd in ("serve", "inspect", "replay", "calibrate", "cross", "locks", "dr"):
         assert cmd in out
 
 
@@ -76,6 +76,45 @@ def test_locks_empty_and_listing(monkeypatch, tmp_path, capsys):
     out = capsys.readouterr().out
     assert "unit-a" in out and "fake/robot" in out
     assert "1.500" in out and "3.250" in out
+
+
+def test_dr_prints_ranges_table(monkeypatch, capsys, tmp_path):
+    from antares import server
+
+    ranges = {
+        "name": "robot", "lock": "robot", "percentiles": [5, 95],
+        "ranges": {
+            "kp": {"nominal": 100.0, "lo": 80.0, "hi": 150.0, "scale": "log", "samples": []},
+            "latency_frames": {"nominal": 4, "lo": 3, "hi": 5, "scale": "int", "samples": []},
+        },
+    }
+    seen = {}
+
+    def fake_run_dr(ds, lock, *, on_fit=None, **kw):
+        seen.update(lock=lock, **kw)
+        if on_fit is not None:
+            from antares.calibrate import SimParams
+
+            class R:
+                params = SimParams(kp=120.0)
+                train_score = 1.25
+
+            on_fit(0, R())
+        return None, ranges, tmp_path / "robot.dr.json"
+
+    monkeypatch.setattr(server, "_DATASETS", {"fake/robot": _dataset()})
+    monkeypatch.setattr(server, "run_dr", fake_run_dr)
+    assert cli.main(["dr", "fake/robot", "--n-fits", "3", "--seed", "7"]) == 0
+    out = capsys.readouterr().out
+    assert seen["lock"] == "robot"  # default lock is the dataset slug
+    assert seen["n_fits"] == 3 and seen["seed"] == 7 and seen["n_train"] == 12
+    assert "fit 1/3" in out and "1.250" in out
+    assert "kp" in out and "-20% .. +50%" in out
+    assert "latency_frames" in out and "-1 .. +1 frames" in out
+    assert "saved ranges robot" in out and "robot.dr.json" in out
+
+    assert cli.main(["dr", "fake/robot", "--lock", "unit-a", "--name", "unit-a-wide"]) == 0
+    assert seen["lock"] == "unit-a" and seen["name"] == "unit-a-wide"
 
 
 def test_replay_prints_table(monkeypatch, capsys):

@@ -138,6 +138,55 @@ def cmd_cross(args: argparse.Namespace) -> int:
     return 0
 
 
+def _ranges_table(ranges: dict) -> str:
+    """One row per parameter: nominal, lo, hi and the spread relative to nominal."""
+    rows = []
+    for name, r in ranges["ranges"].items():
+        nom, lo, hi = r["nominal"], r["lo"], r["hi"]
+        if r["scale"] == "int":
+            rows.append([name, str(nom), str(lo), str(hi), f"{lo - nom:+d} .. {hi - nom:+d} frames"])
+        else:
+            rel = f"{(lo / nom - 1) * 100:+.0f}% .. {(hi / nom - 1) * 100:+.0f}%"
+            rows.append([name, f"{nom:.4g}", f"{lo:.4g}", f"{hi:.4g}", rel])
+    return _table(["param", "nominal", "lo", "hi", "spread"], rows)
+
+
+def cmd_dr(args: argparse.Namespace) -> int:
+    from antares import server
+
+    ds = server.get_dataset(args.repo_id)
+    lock = args.lock or server._slug(ds.repo_id)
+    print(
+        f"deriving DR ranges for lock {lock} from {ds.repo_id}: {args.n_fits} fits x "
+        f"{args.n_train} episodes, up to {args.max_evaluations} evaluations each"
+    )
+
+    def on_fit(i, result) -> None:
+        p = result.params.to_dict()
+        print(
+            f"  fit {i + 1}/{args.n_fits}: train {result.train_score:6.3f} deg  "
+            f"kp {p['kp']:.1f}  kv {p['kv']:.2f}  latency {p['latency_frames']}",
+            flush=True,
+        )
+
+    _, ranges, path = server.run_dr(
+        ds,
+        lock,
+        n_fits=args.n_fits,
+        n_train=args.n_train,
+        max_evaluations=args.max_evaluations,
+        seed=args.seed,
+        name=args.name,
+        on_fit=on_fit,
+    )
+    pct = ranges["percentiles"]
+    print()
+    print(f"ranges (p{pct[0]:g}..p{pct[1]:g} of the fitted values, widened to the nominal):")
+    print(_ranges_table(ranges))
+    print(f"saved ranges {ranges['name']} -> {path}")
+    return 0
+
+
 def cmd_locks(args: argparse.Namespace) -> int:
     from antares import server
 
@@ -209,6 +258,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--n-eval", type=int, default=10)
     p.add_argument("--seed", type=int, default=0)
     p.set_defaults(func=cmd_cross)
+
+    p = sub.add_parser("dr", help="derive domain-randomization ranges from a lock's data")
+    p.add_argument("repo_id")
+    p.add_argument("--lock", default=None, help="lock to start from (default: dataset slug)")
+    p.add_argument("--n-fits", type=int, default=8, help="bootstrap refits")
+    p.add_argument("--n-train", type=int, default=12, help="episodes per refit")
+    p.add_argument("--max-evaluations", type=int, default=60)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--name", default=None, help="ranges name (default: lock name)")
+    p.set_defaults(func=cmd_dr)
 
     p = sub.add_parser("locks", help="list saved locks")
     p.set_defaults(func=cmd_locks)
