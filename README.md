@@ -37,6 +37,56 @@ Inspect a dataset from the CLI:
 .venv/bin/antares inspect lerobot/svla_so101_pickplace
 ```
 
+## Gate deploys on your robot's drift
+
+A lock is a snapshot of how one arm behaved on the day it was calibrated.
+Servos wear, belts loosen, someone recalibrates: the arm stops matching its
+sim, and a policy that passed in sim meets a different robot. `antares
+check` is the test suite for that. Record a few fresh episodes, replay them
+through the locked sim, and fail if the tracking error has grown past
+`max(--threshold, --ratio * <the lock's held-out score>)`:
+
+```sh
+# fresh logs from the Hub, or a LeRobot dataset directory you just recorded
+.venv/bin/antares check lerobot/svla_so101_pickplace --lock svla_so101_pickplace
+.venv/bin/antares check ./recordings/2026-10-17 --lock my_arm --last 10 --threshold 2
+```
+
+```
+joint          rmse (deg)  reference  limit  status
+-------------  ----------  ---------  -----  -----------------
+shoulder_pan   0.405       0.349      0.524  PASS  <- worst
+shoulder_lift  0.854       0.968      1.452  PASS
+elbow_flex     2.095       2.031      3.046  PASS
+...
+overall        1.067       1.054      1.582  PASS
+OK: lerobot/svla_so101_pickplace vs lock svla_so101_pickplace: 1.067 deg RMSE on 10 episodes (reference 1.054, limit 1.582)
+```
+
+Exit codes: `0` pass, `1` drifted, `2` usage error or too few episodes
+(`--min-episodes`, default 5). `--json` prints the full `CheckResult`. The
+same check is `POST /api/check` with
+`{"dataset", "lock", "threshold_deg"?, "ratio"?, "last"?}`.
+
+In CI, the repo is a composite GitHub Action. Point it at your dataset and
+lock and the job fails when the robot drifts:
+
+```yaml
+- uses: actions/checkout@v4
+- uses: your-org/antares@main
+  with:
+    dataset: your-org/so101_arm_a_daily   # or a directory in the workspace
+    lock: so101_arm_a                     # locks/so101_arm_a.lock.json
+    threshold: "2"                        # optional, degrees
+    last: "10"                            # optional, newest N episodes
+```
+
+`.github/workflows/robot-check.yml` is a working example (manual and
+weekly) against the public SO-101 dataset and the lock under `locks/`. The
+tests in `tests/test_check.py` prove the gate bites: real episodes pass,
+the same episodes with 3 frames of extra lag or excursions scaled to 0.9
+(a weak servo) fail.
+
 ## Layout
 
 | Path | What |
@@ -45,6 +95,9 @@ Inspect a dataset from the CLI:
 | `antares/sim.py` | MuJoCo model, unit mapping, replay |
 | `antares/calibrate.py` | CMA-ES parameter fit |
 | `antares/gap.py` | Tracking-error metrics |
+| `antares/lock.py` | Per-robot lock file: the calibrated sim, pinned |
+| `antares/check.py` | Pre-deploy drift gate (`antares check`, `/api/check`) |
+| `action.yml` | Composite GitHub Action running the gate in CI |
 | `antares/server.py` | FastAPI backend for the UI |
 | `web/` | React + three.js viewer |
 
