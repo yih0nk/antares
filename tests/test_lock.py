@@ -1,5 +1,6 @@
 import json
 import math
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -117,3 +118,71 @@ def test_list_locks(tmp_path):
     with pytest.warns(UserWarning, match="junk"):
         locks = list_locks(tmp_path)
     assert [lk.name for lk in locks] == ["a_arm", "b_arm"]
+
+
+# ---------------------------------------------------------------------------
+# the locks shipped in the repo (written before per-joint parameters existed)
+# ---------------------------------------------------------------------------
+
+REPO_LOCKS = Path(__file__).resolve().parent.parent / "locks"
+
+
+def test_shipped_locks_load_as_scalar_params():
+    paths = sorted(REPO_LOCKS.glob("svla_so10[01]_pickplace.lock.json"))
+    assert len(paths) == 2, "expected the SO-100 and SO-101 demo locks"
+    for path in paths:
+        raw = json.loads(path.read_text())
+        lock = RobotLock.load(path)
+        assert not lock.params.has_per_joint  # written as scalars, read as scalars
+        assert lock.params.forcerange == 2.94  # absent in the file: MJCF default
+        assert lock.params.to_dict() == {**raw["params"], "forcerange": 2.94}
+        assert lock.params == lock.result.params
+        # the lock survives a save/load round trip untouched
+        back = RobotLock.from_dict(json.loads(json.dumps(lock.to_dict())))
+        assert back == lock
+
+
+def _cached_dataset(repo_id: str):
+    """The real dataset from the local Hugging Face cache, or skip."""
+    import os
+
+    from antares.data import load_dataset
+
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    try:
+        return load_dataset(repo_id)
+    except Exception as exc:  # noqa: BLE001 - any download/cache problem means skip
+        pytest.skip(f"{repo_id} not in the local HF cache: {exc}")
+
+
+@pytest.mark.slow
+def test_so101_lock_replays_unchanged():
+    """The SO-101 lock must drive the sim exactly as it did when it was fitted.
+
+    The lock stores the held-out score computed at fit time; replaying the
+    same eval split with the loaded parameters has to reproduce it, and the
+    scalar and broadcast (per-joint tuple) forms must give the same sim
+    trajectory on episode 0.
+    """
+    from antares.calibrate import split_episodes
+    from antares.gap import aggregate, tracking_error
+    from antares.sim import Arm
+
+    lock = RobotLock.load(REPO_LOCKS / "svla_so101_pickplace.lock.json")
+    ds = _cached_dataset(lock.dataset)
+    assert ds.robot_type == lock.robot_type
+    train, eval_ = split_episodes(ds.episodes, 20, 10, seed=0)
+    assert [e.index for e in train] == lock.result.train_episodes
+    assert [e.index for e in eval_] == lock.result.eval_episodes
+    assert dataset_digest(train) == lock.data_sha256
+
+    arm = Arm(lock.params)
+    report = aggregate([tracking_error(arm.real_q(e), arm.replay(e)) for e in eval_])
+    assert report.overall_deg == pytest.approx(lock.result.eval_score, abs=1e-9)
+    for joint, deg in lock.result.per_joint_after.items():
+        assert report.per_joint_deg[joint] == pytest.approx(deg, abs=1e-9)
+
+    ep0 = ds.episodes[0]
+    scalar_q = arm.replay(ep0)
+    arm.apply(lock.params.broadcast())
+    np.testing.assert_array_equal(arm.replay(ep0), scalar_q)
