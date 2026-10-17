@@ -252,6 +252,7 @@ def lock_summary(lock: dict) -> dict:
         },
         "n_evaluations": res.get("n_evaluations"),
         "elapsed_s": res.get("elapsed_s"),
+        "space": res.get("space", "shared"),
     }
 
 
@@ -337,10 +338,16 @@ def run_calibration(
     max_evaluations: int = 150,
     seed: int = 0,
     name: str | None = None,
+    per_joint: bool = False,
+    per_joint_max_evaluations: int = 600,
     on_progress: Callable[[Any], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
 ) -> tuple[Any, dict, Path]:
-    """Calibrate on ``ds``, save a lock, return (CalibrationResult, lock dict, path)."""
+    """Calibrate on ``ds``, save a lock, return (CalibrationResult, lock dict, path).
+
+    ``per_joint`` adds the per-joint refinement stage after the shared fit,
+    with its own evaluation budget.
+    """
     from antares.calibrate import calibrate, split_episodes
 
     if n_train < 1:
@@ -348,6 +355,9 @@ def run_calibration(
     if name is not None:
         _lock_path(name)  # validate the name before spending minutes fitting
     train, eval_ = split_episodes(ds.episodes, n_train, n_eval, seed=seed)
+    extra: dict[str, Any] = {}
+    if per_joint:
+        extra = {"per_joint": True, "per_joint_max_evaluations": int(per_joint_max_evaluations)}
     result = calibrate(
         train,
         eval_,
@@ -356,6 +366,7 @@ def run_calibration(
         seed=seed,
         on_progress=on_progress,
         should_stop=should_stop,
+        **extra,
     )
     lock = build_lock(ds, train, result, name)
     path = save_lock(lock)
@@ -376,6 +387,8 @@ def _job_worker(job: Job, req: "CalibrateRequest") -> None:
             max_evaluations=req.max_evaluations,
             seed=req.seed,
             name=req.name,
+            per_joint=req.per_joint,
+            per_joint_max_evaluations=req.per_joint_max_evaluations,
             on_progress=on_progress,
             should_stop=job.stop.is_set,
         )
@@ -509,6 +522,10 @@ class CalibrateRequest(BaseModel):
     max_evaluations: int = Field(150, ge=1)
     seed: int = 0
     name: str | None = None
+    # Per-joint refinement after the shared fit; off by default so the live
+    # demo stays at ~150 evaluations.
+    per_joint: bool = False
+    per_joint_max_evaluations: int = Field(600, ge=1)
 
 
 @app.post("/api/calibrate")
