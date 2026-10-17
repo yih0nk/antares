@@ -26,7 +26,7 @@ def test_help_exits_zero(capsys):
         cli.main(["--help"])
     assert e.value.code == 0
     out = capsys.readouterr().out
-    for cmd in ("serve", "inspect", "replay", "calibrate", "cross", "locks", "export"):
+    for cmd in ("serve", "inspect", "replay", "calibrate", "cross", "drift", "locks", "export"):
         assert cmd in out
 
 
@@ -144,3 +144,39 @@ def test_export_missing_lock_is_an_error(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(server, "LOCK_DIR", tmp_path)
     assert cli.main(["export", "ghost"]) == 1
     assert "ghost" in capsys.readouterr().err
+
+def test_drift_prints_windows_trends_and_verdict(monkeypatch, capsys, tmp_path):
+    from types import SimpleNamespace
+
+    from antares import server
+
+    params = {"kp": 100.0, "kv": 2.0, "damping": 0.1, "armature": 0.02, "frictionloss": 0.05, "latency_frames": 3}
+    windows = []
+    for i, (lock, fit) in enumerate([(1.0, 0.9), (1.1, 0.9), (1.3, 0.9)]):
+        windows.append({"first": 5 * i, "last": 5 * i + 9, "lock_score": lock, "train_score": fit,
+                        "improvement": 1 - fit / lock, "params": {**params, "kp": 100.0 - 10 * i}})
+    trend = {"slope": 0.03, "r2": 0.95, "ci_lo": 0.01, "ci_hi": 0.05, "total_change": 0.3,
+             "log_space": False, "significant": True, "drifting": True}
+    flat = {**trend, "slope": 0.0, "ci_lo": -0.01, "total_change": 0.0, "significant": False, "drifting": False}
+    scan = {"lock_params": params, "windows": windows,
+            "trends": {"kp": {**flat, "log_space": True}, "lock_score": trend},
+            "verdict": "drift: lock_score +30% over the session (r²=0.95)"}
+    seen = {}
+
+    def fake_run_drift(ds, lock, *, window, step, max_evaluations, seed, on_progress=None, should_stop=None):
+        seen.update(lock=lock, window=window, step=step, max_evaluations=max_evaluations, seed=seed)
+        w = SimpleNamespace(first=0, last=9, lock_score=1.0, train_score=0.9, improvement=0.1)
+        on_progress(SimpleNamespace(index=0, n_windows=3, window=w, elapsed_s=2.0))
+        return SimpleNamespace(to_dict=lambda: scan), tmp_path / "unit-a.drift.json"
+
+    monkeypatch.setattr(server, "_DATASETS", {"fake/robot": _dataset()})
+    monkeypatch.setattr(server, "run_drift", fake_run_drift)
+    assert cli.main(["drift", "fake/robot", "--lock", "unit-a", "--window", "10", "--step", "5"]) == 0
+    assert seen == {"lock": "unit-a", "window": 10, "step": 5, "max_evaluations": 60, "seed": 0}
+    out = capsys.readouterr().out
+    assert "window  1/3" in out and "+10.0%" in out  # progress line
+    assert "0-9" in out and "10-19" in out and "1.300" in out and "+31%" in out  # window table
+    assert "kp" in out and "log10/ep" in out  # trend table, log-space param
+    assert "[+0.01, +0.05]" in out and "+30%" in out
+    assert "verdict: drift: lock_score +30%" in out
+    assert "unit-a.drift.json" in out

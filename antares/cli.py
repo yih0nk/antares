@@ -138,6 +138,79 @@ def cmd_cross(args: argparse.Namespace) -> int:
     return 0
 
 
+def _pct(v) -> str:
+    return "-" if v is None else f"{v:+.0%}"
+
+
+def _num(v, fmt: str = "{:.3f}") -> str:
+    return "-" if v is None else fmt.format(v)
+
+
+def cmd_drift(args: argparse.Namespace) -> int:
+    from antares import server
+
+    ds = server.get_dataset(args.repo_id)
+    print(
+        f"drift scan of lock {args.lock} over {ds.repo_id}: windows of {args.window} episodes, "
+        f"step {args.step}, up to {args.max_evaluations} evaluations each"
+    )
+
+    def on_progress(ev) -> None:
+        w = ev.window
+        print(
+            f"  window {ev.index + 1:2d}/{ev.n_windows}  episodes {w.first:3d}-{w.last:<3d}  "
+            f"lock {w.lock_score:6.3f}  refit {w.train_score:6.3f} deg  "
+            f"({w.improvement:+.1%})  [{ev.elapsed_s:.0f}s]",
+            flush=True,
+        )
+
+    scan, path = server.run_drift(
+        ds,
+        args.lock,
+        window=args.window,
+        step=args.step,
+        max_evaluations=args.max_evaluations,
+        seed=args.seed,
+        on_progress=on_progress,
+    )
+    s = scan.to_dict()
+    param_names = list(s["lock_params"])
+    rows = []
+    for w in s["windows"]:
+        p = w["params"]
+        rows.append(
+            [f"{w['first']}-{w['last']}", _num(w["lock_score"]), _num(w["train_score"]), _pct(w["improvement"])]
+            + [_num(p[k], "{:.4g}") for k in param_names]
+        )
+    rows.append(
+        ["lock", "-", "-", "-"] + [_num(s["lock_params"][k], "{:.4g}") for k in param_names]
+    )
+    print()
+    print("per window: the lock's static parameters vs a refit warm-started from them (RMSE, deg)")
+    print(_table(["episodes", "lock", "refit", "impr"] + param_names, rows))
+
+    trows = []
+    for k, t in s["trends"].items():
+        unit = "log10/ep" if t["log_space"] else "/ep"
+        trows.append(
+            [
+                k,
+                f"{_num(t['slope'], '{:+.4g}')} {unit}",
+                _num(t["r2"], "{:.2f}"),
+                f"[{_num(t['ci_lo'], '{:+.3g}')}, {_num(t['ci_hi'], '{:+.3g}')}]",
+                _pct(t["total_change"]),
+                "yes" if t["drifting"] else ("sig" if t["significant"] else "no"),
+            ]
+        )
+    print()
+    print(f"trends over the session (bootstrap 95% CI over {len(s['windows'])} windows)")
+    print(_table(["quantity", "slope", "r2", "slope 95% CI", "total", "drift"], trows))
+    print()
+    print(f"verdict: {s['verdict']}")
+    print(f"saved drift scan -> {path}")
+    return 0
+
+
 def cmd_locks(args: argparse.Namespace) -> int:
     from antares import server
 
@@ -239,6 +312,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--n-eval", type=int, default=10)
     p.add_argument("--seed", type=int, default=0)
     p.set_defaults(func=cmd_cross)
+
+    p = sub.add_parser("drift", help="refit a lock on sliding episode windows to spot drift")
+    p.add_argument("repo_id")
+    p.add_argument("--lock", required=True, help="lock whose parameters seed each window")
+    p.add_argument("--window", type=int, default=10, help="episodes per window")
+    p.add_argument("--step", type=int, default=5, help="episodes between window starts")
+    p.add_argument("--max-evaluations", type=int, default=60, help="CMA-ES budget per window")
+    p.add_argument("--seed", type=int, default=0)
+    p.set_defaults(func=cmd_drift)
 
     p = sub.add_parser("locks", help="list saved locks")
     p.set_defaults(func=cmd_locks)

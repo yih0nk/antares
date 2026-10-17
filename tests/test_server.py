@@ -194,6 +194,12 @@ class FakeLock:
         path.write_text(json.dumps(self.to_dict(), indent=2))
         return path
 
+    @classmethod
+    def from_dict(cls, d):
+        params = FakeParams.from_dict(d["params"])
+        return cls(d["name"], d["dataset"], d.get("robot_type", "?"), d["data_sha256"], params,
+                   FakeResult(params, FakeParams()), d["created_at"], d.get("antares_version", ""))
+
 
 def _module(name, **attrs):
     m = types.ModuleType(name)
@@ -225,7 +231,8 @@ def fakes(monkeypatch, tmp_path):
                   model_geometry=lambda model=None: {"bodies": [], "geoms": [], "joints": []})
     gap = _module("antares.gap", GapReport=FakeGap, tracking_error=fake_tracking_error,
                   aggregate=fake_aggregate)
-    cal = _module("antares.calibrate", calibrate=fake_calibrate, split_episodes=fake_split)
+    cal = _module("antares.calibrate", calibrate=fake_calibrate, split_episodes=fake_split,
+                  default_simulate=lambda: (lambda params, ep: (ep.state, ep.action)))
     lock = _module("antares.lock", RobotLock=FakeLock, dataset_digest=lambda eps: "deadbeef",
                    slug=lambda r: r.replace("/", "__"), LOCK_DIR=tmp_path / "locks",
                    LOCK_SUFFIX=LOCK_SUFFIX)
@@ -664,3 +671,77 @@ def test_lock_export_endpoints(monkeypatch, tmp_path):
     assert client.get("/api/locks/..%2Fx/export").status_code in (400, 404)
     (tmp_path / f"broken{LOCK_SUFFIX}").write_text(json.dumps({"name": "broken"}))
     assert client.get("/api/locks/broken/export").status_code == 500
+
+
+def test_drift_job_lifecycle(client, fakes):
+    write_lock(fakes, "unit-a", kp=50.0)
+    assert client.get("/api/drift").json() == []
+    assert client.get("/api/drift/unit-a").status_code == 404
+
+    r = client.post("/api/drift", json={"dataset": FAKE_DS, "lock": "unit-a", "window": 2, "step": 2,
+                                        "max_evaluations": 3})
+    assert r.status_code == 200, r.text
+    job_id = r.json()["job_id"]
+    with client.stream("GET", f"/api/jobs/{job_id}/events") as resp:
+        events = sse_events(resp)
+    assert [e["type"] for e in events] == ["window"] * 3 + ["done"]
+    assert [e["index"] for e in events[:3]] == [0, 1, 2]
+    assert all(e["n_windows"] == 3 for e in events[:3])
+    assert events[0]["window"]["episodes"] == [0, 1]
+    assert events[2]["window"]["episodes"] == [4, 5]
+    # fake_calibrate: train 1.0 vs the lock's 3.0 on every window
+    assert events[0]["window"]["train_score"] == 1.0
+    assert events[0]["window"]["lock_score"] == 3.0
+    assert events[0]["window"]["params"]["kp"] == 50.0
+
+    scan = events[-1]["scan"]
+    assert scan["lock"] == "unit-a" and scan["dataset"] == FAKE_DS
+    assert scan["window"] == 2 and scan["step"] == 2 and scan["n_windows_planned"] == 3
+    assert len(scan["windows"]) == 3 and scan["cancelled"] is False
+    assert set(scan["trends"]) >= {"kp", "latency_frames", "lock_score", "train_score"}
+    # constant fits -> nothing drifts
+    assert not any(scan["drifting"].values())
+    assert scan["verdict"].startswith("no parameter or score drifts")
+
+    st = client.get(f"/api/jobs/{job_id}").json()
+    assert st["kind"] == "drift" and st["status"] == "done"
+    assert st["result"]["lock"] == "unit-a" and "lock" not in st
+
+    # saved next to the lock, served back, and listed
+    path = fakes / "locks" / "unit-a.drift.json"
+    assert path.is_file()
+    assert client.get("/api/drift/unit-a").json() == json.loads(path.read_text())
+    listing = client.get("/api/drift").json()
+    assert len(listing) == 1 and listing[0]["lock"] == "unit-a"
+    assert listing[0]["n_windows"] == 3 and listing[0]["drifting"] == []
+    # the lock listing is unaffected by the sibling drift file
+    assert [l["name"] for l in client.get("/api/locks").json()] == ["unit-a"]
+
+
+def test_drift_rejects_bad_input(client, fakes):
+    write_lock(fakes, "unit-a", kp=50.0)
+    assert client.post("/api/drift", json={"dataset": FAKE_DS}).status_code == 422
+    assert client.post("/api/drift", json={"dataset": FAKE_DS, "lock": "unit-a", "window": 0}).status_code == 422
+    assert client.post("/api/drift", json={"dataset": FAKE_DS, "lock": "ghost"}).status_code == 404
+    assert client.post("/api/drift", json={"dataset": FAKE_DS, "lock": "../evil"}).status_code == 400
+    assert client.get("/api/drift/..").status_code in (400, 404)
+    # a window wider than the dataset is a 400 reported through the job
+    job_id = client.post("/api/drift", json={"dataset": FAKE_DS, "lock": "unit-a", "window": 50}).json()["job_id"]
+    with client.stream("GET", f"/api/jobs/{job_id}/events") as resp:
+        events = sse_events(resp)
+    assert len(events) == 1 and events[0]["type"] == "error"
+    assert "episodes" in events[0]["message"]
+    assert client.get(f"/api/jobs/{job_id}").json()["status"] == "error"
+    assert not (fakes / "locks" / "unit-a.drift.json").exists()
+
+
+def test_generic_job_routes_alias_calibrate(client, fakes):
+    job_id = client.post("/api/calibrate", json={"dataset": FAKE_DS, "n_train": 4, "n_eval": 2}).json()["job_id"]
+    with client.stream("GET", f"/api/jobs/{job_id}/events") as resp:
+        events = sse_events(resp)
+    assert events[-1]["type"] == "done"
+    st = client.get(f"/api/jobs/{job_id}").json()
+    assert st["kind"] == "calibrate" and st["status"] == "done"
+    assert st == client.get(f"/api/calibrate/{job_id}").json()
+    assert client.post(f"/api/jobs/{job_id}/cancel").json()["cancelled"] is True
+    assert client.get("/api/jobs/nope").status_code == 404
