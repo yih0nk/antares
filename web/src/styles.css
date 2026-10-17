@@ -1,0 +1,125 @@
+:root {
+  --bg: #0b0d12;
+  --surface: #12151d;
+  --border: #1f2533;
+  --text: #e6e9f0;
+  --muted: #8a93a6;
+  --real: #e8eaf0;
+  --sim: #5b8cff;
+  --accent: #7c5cff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: Inter, system-ui, sans-serif;
+}
+
+.shell {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  grid-template-rows: 56px 1fr 140px;
+  grid-template-areas:
+    "top top"
+    "viewer panel"
+    "timeline panel";
+  height: 100%;
+}
+
+.topbar {
+  grid-area: top;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.tagline {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.picker {
+  margin-left: auto;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font: inherit;
+  font-size: 13px;
+}
+
+.viewer {
+  grid-area: viewer;
+  min-height: 0;
+}
+
+.panel {
+  grid-area: panel;
+  padding: 20px;
+  border-left: 1px solid var(--border);
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.timeline {
+  grid-area: timeline;
+  padding: 16px 20px;
+  border-top: 1px solid var(--border);
+}
+
+.label {
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.score {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 40px;
+}
+
+.cta {
+  background: var(--accent);
+  color: white;
+  border: 0;
+  border-radius: 8px;
+  padding: 10px 14px;
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.cta:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+@media (max-width: 800px) {
+  .shell {
+    grid-template-columns: 1fr;
+    grid-template-rows: 56px 50vh auto auto;
+    grid-template-areas: "top" "viewer" "panel" "timeline";
+  }
+}
