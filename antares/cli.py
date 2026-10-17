@@ -138,6 +138,71 @@ def cmd_cross(args: argparse.Namespace) -> int:
     return 0
 
 
+def _feasibility_line(f: dict) -> str:
+    verdict = "ok" if f.get("ok") else f"FLAGGED {', '.join(f.get('flagged_joints', []))}"
+    bits = [f"feasibility (sim-only): {verdict}"]
+    real = f.get("real_vmax_deg_s")
+    comp = f.get("comp_cmd_vmax_deg_s")
+    if isinstance(real, dict) and isinstance(comp, dict):
+        ratio = max((comp[j] / real[j]) for j in real if real[j] > 0) if real else float("nan")
+    else:
+        per = f.get("per_joint") or {}
+        ratios = [v["velocity_ratio"] for v in per.values() if v.get("velocity_ratio") is not None]
+        ratio = max(ratios) if ratios else float("nan")
+    bits.append(f"peak command velocity {ratio:.2f}x the fastest real joint motion (limit {f.get('velocity_factor', 1.5):g}x)")
+    bits.append(f"exceeds the original command range by {f.get('max_range_excess_deg', 0.0):.2f} deg")
+    bits.append(f"{f.get('clipped_frames', 0)} frames at the ctrl limit (raw: {f.get('raw_clipped_frames', 0)})")
+    return "; ".join(bits)
+
+
+def cmd_compensate(args: argparse.Namespace) -> int:
+    from antares import server
+
+    ds = server.get_dataset(args.repo_id)
+    lock = server.load_lock_dict(args.lock) if args.lock else None
+    params = server.params_from_dict(lock["params"]) if lock else None
+    label = f"lock {args.lock}" if args.lock else "default params (no lock: latency 0)"
+    print("tracking RMS vs the real trajectory, judged in the calibrated sim (no hardware)")
+
+    if args.heldout:
+        if lock is None:
+            print("--heldout needs --lock (its held-out split is the eval set)", file=sys.stderr)
+            return 2
+        out = server.compensate_heldout(ds, lock, method=args.method)
+        n = len(out["episodes"])
+        print(f"{ds.repo_id}: {n} held-out episodes {out['episodes']} ({out['n_frames']} frames, {label})")
+        it = out["ilc_iterations"]
+        rows = [
+            ["raw", f"{out['rms']['raw']:.3f}", "logged commands (= the lock's gap)"],
+            ["shift", f"{out['rms']['shift']:.3f}", f"q_des[t+{out['params']['latency_frames']}]"],
+            ["ilc", f"{out['rms']['ilc']:.3f}", f"{min(it)}-{max(it)} iterations/episode"],
+        ]
+        print(_table(["method", "rms (deg)", "note"], rows))
+        print(_feasibility_line(out["feasibility"]))
+        return 0
+
+    if args.episode is None:
+        print("--episode N (or --heldout with --lock) is required", file=sys.stderr)
+        return 2
+    out = server.compensate_episode_dict(ds, args.episode, params, method=args.method, lock=args.lock)
+    print(f"{ds.repo_id} episode {out['episode']} ({len(out['q_des'])} frames, {label}, method {args.method})")
+    rows = [
+        ["raw", f"{out['rms']['raw']:.3f}", "logged commands (= the gap)"],
+        ["shift", f"{out['rms']['shift']:.3f}", f"q_des[t+{out['params']['latency_frames']}]"],
+        ["ilc", f"{out['rms']['ilc']:.3f}", f"{out['ilc_iterations']} iterations"],
+    ]
+    print(_table(["method", "rms (deg)", "note"], rows))
+    print(_feasibility_line(out["feasibility"]))
+    if args.out:
+        import numpy as np
+
+        um = server.get_arm().unit_map
+        cmds = um.to_units(np.radians(np.asarray(out["ctrl_comp"], dtype=np.float64)))
+        np.save(args.out, cmds)
+        print(f"saved {args.method} commands ({cmds.shape[0]}x{cmds.shape[1]}, dataset units) -> {args.out}")
+    return 0
+
+
 def cmd_locks(args: argparse.Namespace) -> int:
     from antares import server
 
@@ -209,6 +274,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--n-eval", type=int, default=10)
     p.add_argument("--seed", type=int, default=0)
     p.set_defaults(func=cmd_cross)
+
+    p = sub.add_parser(
+        "compensate",
+        help="commands that make the calibrated sim track an episode's real trajectory (sim-only)",
+    )
+    p.add_argument("repo_id")
+    p.add_argument("--episode", type=int, default=None, help="episode to compensate")
+    p.add_argument("--lock", default=None, help="calibrated lock to compensate against")
+    p.add_argument("--method", choices=["shift", "ilc"], default="ilc", help="which commands to save/return")
+    p.add_argument("--out", default=None, help="save the compensated commands (T,6) in dataset units as .npy")
+    p.add_argument(
+        "--heldout", action="store_true", help="instead of one episode, aggregate over the lock's held-out split"
+    )
+    p.set_defaults(func=cmd_compensate)
 
     p = sub.add_parser("locks", help="list saved locks")
     p.set_defaults(func=cmd_locks)
