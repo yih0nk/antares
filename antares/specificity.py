@@ -496,6 +496,95 @@ def study(
     }
 
 
+# --------------------------------------------------------------------------
+# Report
+# --------------------------------------------------------------------------
+
+
+def _md_table(headers: Sequence[str], rows: Sequence[Sequence[Any]]) -> str:
+    lines = ["| " + " | ".join(headers) + " |", "|" + "---|" * len(headers)]
+    lines += ["| " + " | ".join(str(c) for c in r) + " |" for r in rows]
+    return "\n".join(lines)
+
+
+def _deg(v: float | None) -> str:
+    return "-" if v is None else f"{v:.2f}°"
+
+
+def _times(v: float | None) -> str:
+    if v is None:
+        return "-"
+    return "unbounded" if not math.isfinite(v) or v > 1e6 else f"×{v:.3g}"
+
+
+def _fmt_param(name: str, v: float) -> str:
+    return str(int(v)) if name == "latency_frames" else f"{v:.4g}"
+
+
+def render_markdown(results: Mapping[str, Any], title: str = "Robot specificity") -> str:
+    """Human-readable report of a :func:`study` result."""
+    m = results["matrix"]
+    out = [f"## {title}", ""]
+    out.append("Held-out tracking error (RMS over the five body joints). Rows are the arms' "
+               "datasets, columns are the locks.")
+    out.append("")
+    out.append(_md_table(["dataset"] + list(m["cols"]),
+                         [[r] + [_deg(v) for v in sc] for r, sc in zip(m["rows"], m["scores"])]))
+    out.append("")
+    rows = [
+        [r["dataset"], r["own_lock"] or "-", _deg(r["own_score"]), r["best_other_lock"] or "-",
+         _deg(r["best_other_score"]), "-" if r["margin"] is None else f"{r['margin']:.2f}×",
+         {True: "yes", False: "**no**", None: "-"}[r["specific"]]]
+        for r in results["specificity"]["rows"]
+    ]
+    out.append(_md_table(["dataset", "own lock", "own", "best other lock", "other", "margin", "own wins"], rows))
+
+    for d, r in results["datasets"].items():
+        own_s = next(x["own_score"] for x in results["specificity"]["rows"] if x["dataset"] == d)
+        other_s = next(x["best_other_score"] for x in results["specificity"]["rows"] if x["dataset"] == d)
+        out += ["", f"### {d}", ""]
+        checks = [["own lock", _deg(own_s)]]
+        if "same_arm_control" in r:
+            c = r["same_arm_control"]
+            checks.append([f"same arm, refit on {c['n_train']} other episodes", _deg(c["eval_score"])])
+        checks.append([f"own fit with {r['other_lock']}'s kp/kv pinned", _deg(r["swap"]["eval_score"])])
+        checks.append([f"{r['other_lock']} lock", _deg(other_s)])
+        if "truth_eval_score" in r:
+            checks.append(["true parameters (synthetic)", _deg(r["truth_eval_score"])])
+        out.append(_md_table(["parameters", "held-out error"], checks))
+
+        runs = r["seed_restarts"]["runs"]
+        names = list(runs[0]["params"])
+        prow = [["lock" if x["seed"] is None else f"seed {x['seed']}"]
+                + [_fmt_param(n, x["params"][n]) for n in names] + [_deg(x["eval_score"])] for x in runs]
+        if "same_arm_control" in r:
+            prow.append(["same-arm control"] + [_fmt_param(n, r["same_arm_control"]["params"][n]) for n in names]
+                        + [_deg(r["same_arm_control"]["eval_score"])])
+        if "truth" in r:
+            prow.append(["truth"] + [_fmt_param(n, r["truth"][n]) for n in names] + [_deg(r["truth_eval_score"])])
+        spread = r["seed_restarts"]["spread"]
+        prow.append(["spread"] + [f"±{int(spread[n])}" if n == "latency_frames" else _times(spread[n])
+                                  for n in names] + [""])
+        out += ["", "Refits of the same data:", "", _md_table(["fit"] + names + ["held-out"], prow)]
+
+        idf = r["identifiability"]
+        lock_p = runs[0]["params"]
+        irow = [[n, _fmt_param(n, lock_p[n]), _times(idf["factor_fixed"][n]), _times(idf["factor_free"][n]),
+                 "-" if idf["tradeoff"][n] is None else f"{idf['tradeoff'][n]:.3g}"] for n in idf["names"]]
+        slop = sorted(idf["sloppiest"].items(), key=lambda kv: -abs(kv[1] or 0))
+        out += ["", f"How far each parameter can move before the training error rises by "
+                    f"{idf['delta_deg']:g}° (linearized at the lock):", "",
+                _md_table(["param", "lock", "alone", "others refit", "trade-off"], irow), "",
+                f"Least constrained direction (condition number {idf['condition_number'] or float('inf'):.3g}): "
+                + ", ".join(f"{v:+.2f} {k}" for k, v in slop if v is not None and abs(v) >= 0.1) + "."]
+        lat = r["latency_profile"]
+        out += ["", "Latency: " + ", ".join(f"{f} frames {_deg(v)}" for f, v in lat.items()) + "."]
+        path = r["path_to_other"]
+        out += ["", f"Path from own lock to {r['other_lock']} (held-out): "
+                + " → ".join(_deg(v) for _, v in path) + "."]
+    return "\n".join(out) + "\n"
+
+
 __all__ = [
     "CONTINUOUS",
     "interpolate",
@@ -506,6 +595,7 @@ __all__ = [
     "Identifiability",
     "identifiability",
     "jacobian",
+    "render_markdown",
     "residuals",
     "summarize_cross",
 ]

@@ -285,3 +285,17 @@ def test_study_end_to_end_on_two_toy_arms():
     assert any("swap" in m for m in logs)
     import json
     json.dumps(out)  # serializable as-is
+
+
+def test_render_markdown_has_every_section():
+    from antares.specificity import render_markdown
+
+    data = {"toy/slow": toy_episodes(TRUE, n=8, seed=1), "toy/fast": toy_episodes(FAST, n=8, seed=2)}
+    locks = {"slow": ("toy/slow", TRUE), "fast": ("toy/fast", FAST)}
+    out = study(data, locks, toy_simulate, n_train=3, n_eval=3, restart_seeds=(1,),
+                max_evaluations=20, truth={"toy/slow": TRUE})
+    md = render_markdown(out)
+    for needle in ("## Robot specificity", "| dataset | slow | fast | default |", "### toy/slow",
+                   "same arm, refit on 2 other episodes", "kp/kv pinned", "true parameters",
+                   "| spread |", "Least constrained direction", "Latency: 0 frames", "Path from own lock"):
+        assert needle in md, needle
