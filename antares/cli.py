@@ -552,6 +552,49 @@ def _write_json(path: str, obj: dict) -> None:
     print(f"wrote {path}")
 
 
+def cmd_identify(args: argparse.Namespace) -> int:
+    from antares import server
+    from antares.calibrate import default_simulate, split_episodes
+    from antares.specificity import identifiability, latency_profile
+
+    ds = server.get_dataset(args.repo_id)
+    params = server.params_from_dict(server.load_lock_dict(args.lock)["params"])
+    train, eval_ = split_episodes(ds.episodes, args.n_train, args.n_eval, seed=args.seed)
+    episodes = train if args.split == "train" else eval_
+    simulate = default_simulate()
+    rep = identifiability(params, episodes, simulate, delta_deg=args.delta)
+    lat = latency_profile(params, episodes, simulate)
+    print(f"lock {args.lock} on {ds.repo_id} ({args.split} split, {len(episodes)} episodes)")
+    print(_identifiability_text(rep, lat))
+    if args.json:
+        _write_json(args.json, {"identifiability": rep.to_dict(), "latency_profile": lat})
+    return 0
+
+
+def _identifiability_text(rep, lat: dict[int, float]) -> str:
+    """Tolerance table, least-constrained direction and latency profile."""
+
+    def x(v: float) -> str:
+        return "unbounded" if v == float("inf") or v > 1e6 else f"x{v:.3g}"
+
+    rows = [
+        [n, x(rep.factor_fixed[n]), x(rep.factor_free[n]), f"{rep.tradeoff[n]:.3g}"]
+        for n in rep.names
+    ]
+    lines = [
+        f"overall {rep.rms_deg:.3f} deg; change each parameter can take before it rises "
+        f"by {rep.delta_deg:g} deg:",
+        _table(["param", "alone", "others refit", "trade-off"], rows),
+        "",
+        f"condition number {rep.condition_number:.3g}; least constrained direction: "
+        + ", ".join(f"{v:+.2f} {k}" for k, v in sorted(rep.sloppiest.items(), key=lambda kv: -abs(kv[1]))
+                    if abs(v) >= 0.1),
+        "",
+        "latency (frames): " + "  ".join(f"{f}: {s:.3f}" for f, s in lat.items()),
+    ]
+    return "\n".join(lines)
+
+
 def cmd_locks(args: argparse.Namespace) -> int:
     from antares import server
 
@@ -880,6 +923,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--heldout", action="store_true", help="instead of one episode, aggregate over the lock's held-out split"
     )
     p.set_defaults(func=cmd_compensate)
+
+    p = sub.add_parser("identify", help="check which of a lock's parameters the data pins down")
+    p.add_argument("repo_id")
+    p.add_argument("--lock", required=True, help="saved lock to analyse")
+    p.add_argument("--split", choices=("train", "eval"), default="train")
+    p.add_argument("--delta", type=float, default=0.1, help="error rise (deg) defining tolerance")
+    p.add_argument("--n-train", type=int, default=20)
+    p.add_argument("--n-eval", type=int, default=10)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--json", default=None, help="also write the report here")
+    p.set_defaults(func=cmd_identify)
 
     p = sub.add_parser("locks", help="list saved locks")
     p.set_defaults(func=cmd_locks)

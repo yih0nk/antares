@@ -665,3 +665,33 @@ def test_cross_prints_specificity_and_writes_json(monkeypatch, tmp_path, capsys)
     saved = json.loads(out_path.read_text())
     assert saved["specificity"]["all_specific"] is True
     assert saved["matrix"]["cols"] == m["cols"]
+
+
+def test_identify_prints_tolerances(monkeypatch, tmp_path, capsys):
+    import antares.calibrate
+    from antares import server
+
+    T = 40
+    t = np.arange(T) / 30.0
+    eps = []
+    for i in range(4):
+        a = np.stack([np.sin(2 * np.pi * (0.5 + 0.1 * j) * t + i) for j in range(6)], axis=1)
+        eps.append(Episode(index=i, fps=30.0, joint_names=JOINTS, state=a, action=a))
+    ds = Dataset(repo_id="fake/robot", robot_type="so101_follower", fps=30.0,
+                 joint_names=JOINTS, episodes=tuple(eps))
+
+    def simulate(params, ep):  # lag shrinks with kp; kv, damping etc. do nothing
+        shift = np.radians(100.0 / params.kp)
+        return ep.state, ep.state + shift
+
+    monkeypatch.setattr(server, "_DATASETS", {"fake/robot": ds})
+    monkeypatch.setattr(server, "load_lock_dict", lambda name: {"params": {"kp": 500.0}})
+    monkeypatch.setattr(antares.calibrate, "default_simulate", lambda: simulate)
+    out_path = tmp_path / "id.json"
+    assert cli.main(["identify", "fake/robot", "--lock", "x", "--n-train", "2", "--n-eval", "2",
+                     "--json", str(out_path)]) == 0
+    out = capsys.readouterr().out
+    assert "train split, 2 episodes" in out
+    assert "kp" in out and "unbounded" in out  # kv etc. have no effect at all
+    assert "latency (frames): 0:" in out
+    assert json.loads(out_path.read_text())["identifiability"]["names"][0] == "kp"
