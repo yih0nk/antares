@@ -126,10 +126,16 @@ export function ResidualStrip({ sum, events, grasps, frames, frame, onSeek }: Re
   );
 }
 
-type SparkProps = { values: number[]; total: number; baseline?: number | null };
+type SparkProps = {
+  values: number[];
+  total: number;
+  baseline?: number | null;
+  // Evaluation index where a second stage starts; drawn as a divider.
+  stageAt?: number | null;
+};
 
 // Best-so-far error over evaluations, on a fixed x range so the line grows.
-export function Sparkline({ values, total, baseline }: SparkProps) {
+export function Sparkline({ values, total, baseline, stageAt }: SparkProps) {
   const W = 280;
   const H = 64;
   if (!values.length) return <svg className="spark" viewBox={`0 0 ${W} ${H}`} />;
@@ -139,10 +145,14 @@ export function Sparkline({ values, total, baseline }: SparkProps) {
   const y = (v: number) => H - 2 - ((v - lo) / (hi - lo || 1)) * (H - 4);
   const d = values.map((v, i) => `${i ? "L" : "M"}${((i / Math.max(1, n - 1)) * W).toFixed(1)},${y(v).toFixed(1)}`).join("");
   const lastX = ((values.length - 1) / Math.max(1, n - 1)) * W;
+  const stageX = stageAt != null && stageAt > 0 && stageAt < n ? (stageAt / Math.max(1, n - 1)) * W : null;
   return (
     <svg className="spark" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none">
       {baseline != null && (
         <line x1={0} x2={W} y1={y(baseline)} y2={y(baseline)} className="spark-base" vectorEffect="non-scaling-stroke" />
+      )}
+      {stageX != null && (
+        <line x1={stageX} x2={stageX} y1={0} y2={H} className="spark-stage" vectorEffect="non-scaling-stroke" />
       )}
       <path d={`${d}L${lastX.toFixed(1)},${H}L0,${H}Z`} className="spark-fill" />
       <path d={d} className="spark-line" vectorEffect="non-scaling-stroke" />

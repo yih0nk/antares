@@ -26,14 +26,19 @@ import { JointTrace, ResidualStrip, Sparkline } from "./Charts";
 
 const DEFAULT = "default";
 const LIVE = "live";
-const PARAM_KEYS: (keyof Params)[] = ["kp", "kv", "damping", "armature", "frictionloss", "latency_frames"];
+const PARAM_KEYS: (keyof Params)[] = ["kp", "kv", "damping", "armature", "frictionloss", "latency_frames", "forcerange"];
 const SPEEDS = [0.25, 0.5, 1, 2];
 // CMA-ES budget for a UI run; also sizes the sparkline's x axis.
 const MAX_EVALUATIONS = 150;
+// Budget of the optional per-joint refinement stage (the API's default).
+const PER_JOINT_EVALUATIONS = 600;
 
 type Calibration = {
   jobId: string;
   name: string;
+  // Evaluations the run was asked for over all its stages; sizes the sparkline.
+  total: number;
+  perJoint: boolean;
   status: "running" | "done" | "error" | "cancelled";
   progress: ProgressEvent[];
   best: number[];
@@ -119,6 +124,7 @@ export default function App() {
   const [frame, setFrame] = useState(0);
   const [joint, setJoint] = useState("shoulder_pan");
   const [calib, setCalib] = useState<Calibration | null>(null);
+  const [perJoint, setPerJoint] = useState(false);
   const [residual, setResidual] = useState<Residual | null>(null);
 
   const playhead = useMemo<Playhead>(() => ({ frame: 0 }), []);
@@ -276,13 +282,19 @@ export default function App() {
     setError(null);
     const name = lockNameFor(dataset);
     let jobId: string;
+    const total = MAX_EVALUATIONS + (perJoint ? PER_JOINT_EVALUATIONS : 0);
     try {
-      ({ job_id: jobId } = await api.calibrate(dataset, name, MAX_EVALUATIONS));
+      ({ job_id: jobId } = await api.calibrate(
+        dataset,
+        name,
+        MAX_EVALUATIONS,
+        perJoint ? { maxEvaluations: PER_JOINT_EVALUATIONS } : undefined,
+      ));
     } catch (e) {
       setError(`Could not start calibration: ${(e as Error).message}`);
       return;
     }
-    setCalib({ jobId, name, status: "running", progress: [], best: [] });
+    setCalib({ jobId, name, total, perJoint, status: "running", progress: [], best: [] });
     liveWanted.current = null;
     liveKey.current = "";
     setGhost(LIVE);
@@ -347,6 +359,7 @@ export default function App() {
   const jIndex = Math.max(0, jointNames.indexOf(joint));
   const maxJointErr = Math.max(1e-6, ...Object.values(baseGap?.per_joint_deg ?? {}), ...Object.values(ghostGap?.per_joint_deg ?? {}));
   const lastProgress = calib?.progress[calib.progress.length - 1];
+  const stageLabel = lastProgress?.stage === "per_joint" ? "per-joint refinement" : "fitting shared params";
   const shownParams = replay?.params ?? null;
   const defaultParams = baseline?.params ?? null;
   const currentDs = datasets.find((d) => d.id === dataset);
@@ -547,18 +560,29 @@ export default function App() {
               {calib?.status === "cancelled" ? "Stopping…" : "Stop and keep best fit"}
             </button>
           )}
+          <label className={`toggle ${running ? "locked" : ""}`} title="After the shared fit, refine one value per joint (7 params × 6 joints, +600 evaluations, about a minute)">
+            <input type="checkbox" checked={perJoint} disabled={running} onChange={(e) => setPerJoint(e.target.checked)} />
+            per-joint refinement
+            <span className="muted">+{PER_JOINT_EVALUATIONS} evals</span>
+          </label>
           {calib && (
             <div className="calib-body">
               <div className="row">
                 <span className="muted small">
-                  {calib.status === "running" && `fitting on train episodes · eval ${lastProgress?.evaluation ?? 0}`}
+                  {calib.status === "running" &&
+                    `${stageLabel} · eval ${lastProgress?.evaluation ?? 0}${calib.perJoint ? ` / ${calib.total}` : ""}`}
                   {calib.status === "cancelled" && "stopping after this generation"}
                   {calib.status === "done" && `saved as ${calib.name}`}
                   {calib.status === "error" && <span className="bad">{calib.error}</span>}
                 </span>
                 <span className="mono small">{deg(lastProgress?.best_score)}</span>
               </div>
-              <Sparkline values={calib.best.filter((v) => isFinite(v))} total={MAX_EVALUATIONS} baseline={calib.best[0]} />
+              <Sparkline
+                values={calib.best.filter((v) => isFinite(v))}
+                total={calib.total}
+                baseline={calib.best[0]}
+                stageAt={calib.perJoint ? MAX_EVALUATIONS : null}
+              />
               {calib.result && (
                 <div className="result">
                   <div>
@@ -591,15 +615,18 @@ export default function App() {
                 </tr>
               </thead>
               <tbody>
-                {PARAM_KEYS.map((k) => (
-                  <tr key={k}>
-                    <td>{k}</td>
-                    <td>{fmtParam(k, defaultParams[k])}</td>
-                    <td className={sameParam(shownParams[k], defaultParams[k]) ? "" : "changed"}>
-                      {fmtParam(k, shownParams[k])}
-                    </td>
-                  </tr>
-                ))}
+                {PARAM_KEYS.map((k) => {
+                  const d = defaultParams[k];
+                  const g = shownParams[k];
+                  if (d == null || g == null) return null; // older locks have no forcerange
+                  return (
+                    <tr key={k}>
+                      <td>{k}</td>
+                      <td>{fmtParam(k, d)}</td>
+                      <td className={sameParam(g, d) ? "" : "changed"}>{fmtParam(k, g)}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </section>

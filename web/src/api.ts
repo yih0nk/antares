@@ -11,6 +11,8 @@ export type Params = {
   armature: ParamValue;
   frictionloss: ParamValue;
   latency_frames: ParamValue;
+  // Actuator force limit; searched by the per-joint stage only.
+  forcerange?: ParamValue;
 };
 
 export type DatasetInfo = {
@@ -70,6 +72,9 @@ export type LockSummary = {
 
 export type ProgressEvent = {
   type: "progress";
+  // Which CMA-ES search space produced this evaluation; `evaluation` keeps
+  // counting across stages.
+  stage: "shared" | "per_joint";
   evaluation: number;
   generation: number;
   candidate_score: number | null;
@@ -158,11 +163,17 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ dataset, episode, params }),
     }).then((r) => json<Replay>(r)),
-  calibrate: (dataset: string, name: string, maxEvaluations: number) =>
+  // `perJoint` adds the per-joint refinement stage after the shared fit.
+  calibrate: (dataset: string, name: string, maxEvaluations: number, perJoint?: { maxEvaluations: number }) =>
     fetch("/api/calibrate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ dataset, name, max_evaluations: maxEvaluations }),
+      body: JSON.stringify({
+        dataset,
+        name,
+        max_evaluations: maxEvaluations,
+        ...(perJoint ? { per_joint: true, per_joint_max_evaluations: perJoint.maxEvaluations } : {}),
+      }),
     }).then((r) => json<{ job_id: string }>(r)),
   cancel: (jobId: string) => fetch(`/api/calibrate/${jobId}/cancel`, { method: "POST" }).then((r) => json(r)),
   events: (jobId: string) => new EventSource(`/api/calibrate/${jobId}/events`),

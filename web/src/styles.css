@@ -462,6 +462,36 @@ body {
   stroke-width: 1;
 }
 
+.spark-stage {
+  stroke: var(--accent);
+  stroke-dasharray: 2 3;
+  stroke-width: 1;
+}
+
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.toggle.locked {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.toggle input {
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.toggle .muted {
+  margin-left: auto;
+  font-family: "JetBrains Mono", monospace;
+}
+
 .result {
   display: grid;
   grid-template-columns: 1fr 1fr;
