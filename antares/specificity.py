@@ -554,7 +554,7 @@ def render_markdown(results: Mapping[str, Any], title: str = "Robot specificity"
         out.append(_md_table(["parameters", "held-out error"], checks))
 
         runs = r["seed_restarts"]["runs"]
-        names = list(runs[0]["params"])
+        names = [n for n in DIMS if n in runs[0]["params"]]
         prow = [["lock" if x["seed"] is None else f"seed {x['seed']}"]
                 + [_fmt_param(n, x["params"][n]) for n in names] + [_deg(x["eval_score"])] for x in runs]
         if "same_arm_control" in r:
