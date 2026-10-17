@@ -124,6 +124,7 @@ def jacobian(
     differences of size ``step``, one-sided where the box would clip.
     Returns ``(r0, J)`` with ``J`` of shape ``(len(r0), len(names))``.
     """
+    _require_shared(params)
     x0 = encode(params)
     r0 = residuals(params, episodes, simulate)
     J = np.empty((r0.size, len(names)), dtype=np.float64)
@@ -133,10 +134,17 @@ def jacobian(
         lo = max(x0[i] - step, 0.0)
         xh, xl = x0.copy(), x0.copy()
         xh[i], xl[i] = hi, lo
-        rh = residuals(decode(xh), episodes, simulate) if hi > x0[i] else r0
-        rl = residuals(decode(xl), episodes, simulate) if lo < x0[i] else r0
+        rh = residuals(decode(xh, base=params), episodes, simulate) if hi > x0[i] else r0
+        rl = residuals(decode(xl, base=params), episodes, simulate) if lo < x0[i] else r0
         J[:, k] = (rh - rl) / (hi - lo)
     return r0, J
+
+
+def _require_shared(params) -> None:
+    """These checks work in the shared search space; a per-joint lock would
+    be silently averaged by ``encode``, so refuse it instead."""
+    if getattr(params, "has_per_joint", False):
+        raise ValueError("specificity checks need a shared (scalar) lock, not a per-joint one")
 
 
 def _factor(name: str, delta_unit: float) -> float:
@@ -320,10 +328,12 @@ def interpolate(a, b, episodes: Sequence[Episode], simulate: SimulateFn, n: int 
     means the two fits sit in one connected valley of near-equal error;
     a ridge between them means they are genuinely different optima.
     """
+    _require_shared(a)
+    _require_shared(b)
     xa, xb = encode(a), encode(b)
     out = []
     for t in np.linspace(0.0, 1.0, n):
-        out.append((float(t), _safe_score(decode((1 - t) * xa + t * xb), episodes, simulate)[1]))
+        out.append((float(t), _safe_score(decode((1 - t) * xa + t * xb, base=a), episodes, simulate)[1]))
     return out
 
 

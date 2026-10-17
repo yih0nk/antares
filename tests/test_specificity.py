@@ -226,3 +226,22 @@ def test_pinned_refit_compensates_along_a_tradeoff():
     assert out["eval_score"] < 0.5  # the default start is several degrees off
     with pytest.raises(ValueError):
         pinned_refit(eps[:3], eps[3:], {"stiffness": 1.0}, toy_simulate)
+
+
+def test_checks_refuse_per_joint_locks():
+    pj = TRUE.replace(kp=(400.0,) * 6)
+    with pytest.raises(ValueError, match="shared"):
+        identifiability(pj, flat_episodes(1), separable_simulate([1.0] * 5))
+    with pytest.raises(ValueError, match="shared"):
+        interpolate(TRUE, pj, flat_episodes(1), separable_simulate([1.0] * 5))
+
+
+def test_perturbations_keep_fields_outside_the_search():
+    seen = []
+
+    def sim(params, ep):
+        seen.append(params.forcerange)
+        return ep.state, ep.state
+
+    jacobian(TRUE.replace(forcerange=7.5), flat_episodes(1), sim)
+    assert set(seen) == {7.5}
