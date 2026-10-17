@@ -323,6 +323,17 @@ class DriftScan:
     def drifting_keys(self) -> list[str]:
         return [k for k, d in self.drifting.items() if d]
 
+    @property
+    def mean_improvement(self) -> float:
+        """Average fraction of the lock's error the per-window refits removed.
+
+        When this is small the windows do not constrain the parameters, so a
+        parameter trend is more likely scatter than wear.
+        """
+        if not self.windows:
+            return float("nan")
+        return float(np.mean([w.improvement for w in self.windows]))
+
     def verdict(self) -> str:
         """One-line human summary."""
         if len(self.windows) < 3:
@@ -336,7 +347,14 @@ class DriftScan:
                 "no parameter or score drifts across the session "
                 f"(no trend both significant and larger than {self.threshold:.0%})"
             )
-        return "drift: " + "; ".join(hits)
+        out = "drift: " + "; ".join(hits)
+        params_hit = [k for k in self.drifting_keys if k not in SCORE_KEYS]
+        if params_hit and self.mean_improvement < self.threshold:
+            out += (
+                f"; caution: refits beat the lock by only {self.mean_improvement:.0%} on average, "
+                "so parameter trends are weakly identified"
+            )
+        return out
 
     def to_dict(self) -> dict:
         return {
@@ -351,6 +369,7 @@ class DriftScan:
             "windows": [w.to_dict() for w in self.windows],
             "trends": {k: t.to_dict() for k, t in self.trends.items()},
             "drifting": self.drifting,
+            "mean_improvement": _json_float(self.mean_improvement),
             "verdict": self.verdict(),
             "n_windows_planned": int(self.n_windows_planned),
             "cancelled": bool(self.cancelled),

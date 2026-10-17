@@ -178,6 +178,21 @@ def test_compute_trends_flags_only_the_moving_quantities():
     assert compute_trends([]) == {}
 
 
+def test_verdict_warns_when_parameters_are_weakly_identified():
+    rng = np.random.default_rng(0)
+    n = 9
+    kp_factor = np.linspace(1.0, 0.75, n) * (1 + 0.01 * rng.normal(size=n))
+    lock_scores = np.full(n, 1.0)
+    windows = [DriftWindow(w.episodes, w.params, 0.98, w.lock_score)  # refit barely helps
+               for w in _windows(kp_factor, lock_scores)]
+    scan = DriftScan("l", "d", START, 10, 5, 60, 0, 0.1, windows, compute_trends(windows), n)
+    assert scan.drifting["kp"] and not scan.drifting["lock_score"]
+    assert scan.mean_improvement == pytest.approx(0.02)
+    v = scan.verdict()
+    assert v.startswith("drift: kp") and "caution" in v and "2%" in v
+    assert math.isnan(DriftScan("l", "d", START, 10, 5, 60, 0, 0.1, [], {}, 0).mean_improvement)
+
+
 # ---------------------------------------------------------------------------
 # the scan
 # ---------------------------------------------------------------------------
@@ -224,9 +239,13 @@ def test_drift_scan_sees_the_lock_degrade():
 
     assert tau(scan.windows[-1].params) > 1.2 * tau(scan.windows[0].params)
 
+    assert scan.mean_improvement > 0.2  # the refits do recover most of the drift
+    assert "caution" not in scan.verdict()
+
     d = scan.to_dict()
     json.dumps(d)  # strictly serialisable
     assert d["drifting"]["lock_score"] is True
+    assert d["mean_improvement"] == pytest.approx(scan.mean_improvement)
     assert len(d["windows"]) == 9 and d["windows"][0]["episodes"] == list(range(6))
     assert d["windows"][0]["params"]["kp"] > 0
     assert set(d["trends"]) == set(scan.trends)
