@@ -426,6 +426,29 @@ def test_replay_with_lock_and_baseline(client, fakes):
     assert client.get("/api/replay", params={"dataset": FAKE_DS, "episode": 99}).status_code == 404
 
 
+def test_replay_with_explicit_params(client, fakes):
+    base = client.get("/api/replay", params={"dataset": FAKE_DS, "episode": 0}).json()
+    params = {**FakeParams().to_dict(), "kp": 50.0}
+    r = client.post("/api/replay", json={"dataset": FAKE_DS, "episode": 0, "params": params})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["params"]["kp"] == 50.0
+    assert out["lock"] is None
+    assert out["gap"]["overall_deg"] < base["gap"]["overall_deg"]
+    bad = client.post("/api/replay", json={"dataset": FAKE_DS, "episode": 99, "params": params})
+    assert bad.status_code == 404
+
+
+def test_replay_with_per_joint_param_lists(client, fakes):
+    # Per-joint locks carry a list per parameter; the request model must let
+    # them through to SimParams.from_dict rather than rejecting them at 422.
+    per_joint = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
+    params = {**FakeParams().to_dict(), "damping": per_joint}
+    r = client.post("/api/replay", json={"dataset": FAKE_DS, "episode": 0, "params": params})
+    assert r.status_code == 200, r.text
+    assert r.json()["params"]["damping"] == per_joint
+
+
 def test_calibrate_job_lifecycle(client, fakes):
     r = client.post("/api/calibrate", json={"dataset": FAKE_DS, "n_train": 4, "n_eval": 2,
                                             "max_evaluations": 3, "name": "unit-a"})

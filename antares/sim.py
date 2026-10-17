@@ -289,7 +289,8 @@ def model_geometry(model: mujoco.MjModel | None = None) -> dict[str, Any]:
     """Compile-time geometry of the visual mesh geoms, for the web viewer.
 
     Returns bodies (all, in id order, with parent ids), visual mesh geoms
-    (group 2) with their body-frame pose and colour, and the joints.
+    (group 2) with the body-frame pose of the raw STL file and colour, and
+    the joints.
     """
     if model is None:
         model = load_model()
@@ -305,13 +306,20 @@ def model_geometry(model: mujoco.MjModel | None = None) -> dict[str, Any]:
     for g in range(model.ngeom):
         if model.geom_type[g] != mujoco.mjtGeom.mjGEOM_MESH or model.geom_group[g] != 2:
             continue
-        mesh_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_MESH, int(model.geom_dataid[g]))
+        mesh_id = int(model.geom_dataid[g])
+        mesh_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_MESH, mesh_id)
+        # The compiler recentres each mesh on its inertial frame and folds that
+        # into geom_pos/geom_quat; undo it so the pose places the raw STL file.
+        inv_pos, inv_quat = np.zeros(3), np.zeros(4)
+        mujoco.mju_negPose(inv_pos, inv_quat, model.mesh_pos[mesh_id], model.mesh_quat[mesh_id])
+        pos, quat = np.zeros(3), np.zeros(4)
+        mujoco.mju_mulPose(pos, quat, model.geom_pos[g], model.geom_quat[g], inv_pos, inv_quat)
         geoms.append(
             {
                 "body": int(model.geom_bodyid[g]),
                 "mesh": f"{mesh_name}.stl",
-                "pos": model.geom_pos[g].tolist(),
-                "quat": model.geom_quat[g].tolist(),
+                "pos": pos.tolist(),
+                "quat": quat.tolist(),
                 "rgba": model.geom_rgba[g].tolist(),
             }
         )

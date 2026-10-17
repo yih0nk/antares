@@ -502,6 +502,26 @@ def replay(
     return out
 
 
+class ReplayRequest(BaseModel):
+    dataset: str
+    episode: int
+    # A value is a scalar or a per-joint list of 6, as SimParams.from_dict accepts.
+    params: dict[str, float | list[float]]
+
+
+@app.post("/api/replay")
+def replay_with_params(req: ReplayRequest) -> dict:
+    """Replay with explicit params, e.g. the best fit so far of a running job."""
+    ds = get_dataset(req.dataset)
+    try:
+        params = params_from_dict(req.params)
+    except (TypeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=f"bad params: {e}")
+    out = replay_episode(ds, req.episode, params)
+    out["lock"] = None
+    return out
+
+
 class CalibrateRequest(BaseModel):
     dataset: str
     n_train: int = Field(20, ge=1)

@@ -31,6 +31,15 @@ python3.11 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 cd web && npm install && npm run dev   # UI on :5173
 ```
 
+Or build the UI once (`cd web && npm run build`) and `antares serve` alone
+serves it on :8000.
+
+In the viewer, the white arm is the logged robot and the blue ghost is the
+simulator replaying the same commands. Pick an episode, scrub the timeline,
+switch the ghost between the default sim and a saved lock, or press
+**Calibrate** to fit a new lock and watch the ghost lock on as the error
+drops.
+
 Inspect a dataset from the CLI:
 
 ```sh
@@ -50,5 +59,5 @@ Inspect a dataset from the CLI:
 
 ## Status
 
-Weekend hackathon project. Data loading and the UI shell work; replay
-and calibration are in progress.
+Weekend hackathon project. Data loading, replay, calibration, robot locks
+and the web viewer work end to end on the SO-101 and SO-100 demo datasets.

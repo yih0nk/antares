@@ -285,3 +285,34 @@ def test_model_geometry(arm):
         assert j["range"][0] < j["range"][1]
     # default-argument path loads the model itself
     assert model_geometry()["joints"] == geo["joints"]
+
+
+def _read_binary_stl(path):
+    raw = path.read_bytes()
+    n = int.from_bytes(raw[80:84], "little")
+    tri = np.dtype([("n", "<f4", 3), ("v", "<f4", (3, 3)), ("attr", "<u2")])
+    return np.frombuffer(raw[84 : 84 + n * 50], dtype=tri)["v"].reshape(-1, 3).astype(np.float64)
+
+
+def test_model_geometry_poses_place_raw_stl_files(arm):
+    # The viewer loads the STL files untouched, so each geom pose must map raw
+    # file coordinates onto the compiler's (recentred) mesh in the body frame.
+    m = arm.model
+    geo = model_geometry(m)
+    mesh_geoms = [
+        g for g in range(m.ngeom) if m.geom_type[g] == mujoco.mjtGeom.mjGEOM_MESH and m.geom_group[g] == 2
+    ]
+    assert len(mesh_geoms) == len(geo["geoms"])
+
+    def place(pos, quat, v):
+        R = np.zeros(9)
+        mujoco.mju_quat2Mat(R, np.asarray(quat, dtype=np.float64))
+        return v @ R.reshape(3, 3).T + np.asarray(pos)
+
+    for g, out in zip(mesh_geoms, geo["geoms"]):
+        mid = m.geom_dataid[g]
+        compiled = m.mesh_vert[m.mesh_vertadr[mid] : m.mesh_vertadr[mid] + m.mesh_vertnum[mid]]
+        want = place(m.geom_pos[g], m.geom_quat[g], compiled)
+        got = place(out["pos"], out["quat"], _read_binary_stl(MESH_DIR / out["mesh"]))
+        np.testing.assert_allclose(got.min(0), want.min(0), atol=1e-6)
+        np.testing.assert_allclose(got.max(0), want.max(0), atol=1e-6)
