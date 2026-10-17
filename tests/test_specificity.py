@@ -162,3 +162,47 @@ def test_residuals_raise_on_divergence():
 
     with pytest.raises(FloatingPointError):
         residuals(TRUE, flat_episodes(1), bad)
+
+
+# --------------------------------------------------------------------------
+# direct checks, on a toy first-order servo
+# --------------------------------------------------------------------------
+
+from antares.specificity import latency_profile  # noqa: E402
+
+
+def toy_response(p, action, fps):
+    """First-order lag with time constant from kp/kv, plus a pure delay."""
+    tau = 20.0 * p.kv / p.kp + p.armature
+    alpha = 1.0 - np.exp(-1.0 / fps / tau)
+    lag = int(p.latency_frames)
+    q = np.empty_like(action)
+    q[0] = action[0]
+    for k in range(1, len(action)):
+        q[k] = q[k - 1] + alpha * (action[max(k - 1 - lag, 0)] - q[k - 1])
+    return q
+
+
+def toy_episodes(truth, n=4, T=90, seed=0):
+    rng = np.random.default_rng(seed)
+    t = np.arange(T) / 30.0
+    eps = []
+    for i in range(n):
+        action = np.zeros((T, 6))
+        for j in range(6):
+            f = rng.uniform(0.3, 1.5)
+            action[:, j] = 0.5 * np.sin(2 * np.pi * f * t + rng.uniform(0, 6.28))
+        eps.append(Episode(index=i, fps=30.0, joint_names=JOINTS,
+                           state=toy_response(truth, action, 30.0), action=action))
+    return eps
+
+
+def toy_simulate(params, ep):
+    return ep.state, toy_response(params, ep.action, ep.fps)
+
+
+def test_latency_profile_minimum_at_truth():
+    prof = latency_profile(TRUE, toy_episodes(TRUE), toy_simulate)
+    assert list(prof) == [0, 1, 2, 3, 4, 5]
+    assert min(prof, key=prof.get) == 2
+    assert prof[2] == pytest.approx(0.0, abs=1e-9)

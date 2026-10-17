@@ -29,7 +29,7 @@ from typing import Any
 
 import numpy as np
 
-from antares.calibrate import DIMS, SPACE, SimulateFn, decode, encode
+from antares.calibrate import DIMS, SPACE, SimulateFn, _safe_score, decode, encode
 from antares.data import Episode
 
 # --------------------------------------------------------------------------
@@ -260,8 +260,24 @@ def identifiability(
     )
 
 
+# --------------------------------------------------------------------------
+# Direct checks (no linearization)
+# --------------------------------------------------------------------------
+
+
+def latency_profile(
+    params, episodes: Sequence[Episode], simulate: SimulateFn, frames: Sequence[int] | None = None
+) -> dict[int, float]:
+    """Overall error with every latency in ``frames`` (default: the search range)."""
+    if frames is None:
+        lo, hi, _ = SPACE["latency_frames"]
+        frames = range(int(lo), int(hi) + 1)
+    return {int(f): _safe_score(params.replace(latency_frames=int(f)), episodes, simulate)[1] for f in frames}
+
+
 __all__ = [
     "CONTINUOUS",
+    "latency_profile",
     "Identifiability",
     "identifiability",
     "jacobian",
