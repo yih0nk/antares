@@ -567,6 +567,49 @@ def test_cross_matrix(client, fakes):
     assert client.get("/api/cross", params={"datasets": FAKE_DS, "locks": "ghost"}).status_code == 404
 
 
+def test_cross_matrix_reads_locks_from_another_directory(fakes):
+    other = fakes / "fleet"
+    other.mkdir()
+    lock = FakeLock("fleet-a", FAKE_DS, "so101_follower", "abc", FakeParams(kp=40.0),
+                    FakeResult(FakeParams(kp=40.0), FakeParams()), "2026-10-17T00:00:00+00:00", "0.0.1")
+    (other / f"fleet-a{LOCK_SUFFIX}").write_text(json.dumps(lock.to_dict()))
+    m = server.cross_matrix([FAKE_DS], ["fleet-a"], n_train=4, n_eval=2, lock_dir=other)
+    assert m["cols"] == ["fleet-a", "default"] and m["scores"][0][0] < m["scores"][0][1]
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException):
+        server.cross_matrix([FAKE_DS], ["fleet-a"], n_train=4, n_eval=2)  # not in LOCK_DIR
+
+
+def test_put_dataset_registers_for_get_dataset(fakes):
+    ds = make_dataset("fake/so101_unit_c")
+    server.put_dataset(ds)
+    assert server.get_dataset("fake/so101_unit_c") is ds
+    assert server.dataset_summary("fake/so101_unit_c")["loaded"] is True
+
+
+def test_fleet_endpoints(client, fakes, monkeypatch):
+    fleet_dir = fakes / "fleet"
+    monkeypatch.setattr(server, "FLEET_DIR", fleet_dir)
+    r = client.get("/api/fleet")
+    assert r.status_code == 404 and "fleet scan" in r.json()["detail"]
+    assert client.get("/api/fleet/cross").status_code == 404
+
+    fleet_dir.mkdir()
+    report = {"robots": [{"dataset": FAKE_DS, "params": {"kp": 50.0}}], "summary": {"n_robots": 1}, "cross": None}
+    (fleet_dir / "fleet.json").write_text(json.dumps(report))
+    r = client.get("/api/fleet")
+    assert r.status_code == 200 and r.json() == report
+    assert client.get("/api/fleet/cross").status_code == 404  # report without a cross matrix
+
+    report["cross"] = {"rows": [FAKE_DS], "cols": ["a", "default"], "scores": [[1.0, 2.0]], "summary": {"n": 1}}
+    (fleet_dir / "fleet.json").write_text(json.dumps(report))
+    assert client.get("/api/fleet/cross").json() == report["cross"]
+
+    (fleet_dir / "fleet.json").write_text("{not json")
+    assert client.get("/api/fleet").status_code == 500
+
+
 def test_arm_lock_serialises_sim_access(client, fakes):
     import threading
     arm = server._arm
