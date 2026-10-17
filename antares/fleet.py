@@ -46,8 +46,13 @@ MAX_DATA_BYTES = 200 * 2**20  # tabular part only; videos are never downloaded
 # ``so100``/``so101`` in any spelling, plus LeRobot's newer unified
 # ``so_follower`` name for the same arm.
 _ROBOT_RE = re.compile(r"so[-_ ]?(?:arm)?[-_ ]?10[01]|^so[-_]?follower$")
-# Datasets recorded in a simulator are not physical robots.
-_SIM_RE = re.compile(r"(?:^|[^a-z])(?:sim|synthetic|synth|pybullet|isaac(?:sim|lab)?|mujoco|genesis|maniskill|gazebo)(?:[^a-z]|$)")
+# Datasets recorded in a simulator are not physical robots, and merges of
+# several people's recordings are not one robot.
+_SIM_RE = re.compile(
+    r"(?:^|[^a-z])(?:synthetic|synth|pybullet|isaac(?:sim|lab)?|mujoco|genesis|maniskill|gazebo)(?:[^a-z]|$)"
+    r"|sim(?:[^a-z]|$)"
+)
+_MERGED_RE = re.compile(r"(?:^|[^a-z])(?:merged?|combined|community|aggregated|converted)(?:[^a-z]|$)")
 
 
 # --------------------------------------------------------------------------
@@ -135,6 +140,9 @@ def check_info(
     sim = _SIM_RE.search(repo_id.lower())
     if sim:
         return reject(f"looks like a simulation dataset (name contains {sim.group(0).strip('-_ /.')!r})")
+    merged = _MERGED_RE.search(repo_id.lower())
+    if merged:
+        return reject(f"looks like a merge of several datasets (name contains {merged.group(0).strip('-_ /.')!r})")
     if not re.match(r"v[23]\.", version):
         return reject(f"codebase_version {version or 'missing'} (need the v2/v3 parquet layout)")
     if not _ROBOT_RE.search(robot_type.lower()):

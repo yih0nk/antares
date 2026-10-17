@@ -194,6 +194,10 @@ def test_check_info_accepts_so_follower_and_rejects_simulated():
         c = check_info(rid, info(), 1)
         assert not c.accepted and "simulation" in c.reason, rid
     assert check_info("u/so101_simple_task", info(), 1).accepted  # "simple" is not "sim"
+    assert "simulation" in check_info("u/so101_newsim_place", info(), 1).reason
+    for rid in ("u/community-v1-so101-converted", "u/Full_Merged_Final_SO101", "u/so100_combined"):
+        c = check_info(rid, info(), 1)
+        assert not c.accepted and "merge" in c.reason, rid
 
 
 def test_discover_pinned_come_first_and_skip_owner_rule():
