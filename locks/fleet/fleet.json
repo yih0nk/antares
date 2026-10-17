@@ -1,0 +1,3261 @@
+{
+  "antares_version": "0.0.1",
+  "created_at": "2026-10-17T21:44:12Z",
+  "cross": {
+    "cols": [
+      "lerobot__svla_so101_pickplace",
+      "lerobot__svla_so100_pickplace",
+      "blackwhite123__fold_cloth",
+      "youliangtan__so101-table-cleanup",
+      "hungho77__so101_left_arm_pick_red_cube_into_pot",
+      "samanthalhy__so100_popcorn_2_transport",
+      "default"
+    ],
+    "locks": [
+      "lerobot__svla_so101_pickplace",
+      "lerobot__svla_so100_pickplace",
+      "blackwhite123__fold_cloth",
+      "youliangtan__so101-table-cleanup",
+      "hungho77__so101_left_arm_pick_red_cube_into_pot",
+      "samanthalhy__so100_popcorn_2_transport"
+    ],
+    "per_joint": [
+      [
+        {
+          "elbow_flex": 2.0306,
+          "gripper": 3.0333,
+          "shoulder_lift": 0.9683,
+          "shoulder_pan": 0.3492,
+          "wrist_flex": 0.4763,
+          "wrist_roll": 0.3872
+        },
+        {
+          "elbow_flex": 2.1176,
+          "gripper": 2.9341,
+          "shoulder_lift": 1.108,
+          "shoulder_pan": 0.5645,
+          "wrist_flex": 0.4553,
+          "wrist_roll": 0.4919
+        },
+        {
+          "elbow_flex": 2.7278,
+          "gripper": 3.177,
+          "shoulder_lift": 2.5482,
+          "shoulder_pan": 2.6334,
+          "wrist_flex": 1.2375,
+          "wrist_roll": 1.6264
+        },
+        {
+          "elbow_flex": 2.0427,
+          "gripper": 2.8948,
+          "shoulder_lift": 1.1038,
+          "shoulder_pan": 0.4918,
+          "wrist_flex": 0.3623,
+          "wrist_roll": 0.3493
+        },
+        {
+          "elbow_flex": 1.9816,
+          "gripper": 3.0408,
+          "shoulder_lift": 1.0201,
+          "shoulder_pan": 0.5534,
+          "wrist_flex": 0.4682,
+          "wrist_roll": 0.4316
+        },
+        {
+          "elbow_flex": 2.1164,
+          "gripper": 3.0765,
+          "shoulder_lift": 1.1707,
+          "shoulder_pan": 0.7299,
+          "wrist_flex": 0.5988,
+          "wrist_roll": 0.5648
+        },
+        {
+          "elbow_flex": 5.355,
+          "gripper": 4.5807,
+          "shoulder_lift": 6.8319,
+          "shoulder_pan": 8.049,
+          "wrist_flex": 3.7971,
+          "wrist_roll": 5.0847
+        }
+      ],
+      [
+        {
+          "elbow_flex": 1.2434,
+          "gripper": 3.6071,
+          "shoulder_lift": 0.9058,
+          "shoulder_pan": 0.6824,
+          "wrist_flex": 0.5389,
+          "wrist_roll": 0.6744
+        },
+        {
+          "elbow_flex": 1.3223,
+          "gripper": 3.5786,
+          "shoulder_lift": 0.8294,
+          "shoulder_pan": 0.4329,
+          "wrist_flex": 0.4317,
+          "wrist_roll": 0.5673
+        },
+        {
+          "elbow_flex": 1.5246,
+          "gripper": 3.5955,
+          "shoulder_lift": 1.2287,
+          "shoulder_pan": 0.6952,
+          "wrist_flex": 0.6034,
+          "wrist_roll": 0.6811
+        },
+        {
+          "elbow_flex": 1.3088,
+          "gripper": 3.5593,
+          "shoulder_lift": 0.9453,
+          "shoulder_pan": 0.7272,
+          "wrist_flex": 0.4461,
+          "wrist_roll": 0.5081
+        },
+        {
+          "elbow_flex": 1.128,
+          "gripper": 3.607,
+          "shoulder_lift": 0.7831,
+          "shoulder_pan": 0.5223,
+          "wrist_flex": 0.4755,
+          "wrist_roll": 0.6553
+        },
+        {
+          "elbow_flex": 1.3876,
+          "gripper": 3.631,
+          "shoulder_lift": 1.1004,
+          "shoulder_pan": 0.9157,
+          "wrist_flex": 0.6299,
+          "wrist_roll": 0.7609
+        },
+        {
+          "elbow_flex": 2.5155,
+          "gripper": 4.0499,
+          "shoulder_lift": 3.5404,
+          "shoulder_pan": 3.2239,
+          "wrist_flex": 1.9555,
+          "wrist_roll": 2.1364
+        }
+      ],
+      [
+        {
+          "elbow_flex": 2.2037,
+          "gripper": 2.7963,
+          "shoulder_lift": 2.1698,
+          "shoulder_pan": 1.0091,
+          "wrist_flex": 2.8578,
+          "wrist_roll": 1.8417
+        },
+        {
+          "elbow_flex": 1.8068,
+          "gripper": 2.2287,
+          "shoulder_lift": 1.7104,
+          "shoulder_pan": 0.775,
+          "wrist_flex": 2.4108,
+          "wrist_roll": 1.5321
+        },
+        {
+          "elbow_flex": 1.9476,
+          "gripper": 0.9128,
+          "shoulder_lift": 0.7981,
+          "shoulder_pan": 0.2665,
+          "wrist_flex": 0.9801,
+          "wrist_roll": 0.6917
+        },
+        {
+          "elbow_flex": 2.206,
+          "gripper": 2.8586,
+          "shoulder_lift": 2.3265,
+          "shoulder_pan": 1.0219,
+          "wrist_flex": 2.9174,
+          "wrist_roll": 1.9602
+        },
+        {
+          "elbow_flex": 1.9532,
+          "gripper": 2.4653,
+          "shoulder_lift": 1.8054,
+          "shoulder_pan": 0.8654,
+          "wrist_flex": 2.5705,
+          "wrist_roll": 1.6472
+        },
+        {
+          "elbow_flex": 2.6101,
+          "gripper": 3.3624,
+          "shoulder_lift": 4.7037,
+          "shoulder_pan": 1.2003,
+          "wrist_flex": 3.2677,
+          "wrist_roll": 2.327
+        },
+        {
+          "elbow_flex": 6.3183,
+          "gripper": 3.9314,
+          "shoulder_lift": 5.0441,
+          "shoulder_pan": 1.9803,
+          "wrist_flex": 3.2964,
+          "wrist_roll": 2.0525
+        }
+      ],
+      [
+        {
+          "elbow_flex": 1.6976,
+          "gripper": 4.6555,
+          "shoulder_lift": 1.773,
+          "shoulder_pan": 0.4981,
+          "wrist_flex": 1.3853,
+          "wrist_roll": 0.7756
+        },
+        {
+          "elbow_flex": 1.9337,
+          "gripper": 4.289,
+          "shoulder_lift": 2.0119,
+          "shoulder_pan": 0.5304,
+          "wrist_flex": 1.5139,
+          "wrist_roll": 0.8888
+        },
+        {
+          "elbow_flex": 3.3077,
+          "gripper": 4.3597,
+          "shoulder_lift": 3.2309,
+          "shoulder_pan": 1.0528,
+          "wrist_flex": 3.2256,
+          "wrist_roll": 1.9432
+        },
+        {
+          "elbow_flex": 1.6087,
+          "gripper": 3.755,
+          "shoulder_lift": 1.7545,
+          "shoulder_pan": 0.4303,
+          "wrist_flex": 0.9741,
+          "wrist_roll": 0.5132
+        },
+        {
+          "elbow_flex": 1.7742,
+          "gripper": 4.5872,
+          "shoulder_lift": 1.8281,
+          "shoulder_pan": 0.5397,
+          "wrist_flex": 1.5838,
+          "wrist_roll": 0.8785
+        },
+        {
+          "elbow_flex": 1.6959,
+          "gripper": 3.9624,
+          "shoulder_lift": 1.7782,
+          "shoulder_pan": 0.4978,
+          "wrist_flex": 1.1937,
+          "wrist_roll": 0.7329
+        },
+        {
+          "elbow_flex": 7.5034,
+          "gripper": 6.0112,
+          "shoulder_lift": 7.2703,
+          "shoulder_pan": 2.8987,
+          "wrist_flex": 8.031,
+          "wrist_roll": 5.2406
+        }
+      ],
+      [
+        {
+          "elbow_flex": 2.2972,
+          "gripper": 6.2708,
+          "shoulder_lift": 1.6201,
+          "shoulder_pan": 0.5582,
+          "wrist_flex": 0.6749,
+          "wrist_roll": 2.4425
+        },
+        {
+          "elbow_flex": 2.4323,
+          "gripper": 6.2425,
+          "shoulder_lift": 1.7356,
+          "shoulder_pan": 0.5551,
+          "wrist_flex": 0.5111,
+          "wrist_roll": 2.3683
+        },
+        {
+          "elbow_flex": 2.7938,
+          "gripper": 6.378,
+          "shoulder_lift": 2.1822,
+          "shoulder_pan": 0.9283,
+          "wrist_flex": 0.7426,
+          "wrist_roll": 2.8022
+        },
+        {
+          "elbow_flex": 2.4365,
+          "gripper": 6.1373,
+          "shoulder_lift": 1.8116,
+          "shoulder_pan": 0.5569,
+          "wrist_flex": 0.5859,
+          "wrist_roll": 2.3796
+        },
+        {
+          "elbow_flex": 2.1324,
+          "gripper": 6.2719,
+          "shoulder_lift": 1.4296,
+          "shoulder_pan": 0.5175,
+          "wrist_flex": 0.5781,
+          "wrist_roll": 2.4053
+        },
+        {
+          "elbow_flex": 2.4884,
+          "gripper": 6.2907,
+          "shoulder_lift": 1.8659,
+          "shoulder_pan": 0.6171,
+          "wrist_flex": 0.8211,
+          "wrist_roll": 2.5575
+        },
+        {
+          "elbow_flex": 4.8415,
+          "gripper": 7.4977,
+          "shoulder_lift": 4.7867,
+          "shoulder_pan": 2.7283,
+          "wrist_flex": 2.6685,
+          "wrist_roll": 5.8801
+        }
+      ],
+      [
+        {
+          "elbow_flex": 1.3167,
+          "gripper": 2.8667,
+          "shoulder_lift": 1.6014,
+          "shoulder_pan": 0.9178,
+          "wrist_flex": 0.5794,
+          "wrist_roll": 1.19
+        },
+        {
+          "elbow_flex": 1.4657,
+          "gripper": 2.865,
+          "shoulder_lift": 1.8104,
+          "shoulder_pan": 1.0176,
+          "wrist_flex": 0.6765,
+          "wrist_roll": 1.3237
+        },
+        {
+          "elbow_flex": 1.9972,
+          "gripper": 2.8637,
+          "shoulder_lift": 2.1603,
+          "shoulder_pan": 1.5246,
+          "wrist_flex": 0.9802,
+          "wrist_roll": 2.3439
+        },
+        {
+          "elbow_flex": 1.3922,
+          "gripper": 2.8576,
+          "shoulder_lift": 1.7419,
+          "shoulder_pan": 0.7976,
+          "wrist_flex": 0.5716,
+          "wrist_roll": 0.727
+        },
+        {
+          "elbow_flex": 1.2523,
+          "gripper": 2.8632,
+          "shoulder_lift": 1.4834,
+          "shoulder_pan": 0.9877,
+          "wrist_flex": 0.6004,
+          "wrist_roll": 1.343
+        },
+        {
+          "elbow_flex": 1.3771,
+          "gripper": 2.8649,
+          "shoulder_lift": 1.7176,
+          "shoulder_pan": 0.7118,
+          "wrist_flex": 0.5299,
+          "wrist_roll": 0.6874
+        },
+        {
+          "elbow_flex": 3.8889,
+          "gripper": 2.8684,
+          "shoulder_lift": 3.5124,
+          "shoulder_pan": 3.3971,
+          "wrist_flex": 2.0152,
+          "wrist_roll": 5.6765
+        }
+      ]
+    ],
+    "rows": [
+      "lerobot/svla_so101_pickplace",
+      "lerobot/svla_so100_pickplace",
+      "BlackWhite123/fold_cloth",
+      "youliangtan/so101-table-cleanup",
+      "hungho77/so101_left_arm_pick_red_cube_into_pot",
+      "samanthalhy/so100_popcorn_2_transport"
+    ],
+    "scores": [
+      [
+        1.0545,
+        1.1384,
+        2.2381,
+        1.085,
+        1.0658,
+        1.1883,
+        6.0068
+      ],
+      [
+        0.8459,
+        0.7915,
+        1.0144,
+        0.8477,
+        0.7502,
+        0.9951,
+        2.7439
+      ],
+      [
+        2.1043,
+        1.7292,
+        1.09,
+        2.1761,
+        1.8517,
+        3.0486,
+        4.1076
+      ],
+      [
+        1.3262,
+        1.4933,
+        2.7081,
+        1.1886,
+        1.4185,
+        1.2844,
+        6.4734
+      ],
+      [
+        1.7108,
+        1.7382,
+        2.0896,
+        1.7626,
+        1.6111,
+        1.8585,
+        4.3702
+      ],
+      [
+        1.1741,
+        1.3169,
+        1.8673,
+        1.137,
+        1.1755,
+        1.1051,
+        3.8803
+      ]
+    ],
+    "summary": {
+      "default_over_diagonal": 4.032013799555608,
+      "mean_default": 4.597033333333333,
+      "mean_diagonal": 1.1401333333333332,
+      "mean_off_diagonal": 1.5379933333333333,
+      "median_row_default_over_diagonal": 3.6398531578776963,
+      "median_row_off_over_diagonal": 1.2404892682785134,
+      "n": 6,
+      "off_over_diagonal": 1.34895918606011,
+      "other_lock_beats_default": 1.0,
+      "own_lock_is_best": 5
+    }
+  },
+  "elapsed_s": 3591.092179124942,
+  "failures": [],
+  "outliers": [
+    {
+      "dataset": "theconstruct-ai/so101_pickplace_auto_v1",
+      "median": 1.1791116360674954,
+      "note": "calibrated eval 0.02 deg vs fleet median 1.18 deg",
+      "param": "calibrated_eval",
+      "value": 0.019982280617226872,
+      "z": -11.07
+    },
+    {
+      "dataset": "legalaspro/so101-pick-and-place-cube-lerobot-30hz",
+      "median": 1.1791116360674954,
+      "note": "calibrated eval 0.0367 deg vs fleet median 1.18 deg",
+      "param": "calibrated_eval",
+      "value": 0.03665019682021938,
+      "z": -9.42
+    },
+    {
+      "dataset": "theconstruct-ai/so101_pickplace_auto_v1",
+      "median": 3.452061492736545,
+      "note": "baseline eval 0.0825 deg vs fleet median 3.45 deg",
+      "param": "baseline_eval",
+      "value": 0.08254418295066636,
+      "z": -8.53
+    },
+    {
+      "dataset": "legalaspro/so101-pick-and-place-cube-lerobot-30hz",
+      "median": 3.452061492736545,
+      "note": "baseline eval 0.121 deg vs fleet median 3.45 deg",
+      "param": "baseline_eval",
+      "value": 0.12083799800192241,
+      "z": -7.66
+    },
+    {
+      "dataset": "kmg0620/so101_bomb_pick_place_v1",
+      "median": 1.1791116360674954,
+      "note": "calibrated eval 14.9 deg vs fleet median 1.18 deg",
+      "param": "calibrated_eval",
+      "value": 14.940197012967706,
+      "z": 6.89
+    },
+    {
+      "dataset": "kmg0620/so101_bomb_pick_place_v1",
+      "median": 3.452061492736545,
+      "note": "baseline eval 21.3 deg vs fleet median 3.45 deg",
+      "param": "baseline_eval",
+      "value": 21.328469713322985,
+      "z": 4.16
+    },
+    {
+      "dataset": "codywang/so101_pickup_test",
+      "median": 1.1791116360674954,
+      "note": "calibrated eval 4.45 deg vs fleet median 1.18 deg",
+      "param": "calibrated_eval",
+      "value": 4.445733711422116,
+      "z": 3.6
+    },
+    {
+      "dataset": "SGPatil/so101_table_cleanup",
+      "median": 0.016730238784264564,
+      "note": "armature 0.000129 is 0.0077x the fleet median 0.0167",
+      "param": "armature",
+      "value": 0.0001293892706572716,
+      "z": -3.08
+    },
+    {
+      "dataset": "OkzRIKU/so101-turn-up-drone",
+      "median": 1.1791116360674954,
+      "note": "calibrated eval 3.41 deg vs fleet median 1.18 deg",
+      "param": "calibrated_eval",
+      "value": 3.4135501644670008,
+      "z": 2.89
+    },
+    {
+      "dataset": "OkzRIKU/so101-turn-up-drone",
+      "median": 0.594964312086651,
+      "note": "22% of the held-out gap closed vs fleet median 59%",
+      "param": "improvement",
+      "value": 0.2185007465364751,
+      "z": -2.89
+    }
+  ],
+  "rejected": [
+    {
+      "dataset": "HuggingFaceVLA/community_dataset_v3",
+      "reason": "no readable meta/info.json (RemoteEntryNotFoundError)"
+    },
+    {
+      "dataset": "lerobot/community_dataset_v3",
+      "reason": "same owner as lerobot/svla_so101_pickplace (likely the same arm)"
+    },
+    {
+      "dataset": "lerobot/svla_so100_sorting",
+      "reason": "same owner as lerobot/svla_so101_pickplace (likely the same arm)"
+    },
+    {
+      "dataset": "lerobot/svla_so100_stacking",
+      "reason": "same owner as lerobot/svla_so101_pickplace (likely the same arm)"
+    },
+    {
+      "dataset": "HuggingFaceVLA/community_dataset_v1",
+      "reason": "no readable meta/info.json (RemoteEntryNotFoundError)"
+    },
+    {
+      "dataset": "SO-101-robot-learning/so101_pick_place",
+      "reason": "0 episodes < 15"
+    },
+    {
+      "dataset": "HuggingFaceVLA/community_dataset_v2",
+      "reason": "no readable meta/info.json (RemoteEntryNotFoundError)"
+    },
+    {
+      "dataset": "Embodied-AI-6/blue_so101_color_blocks_10ep_v1_20260526_175604",
+      "reason": "10 episodes < 15"
+    },
+    {
+      "dataset": "aswinkumar99/so101-eval-gallery",
+      "reason": "no readable meta/info.json (RemoteEntryNotFoundError)"
+    },
+    {
+      "dataset": "jchandru08/so100_press_red_button",
+      "reason": "action has 12 joints, not 6"
+    },
+    {
+      "dataset": "nvidia/Anchor-Lab",
+      "reason": "no readable meta/info.json (RemoteEntryNotFoundError)"
+    },
+    {
+      "dataset": "maximilianofir/so101-balanced-gripper-ab-50k-20261005",
+      "reason": "no readable meta/info.json (RemoteEntryNotFoundError)"
+    },
+    {
+      "dataset": "armnet/armnetbench_v01_lerobot_so101",
+      "reason": "fps 20 not in [30, 50]"
+    },
+    {
+      "dataset": "Johnbosco20/community_dataset_v3",
+      "reason": "no readable meta/info.json (RemoteEntryNotFoundError)"
+    },
+    {
+      "dataset": "dongyoonkim/so101-pi05-base-dataset",
+      "reason": "tabular data 358 MB > 200 MB"
+    },
+    {
+      "dataset": "mcobzarenco/community_curated_v0",
+      "reason": "no readable meta/info.json (RemoteEntryNotFoundError)"
+    },
+    {
+      "dataset": "CoRL2026-CSI/SO101-DualArm-teleop_fold_towel_100epi",
+      "reason": "robot_type 'bi_so_follower' is not an SO-100/101"
+    },
+    {
+      "dataset": "VoicAndrei/so100_kitchen",
+      "reason": "1801 parquet files > 200 (one file per episode; too slow to fetch)"
+    },
+    {
+      "dataset": "cons909/V1-LeRobot-SO101-Eval-Videos",
+      "reason": "no readable meta/info.json (RemoteEntryNotFoundError)"
+    },
+    {
+      "dataset": "matCercola18/so101_gpl_eval",
+      "reason": "no readable meta/info.json (RemoteEntryNotFoundError)"
+    },
+    {
+      "dataset": "shuaishuaicdp/so101-bimanual-v3-all-trajectories",
+      "reason": "action has 12 joints, not 6"
+    },
+    {
+      "dataset": "knightnemo/so101-peg-insertion-arm08-11",
+      "reason": "no readable meta/info.json (RemoteEntryNotFoundError)"
+    },
+    {
+      "dataset": "armnet/armnetbench_v01_lerobot_bimanual_so101",
+      "reason": "action has 12 joints, not 6"
+    },
+    {
+      "dataset": "Voxel51/community_v3_10per_embodiment",
+      "reason": "no readable meta/info.json (RemoteEntryNotFoundError)"
+    },
+    {
+      "dataset": "IlyaGusev/so101_pick_gum",
+      "reason": "fps 20 not in [30, 50]"
+    },
+    {
+      "dataset": "Chojins/chess_game_001_blue_stereo",
+      "reason": "577 parquet files > 200 (one file per episode; too slow to fetch)"
+    },
+    {
+      "dataset": "matCercola18/so101_gpl_data",
+      "reason": "no readable meta/info.json (RemoteEntryNotFoundError)"
+    },
+    {
+      "dataset": "SHEC3R/HEC3R-Embodiment-SO101",
+      "reason": "no readable meta/info.json (RemoteEntryNotFoundError)"
+    },
+    {
+      "dataset": "zmfldlwx/community-v1-so101-pick_and_place-converted",
+      "reason": "looks like a merge of several datasets (name contains 'community')"
+    },
+    {
+      "dataset": "MoAIBo/so101_tb4_pick_place_QI",
+      "reason": "action has 8 joints, not 6"
+    },
+    {
+      "dataset": "Zekai-Chen/eval_bi_so101_round1_4cam",
+      "reason": "robot_type 'bi_so_follower' is not an SO-100/101"
+    },
+    {
+      "dataset": "allenai/MolmoAct2-SO100_101-Dataset",
+      "reason": "no readable meta/info.json (RemoteEntryNotFoundError)"
+    },
+    {
+      "dataset": "Aaaay-0610/so101-test-1_20260923_182449",
+      "reason": "3 episodes < 15"
+    },
+    {
+      "dataset": "hu43/square2box",
+      "reason": "robot_type 'xlerobot' is not an SO-100/101"
+    },
+    {
+      "dataset": "Faziz012/eval_so100_new",
+      "reason": "0 episodes < 15"
+    },
+    {
+      "dataset": "MoAIBo/so101_tb4_RJ_testing_RB0",
+      "reason": "action has 8 joints, not 6"
+    },
+    {
+      "dataset": "cmwaters/stone-cup-recordings",
+      "reason": "no readable meta/info.json (RemoteEntryNotFoundError)"
+    },
+    {
+      "dataset": "BlackWhite123/pour_cup_all",
+      "reason": "same owner as BlackWhite123/fold_cloth (likely the same arm)"
+    },
+    {
+      "dataset": "Loki0929/so100_lan",
+      "reason": "800 parquet files > 200 (one file per episode; too slow to fetch)"
+    },
+    {
+      "dataset": "ykorkmaz/molmoact2_so100_101_rbm",
+      "reason": "no readable meta/info.json (RemoteEntryNotFoundError)"
+    },
+    {
+      "dataset": "hungho77/so101-ai20k-multitask",
+      "reason": "same owner as hungho77/so101_left_arm_pick_red_cube_into_pot (likely the same arm)"
+    },
+    {
+      "dataset": "witsense-ai/so101_longhorizon_dataset",
+      "reason": "same owner as witsense-ai/so101_pick_and_place_ring_33 (likely the same arm)"
+    },
+    {
+      "dataset": "ted88168/rollout_colorlogo_stage6_eval",
+      "reason": "no readable meta/info.json (RemoteEntryNotFoundError)"
+    },
+    {
+      "dataset": "shylee/so100_pengripA",
+      "reason": "300 parquet files > 200 (one file per episode; too slow to fetch)"
+    },
+    {
+      "dataset": "CarlosMunoz0/mujoco-so101-stack_cubes-joystick-v2",
+      "reason": "looks like a simulation dataset (name contains 'mujoco')"
+    },
+    {
+      "dataset": "dharak22/so101-red-cube_20260908_113622",
+      "reason": "same owner as dharak22/so101-red-cube-3D-print-clean (likely the same arm)"
+    },
+    {
+      "dataset": "shylee/so100_pengripG",
+      "reason": "300 parquet files > 200 (one file per episode; too slow to fetch)"
+    },
+    {
+      "dataset": "Artefacts/shape-sorting-so101-30fps",
+      "reason": "action joints ['Rotation', 'Pitch', 'Elbow', 'Wrist_Pitch', 'Wrist_Roll', 'Jaw'] are not the SO-101 joints"
+    },
+    {
+      "dataset": "ewinchell07/so101-smolvla-finetuned-250-eval-20261003",
+      "reason": "no readable meta/info.json (RemoteEntryNotFoundError)"
+    },
+    {
+      "dataset": "rubatotree/pick-the-block-synthetic-512",
+      "reason": "looks like a simulation dataset (name contains 'synthetic')"
+    },
+    {
+      "dataset": "Chojins/chess_game_001_red_stereo",
+      "reason": "535 parquet files > 200 (one file per episode; too slow to fetch)"
+    },
+    {
+      "dataset": "dharak22/so101-red-cube-3D-print_20260923_110916",
+      "reason": "same owner as dharak22/so101-red-cube-3D-print-clean (likely the same arm)"
+    },
+    {
+      "dataset": "CnLori/so101_piper",
+      "reason": "robot_type 'piper_follower' is not an SO-100/101"
+    },
+    {
+      "dataset": "shylee/so100_pengripF",
+      "reason": "300 parquet files > 200 (one file per episode; too slow to fetch)"
+    },
+    {
+      "dataset": "hjkso1406/so101-3tasks-100eps",
+      "reason": "same owner as hjkso1406/eval_smolvla-so101-4tasks-aug-v2_stack_30 (likely the same arm)"
+    },
+    {
+      "dataset": "dharak22/so101-red-cap-pick-place-demo-v2",
+      "reason": "same owner as dharak22/so101-red-cube-3D-print-clean (likely the same arm)"
+    },
+    {
+      "dataset": "samsitol/so100_boarduni",
+      "reason": "same owner as samsitol/so100_PnPacorn (likely the same arm)"
+    },
+    {
+      "dataset": "G3nadh/so101_pick_place",
+      "reason": "no readable meta/info.json (RemoteEntryNotFoundError)"
+    },
+    {
+      "dataset": "Loki0929/so100_duck",
+      "reason": "300 parquet files > 200 (one file per episode; too slow to fetch)"
+    },
+    {
+      "dataset": "cetiennec/so101-leader-urdf",
+      "reason": "no readable meta/info.json (RemoteEntryNotFoundError)"
+    },
+    {
+      "dataset": "shylee/so100_pengrip",
+      "reason": "300 parquet files > 200 (one file per episode; too slow to fetch)"
+    },
+    {
+      "dataset": "samsitol/so100_peg01",
+      "reason": "same owner as samsitol/so100_PnPacorn (likely the same arm)"
+    },
+    {
+      "dataset": "dharak22/so101-red-cube-3d_20260915_135646",
+      "reason": "same owner as dharak22/so101-red-cube-3D-print-clean (likely the same arm)"
+    },
+    {
+      "dataset": "maximilianofir/so101-left-rack-balanced-1000-dr-speed05-1-20261005",
+      "reason": "1000 parquet files > 200 (one file per episode; too slow to fetch)"
+    },
+    {
+      "dataset": "Chaenn/so101_multitask_oldsim_pick_place_stack_onehot",
+      "reason": "looks like a simulation dataset (name contains 'sim')"
+    },
+    {
+      "dataset": "WoWjx/so101-stacking-corpus",
+      "reason": "no readable meta/info.json (RemoteEntryNotFoundError)"
+    },
+    {
+      "dataset": "lucarrr/so100_pybullet_pickup_v3",
+      "reason": "looks like a simulation dataset (name contains 'pybullet')"
+    },
+    {
+      "dataset": "Chaenn/so101_multitask_newsim_place_stack_raw",
+      "reason": "looks like a simulation dataset (name contains 'sim')"
+    },
+    {
+      "dataset": "sreetz-nv/so101_orange_manual_dr75_20260916",
+      "reason": "same owner as sreetz-nv/so101_teleop_vials_rack_left (likely the same arm)"
+    },
+    {
+      "dataset": "dadm022/lerobot_rgb_vla",
+      "reason": "2318 parquet files > 200 (one file per episode; too slow to fetch)"
+    },
+    {
+      "dataset": "ReubenLim/bimanual-so100-pick-tape",
+      "reason": "action has 12 joints, not 6"
+    },
+    {
+      "dataset": "samsitol/so101_cube",
+      "reason": "same owner as samsitol/so100_PnPacorn (likely the same arm)"
+    },
+    {
+      "dataset": "armnet/armnetbench_v01_robometer",
+      "reason": "no readable meta/info.json (RemoteEntryNotFoundError)"
+    },
+    {
+      "dataset": "ReubenLim/bimanual-so100-left-pick-tape",
+      "reason": "action has 12 joints, not 6"
+    },
+    {
+      "dataset": "jiuyal2/so100_marker",
+      "reason": "224 parquet files > 200 (one file per episode; too slow to fetch)"
+    },
+    {
+      "dataset": "Project-IRA/TPSoSe2026_Dataset_Full_Merged_Final_LeRobot_SO101_V1",
+      "reason": "looks like a merge of several datasets (name contains 'merged')"
+    },
+    {
+      "dataset": "Deviant65/so101_redcube_3cam",
+      "reason": "same owner as Deviant65/so101_redcube_20260925_154203 (likely the same arm)"
+    },
+    {
+      "dataset": "liuhuanjim013/so100_th_1",
+      "reason": "210 parquet files > 200 (one file per episode; too slow to fetch)"
+    },
+    {
+      "dataset": "LUOSYrrrrr/so101_pick_place_blue_dual_rgb_20260929",
+      "reason": "same owner as LUOSYrrrrr/so101_yellow_tape_v1_v21 (likely the same arm)"
+    },
+    {
+      "dataset": "QianGroup/so101_pick_place",
+      "reason": "no readable meta/info.json (RemoteEntryNotFoundError)"
+    },
+    {
+      "dataset": "sashenkagamage/so101-teleop-vials-to-rack-real",
+      "reason": "0 episodes < 15"
+    },
+    {
+      "dataset": "shylee/so100_gauze",
+      "reason": "same owner as shylee/so100_cube (likely the same arm)"
+    },
+    {
+      "dataset": "LeRobot-worldwide-hackathon/291-jpizarrom-hilserl_so100_push_v2_cropped_resized",
+      "reason": "same owner as LeRobot-worldwide-hackathon/190-RecycloBots-recyclobots (likely the same arm)"
+    },
+    {
+      "dataset": "Chaenn/so101_cube_sim_place_1000_dirty300_0924_tidy",
+      "reason": "looks like a simulation dataset (name contains 'sim')"
+    },
+    {
+      "dataset": "gpudad/so101_pick_cube_chunked",
+      "reason": "action joints ['elbow_flex', 'gripper', 'shoulder_lift', 'shoulder_pan', 'wrist_flex', 'wrist_roll'] are not the SO-101 joints"
+    },
+    {
+      "dataset": "Chojins/chess_game_001_blue_stereo_flip",
+      "reason": "306 parquet files > 200 (one file per episode; too slow to fetch)"
+    },
+    {
+      "dataset": "LeRobot-worldwide-hackathon/291-jpizarrom-hilserl_so100_push_v2",
+      "reason": "same owner as LeRobot-worldwide-hackathon/190-RecycloBots-recyclobots (likely the same arm)"
+    },
+    {
+      "dataset": "ted88168/rollout_colorlogo_inference_merged_v1",
+      "reason": "looks like a merge of several datasets (name contains 'merged')"
+    },
+    {
+      "dataset": "5hadytru/so101_bench_sim_WM_v2.1",
+      "reason": "looks like a simulation dataset (name contains 'sim')"
+    },
+    {
+      "dataset": "LeRobot-worldwide-hackathon/291-jpizarrom-hilserl_so100_push_v1",
+      "reason": "same owner as LeRobot-worldwide-hackathon/190-RecycloBots-recyclobots (likely the same arm)"
+    },
+    {
+      "dataset": "pbvr/so101_test002",
+      "reason": "201 parquet files > 200 (one file per episode; too slow to fetch)"
+    },
+    {
+      "dataset": "ReubenLim/bimanual-so100-right-pick-tape",
+      "reason": "action has 12 joints, not 6"
+    },
+    {
+      "dataset": "LeRobot-worldwide-hackathon/291-jpizarrom-hilserl_so100_push_v0",
+      "reason": "same owner as LeRobot-worldwide-hackathon/190-RecycloBots-recyclobots (likely the same arm)"
+    },
+    {
+      "dataset": "drjaisree25/carrot_data_0",
+      "reason": "same owner as drjaisree25/onion_data (likely the same arm)"
+    },
+    {
+      "dataset": "youliangtan/so100_strawberry_grape",
+      "reason": "same owner as youliangtan/so101-table-cleanup (likely the same arm)"
+    },
+    {
+      "dataset": "Jingyi-Z/sotac",
+      "reason": "robot_type 'so_sensor_follower' is not an SO-100/101"
+    },
+    {
+      "dataset": "LeRobot-worldwide-hackathon/191-Dum-E-so100-fries",
+      "reason": "same owner as LeRobot-worldwide-hackathon/190-RecycloBots-recyclobots (likely the same arm)"
+    },
+    {
+      "dataset": "Jiamo0912/so101-cube-drawer",
+      "reason": "same owner as Jiamo0912/robocolosseum-so101-black-screwdriver-box-to-table-100episodes (likely the same arm)"
+    },
+    {
+      "dataset": "dharak22/so101-red-cap-pick-place-exact-like-lerobot_20260826_110927",
+      "reason": "same owner as dharak22/so101-red-cube-3D-print-clean (likely the same arm)"
+    },
+    {
+      "dataset": "Piginini/so101_test",
+      "reason": "0 episodes < 15"
+    },
+    {
+      "dataset": "Qiu-Xinchuan/eval_so101_bimanual_total_0",
+      "reason": "robot_type 'bi_so_follower' is not an SO-100/101"
+    },
+    {
+      "dataset": "Jiamo0912/so101-stack-bowls",
+      "reason": "same owner as Jiamo0912/robocolosseum-so101-black-screwdriver-box-to-table-100episodes (likely the same arm)"
+    },
+    {
+      "dataset": "Cornito/so101_tea2",
+      "reason": "same owner as Cornito/so101_chess17 (likely the same arm)"
+    },
+    {
+      "dataset": "Chaenn/so101_multitask_oldsim_pick_place_stack_raw",
+      "reason": "looks like a simulation dataset (name contains 'sim')"
+    },
+    {
+      "dataset": "theomishin/so101_test_2cam",
+      "reason": "0 episodes < 15"
+    },
+    {
+      "dataset": "LeRobot-worldwide-hackathon/46-3580-bi_so100_pour_water_real",
+      "reason": "same owner as LeRobot-worldwide-hackathon/190-RecycloBots-recyclobots (likely the same arm)"
+    }
+  ],
+  "robots": [
+    {
+      "baseline_eval": 6.0068381170997585,
+      "calibrated_eval": 1.0544976290826422,
+      "data_bytes": 369943,
+      "dataset": "lerobot/svla_so101_pickplace",
+      "downloads": 10718,
+      "elapsed_s": 13.795428792014718,
+      "fps": 30.0,
+      "frames_per_episode": 238.78,
+      "improvement": 0.8244504665306716,
+      "latency_ms": 133.33333333333334,
+      "lock": "lerobot__svla_so101_pickplace",
+      "n_episodes": 50,
+      "n_eval": 10,
+      "n_evaluations": 150,
+      "n_train": 20,
+      "params": {
+        "armature": 0.019703166866811193,
+        "damping": 0.052719117670612985,
+        "frictionloss": 0.025181795953895247,
+        "kp": 93.70021916179945,
+        "kv": 1.5718591906130155,
+        "latency_frames": 4
+      },
+      "per_joint_after": {
+        "elbow_flex": 2.0306303221672977,
+        "gripper": 3.0332909594060182,
+        "shoulder_lift": 0.9682725579465901,
+        "shoulder_pan": 0.3492207079278662,
+        "wrist_flex": 0.47633845740509173,
+        "wrist_roll": 0.3872487160445731
+      },
+      "per_joint_before": {
+        "elbow_flex": 5.355042634788983,
+        "gripper": 4.580725206368251,
+        "shoulder_lift": 6.831911209842182,
+        "shoulder_pan": 8.049030186494946,
+        "wrist_flex": 3.797088998323286,
+        "wrist_roll": 5.084708115648655
+      },
+      "robot_type": "so100_follower"
+    },
+    {
+      "baseline_eval": 2.7438591732599065,
+      "calibrated_eval": 0.7914821604333481,
+      "data_bytes": 476455,
+      "dataset": "lerobot/svla_so100_pickplace",
+      "downloads": 20403,
+      "elapsed_s": 24.167633834062144,
+      "fps": 30.0,
+      "frames_per_episode": 392.62,
+      "improvement": 0.711544175391112,
+      "latency_ms": 100.0,
+      "lock": "lerobot__svla_so100_pickplace",
+      "n_episodes": 50,
+      "n_eval": 10,
+      "n_evaluations": 150,
+      "n_train": 20,
+      "params": {
+        "armature": 0.013757310701717939,
+        "damping": 0.185405061094932,
+        "frictionloss": 0.6219731838241972,
+        "kp": 1246.1091682392578,
+        "kv": 42.419488710046394,
+        "latency_frames": 3
+      },
+      "per_joint_after": {
+        "elbow_flex": 1.3223320906957283,
+        "gripper": 3.578608533907447,
+        "shoulder_lift": 0.8294318978695056,
+        "shoulder_pan": 0.43294229237710796,
+        "wrist_flex": 0.4317156176039277,
+        "wrist_roll": 0.567347527642598
+      },
+      "per_joint_before": {
+        "elbow_flex": 2.515527059720518,
+        "gripper": 4.049868164568323,
+        "shoulder_lift": 3.5404241219664505,
+        "shoulder_pan": 3.223856755150761,
+        "wrist_flex": 1.9554692149404291,
+        "wrist_roll": 2.1364045107408107
+      },
+      "robot_type": "so100"
+    },
+    {
+      "baseline_eval": 21.328469713322985,
+      "calibrated_eval": 14.940197012967706,
+      "data_bytes": 4279232,
+      "dataset": "kmg0620/so101_bomb_pick_place_v1",
+      "downloads": 2481,
+      "elapsed_s": 35.86914045806043,
+      "fps": 30.0,
+      "frames_per_episode": 591.88,
+      "improvement": 0.29951856772756635,
+      "latency_ms": 66.66666666666667,
+      "lock": "kmg0620__so101_bomb_pick_place_v1",
+      "n_episodes": 150,
+      "n_eval": 10,
+      "n_evaluations": 150,
+      "n_train": 20,
+      "params": {
+        "armature": 0.0004233104048710953,
+        "damping": 0.047609309270594646,
+        "frictionloss": 0.48307075398751537,
+        "kp": 1545.547205636619,
+        "kv": 22.237186426370236,
+        "latency_frames": 2
+      },
+      "per_joint_after": {
+        "elbow_flex": 11.295714921807392,
+        "gripper": 10.379595228868927,
+        "shoulder_lift": 21.64369194304817,
+        "shoulder_pan": 9.77671057685373,
+        "wrist_flex": 10.55157465059867,
+        "wrist_roll": 17.69420979022277
+      },
+      "per_joint_before": {
+        "elbow_flex": 15.504899559085377,
+        "gripper": 11.67539898747497,
+        "shoulder_lift": 23.65869010974446,
+        "shoulder_pan": 10.15742201220595,
+        "wrist_flex": 19.84461332610424,
+        "wrist_roll": 31.263407899936198
+      },
+      "robot_type": "so_follower"
+    },
+    {
+      "baseline_eval": 4.107641328049324,
+      "calibrated_eval": 1.0899517553881586,
+      "data_bytes": 1705974,
+      "dataset": "BlackWhite123/fold_cloth",
+      "downloads": 1873,
+      "elapsed_s": 47.49728733301163,
+      "fps": 30.0,
+      "frames_per_episode": 701.12,
+      "improvement": 0.7346526465333414,
+      "latency_ms": 66.66666666666667,
+      "lock": "blackwhite123__fold_cloth",
+      "n_episodes": 50,
+      "n_eval": 10,
+      "n_evaluations": 150,
+      "n_train": 20,
+      "params": {
+        "armature": 0.06455170805219003,
+        "damping": 0.012920430872459813,
+        "frictionloss": 0.777367307803003,
+        "kp": 991.3388578130773,
+        "kv": 30.925155174741995,
+        "latency_frames": 2
+      },
+      "per_joint_after": {
+        "elbow_flex": 1.947561227279964,
+        "gripper": 0.9128140096645908,
+        "shoulder_lift": 0.79810865320619,
+        "shoulder_pan": 0.26645143684611133,
+        "wrist_flex": 0.9800957741230261,
+        "wrist_roll": 0.6916775942522868
+      },
+      "per_joint_before": {
+        "elbow_flex": 6.318251031474447,
+        "gripper": 3.9313913604988935,
+        "shoulder_lift": 5.044064580125013,
+        "shoulder_pan": 1.9803141764776895,
+        "wrist_flex": 3.2964131689377507,
+        "wrist_roll": 2.0524908760795304
+      },
+      "robot_type": "so_follower"
+    },
+    {
+      "baseline_eval": 6.473360599427046,
+      "calibrated_eval": 1.1885796000208553,
+      "data_bytes": 2920986,
+      "dataset": "youliangtan/so101-table-cleanup",
+      "downloads": 1368,
+      "elapsed_s": 52.366096624871716,
+      "fps": 30.0,
+      "frames_per_episode": 587.0375,
+      "improvement": 0.8163890946958747,
+      "latency_ms": 66.66666666666667,
+      "lock": "youliangtan__so101-table-cleanup",
+      "n_episodes": 80,
+      "n_eval": 10,
+      "n_evaluations": 150,
+      "n_train": 20,
+      "params": {
+        "armature": 0.1531215547592672,
+        "damping": 0.010599970028367956,
+        "frictionloss": 0.0017554802461407647,
+        "kp": 312.7969779671483,
+        "kv": 27.111344136239175,
+        "latency_frames": 2
+      },
+      "per_joint_after": {
+        "elbow_flex": 1.6086869886656348,
+        "gripper": 3.754993695532554,
+        "shoulder_lift": 1.7545242728274364,
+        "shoulder_pan": 0.4303376088726426,
+        "wrist_flex": 0.974082739392983,
+        "wrist_roll": 0.5131768074381046
+      },
+      "per_joint_before": {
+        "elbow_flex": 7.503423034240997,
+        "gripper": 6.011210666069668,
+        "shoulder_lift": 7.2703449889996525,
+        "shoulder_pan": 2.898654366620189,
+        "wrist_flex": 8.031005670742532,
+        "wrist_roll": 5.240559563691333
+      },
+      "robot_type": "so101_follower"
+    },
+    {
+      "baseline_eval": 4.370196813470486,
+      "calibrated_eval": 1.6111043337867101,
+      "data_bytes": 1834327,
+      "dataset": "hungho77/so101_left_arm_pick_red_cube_into_pot",
+      "downloads": 1341,
+      "elapsed_s": 52.20578725007363,
+      "fps": 30.0,
+      "frames_per_episode": 750.72,
+      "improvement": 0.631342842770669,
+      "latency_ms": 133.33333333333334,
+      "lock": "hungho77__so101_left_arm_pick_red_cube_into_pot",
+      "n_episodes": 50,
+      "n_eval": 10,
+      "n_evaluations": 150,
+      "n_train": 20,
+      "params": {
+        "armature": 0.004383155703415205,
+        "damping": 0.26203489658387213,
+        "frictionloss": 0.10857729159819535,
+        "kp": 54.15070054820083,
+        "kv": 0.16910340581944222,
+        "latency_frames": 4
+      },
+      "per_joint_after": {
+        "elbow_flex": 2.132408455057565,
+        "gripper": 6.271913521932792,
+        "shoulder_lift": 1.4296305099887983,
+        "shoulder_pan": 0.5174501428121996,
+        "wrist_flex": 0.578122249215162,
+        "wrist_roll": 2.405264366365121
+      },
+      "per_joint_before": {
+        "elbow_flex": 4.841521640134678,
+        "gripper": 7.497738493934317,
+        "shoulder_lift": 4.786689633046661,
+        "shoulder_pan": 2.7282954246197217,
+        "wrist_flex": 2.668538735293456,
+        "wrist_roll": 5.88010855355296
+      },
+      "robot_type": "so_follower"
+    },
+    {
+      "baseline_eval": 6.69388782212938,
+      "calibrated_eval": 4.445733711422116,
+      "data_bytes": 233421,
+      "dataset": "codywang/so101_pickup_test",
+      "downloads": 978,
+      "elapsed_s": 11.513061416102573,
+      "fps": 30.0,
+      "frames_per_episode": 150.0,
+      "improvement": 0.33585177559669777,
+      "latency_ms": 100.0,
+      "lock": "codywang__so101_pickup_test",
+      "n_episodes": 30,
+      "n_eval": 10,
+      "n_evaluations": 150,
+      "n_train": 20,
+      "params": {
+        "armature": 0.02820948928535669,
+        "damping": 0.47770912130892207,
+        "frictionloss": 0.0015404893943903558,
+        "kp": 225.79414270020476,
+        "kv": 12.484275926105418,
+        "latency_frames": 3
+      },
+      "per_joint_after": {
+        "elbow_flex": 2.59562047102487,
+        "gripper": 1.766185075824315,
+        "shoulder_lift": 1.4640158205740512,
+        "shoulder_pan": 0.38166608320345424,
+        "wrist_flex": 1.6467662774470109,
+        "wrist_roll": 9.331915400402869
+      },
+      "per_joint_before": {
+        "elbow_flex": 7.091876378680504,
+        "gripper": 6.172727426186102,
+        "shoulder_lift": 7.718348265553476,
+        "shoulder_pan": 3.899801345121234,
+        "wrist_flex": 3.2802650768686914,
+        "wrist_roll": 9.39172352933515
+      },
+      "robot_type": "so_follower"
+    },
+    {
+      "baseline_eval": 3.8803314429219746,
+      "calibrated_eval": 1.1051325674595647,
+      "data_bytes": 2466140,
+      "dataset": "samanthalhy/so100_popcorn_2_transport",
+      "downloads": 969,
+      "elapsed_s": 72.02049575001001,
+      "fps": 30.0,
+      "frames_per_episode": 568.125,
+      "improvement": 0.7151963476018492,
+      "latency_ms": 133.33333333333334,
+      "lock": "samanthalhy__so100_popcorn_2_transport",
+      "n_episodes": 80,
+      "n_eval": 10,
+      "n_evaluations": 150,
+      "n_train": 20,
+      "params": {
+        "armature": 0.03680190553398875,
+        "damping": 0.01287499391155335,
+        "frictionloss": 1.9159058280077872,
+        "kp": 526.5854147959523,
+        "kv": 8.495730394562813,
+        "latency_frames": 4
+      },
+      "per_joint_after": {
+        "elbow_flex": 1.3771070710133468,
+        "gripper": 2.864858006669733,
+        "shoulder_lift": 1.7176066798690097,
+        "shoulder_pan": 0.711824769069575,
+        "wrist_flex": 0.5299110567148277,
+        "wrist_roll": 0.6873813618681142
+      },
+      "per_joint_before": {
+        "elbow_flex": 3.8889270406588112,
+        "gripper": 2.868363056900204,
+        "shoulder_lift": 3.512375567968954,
+        "shoulder_pan": 3.3970882531084707,
+        "wrist_flex": 2.015195987347314,
+        "wrist_roll": 5.676539562954163
+      },
+      "robot_type": "so100_follower"
+    },
+    {
+      "baseline_eval": 4.348180874161442,
+      "calibrated_eval": 1.947017034671635,
+      "data_bytes": 3384934,
+      "dataset": "dharak22/so101-red-cube-3D-print-clean",
+      "downloads": 958,
+      "elapsed_s": 43.262892375001684,
+      "fps": 30.0,
+      "frames_per_episode": 594.9242424242424,
+      "improvement": 0.5522226211329992,
+      "latency_ms": 100.0,
+      "lock": "dharak22__so101-red-cube-3d-print-clean",
+      "n_episodes": 198,
+      "n_eval": 10,
+      "n_evaluations": 150,
+      "n_train": 20,
+      "params": {
+        "armature": 0.03472036725935842,
+        "damping": 0.9499886718608037,
+        "frictionloss": 0.44095670798950287,
+        "kp": 430.2914935384592,
+        "kv": 25.815833606089452,
+        "latency_frames": 3
+      },
+      "per_joint_after": {
+        "elbow_flex": 2.1499570751685955,
+        "gripper": 12.984082822425739,
+        "shoulder_lift": 1.9392160917771208,
+        "shoulder_pan": 0.6939579218419603,
+        "wrist_flex": 2.08325308082432,
+        "wrist_roll": 2.3979118404940505
+      },
+      "per_joint_before": {
+        "elbow_flex": 5.1696524984549335,
+        "gripper": 13.563945115900637,
+        "shoulder_lift": 5.385337494410151,
+        "shoulder_pan": 3.2053333868256964,
+        "wrist_flex": 2.893398995962799,
+        "wrist_roll": 4.49002202868735
+      },
+      "robot_type": "so_follower"
+    },
+    {
+      "baseline_eval": 3.519619292177669,
+      "calibrated_eval": 2.1857715728280946,
+      "data_bytes": 491580,
+      "dataset": "witsense-ai/so101_pick_and_place_ring_33",
+      "downloads": 929,
+      "elapsed_s": 46.967207208042964,
+      "fps": 30.0,
+      "frames_per_episode": 571.5454545454545,
+      "improvement": 0.37897499945918645,
+      "latency_ms": 33.333333333333336,
+      "lock": "witsense-ai__so101_pick_and_place_ring_33",
+      "n_episodes": 33,
+      "n_eval": 10,
+      "n_evaluations": 150,
+      "n_train": 20,
+      "params": {
+        "armature": 0.049294213039607744,
+        "damping": 0.15926250717414422,
+        "frictionloss": 0.2777888607033412,
+        "kp": 158.95592331348098,
+        "kv": 19.755904358547053,
+        "latency_frames": 1
+      },
+      "per_joint_after": {
+        "elbow_flex": 1.2238361690633948,
+        "gripper": 1.6846561391852533,
+        "shoulder_lift": 4.585435403272626,
+        "shoulder_pan": 0.3691586153385291,
+        "wrist_flex": 0.963205137971482,
+        "wrist_roll": 0.5476785695368461
+      },
+      "per_joint_before": {
+        "elbow_flex": 3.87940259351446,
+        "gripper": 2.576556871475692,
+        "shoulder_lift": 6.276602759491317,
+        "shoulder_pan": 1.291007963415667,
+        "wrist_flex": 1.5809795198770649,
+        "wrist_roll": 1.8239778843100207
+      },
+      "robot_type": "so_follower"
+    },
+    {
+      "baseline_eval": 3.6997030769653807,
+      "calibrated_eval": 0.9537927510071396,
+      "data_bytes": 1118191,
+      "dataset": "MaxT90/so101-pick-place",
+      "downloads": 889,
+      "elapsed_s": 49.84738374990411,
+      "fps": 30.0,
+      "frames_per_episode": 455.42,
+      "improvement": 0.7421974868887391,
+      "latency_ms": 133.33333333333334,
+      "lock": "maxt90__so101-pick-place",
+      "n_episodes": 50,
+      "n_eval": 10,
+      "n_evaluations": 150,
+      "n_train": 20,
+      "params": {
+        "armature": 0.0026953315802281646,
+        "damping": 0.10462788703233614,
+        "frictionloss": 1.991804412484709,
+        "kp": 1311.7188441335568,
+        "kv": 0.7534811275073973,
+        "latency_frames": 4
+      },
+      "per_joint_after": {
+        "elbow_flex": 1.3595775573842748,
+        "gripper": 1.0712441553622856,
+        "shoulder_lift": 1.1434441362845247,
+        "shoulder_pan": 0.38641405605451357,
+        "wrist_flex": 0.6647179024383434,
+        "wrist_roll": 0.8952774539123899
+      },
+      "per_joint_before": {
+        "elbow_flex": 4.643118524423145,
+        "gripper": 2.40079296768594,
+        "shoulder_lift": 5.158333242477299,
+        "shoulder_pan": 2.417079406329014,
+        "wrist_flex": 2.9851673865962765,
+        "wrist_roll": 2.3491627516521563
+      },
+      "robot_type": "so_follower"
+    },
+    {
+      "baseline_eval": 2.1318641664462374,
+      "calibrated_eval": 0.7047551562684028,
+      "data_bytes": 4807392,
+      "dataset": "apayan/so100_ball8",
+      "downloads": 822,
+      "elapsed_s": 97.06354979192838,
+      "fps": 30.0,
+      "frames_per_episode": 1061.6923076923076,
+      "improvement": 0.6694183581859198,
+      "latency_ms": 100.0,
+      "lock": "apayan__so100_ball8",
+      "n_episodes": 104,
+      "n_eval": 10,
+      "n_evaluations": 150,
+      "n_train": 20,
+      "params": {
+        "armature": 0.005670584051438277,
+        "damping": 0.5797729841378495,
+        "frictionloss": 0.498543224510867,
+        "kp": 92.0871102420065,
+        "kv": 1.4055686180719873,
+        "latency_frames": 3
+      },
+      "per_joint_after": {
+        "elbow_flex": 0.7591342785497063,
+        "gripper": 8.259746229905415,
+        "shoulder_lift": 1.0484732159230892,
+        "shoulder_pan": 0.3125835735765348,
+        "wrist_flex": 0.5632382598648913,
+        "wrist_roll": 0.62679533040037
+      },
+      "per_joint_before": {
+        "elbow_flex": 0.9167159873140743,
+        "gripper": 8.47240229736208,
+        "shoulder_lift": 1.5231351531086574,
+        "shoulder_pan": 1.3621074483550648,
+        "wrist_flex": 1.3363692623874772,
+        "wrist_roll": 3.990325264754317
+      },
+      "robot_type": "so100"
+    },
+    {
+      "baseline_eval": 2.8044925710905892,
+      "calibrated_eval": 1.3721961115705945,
+      "data_bytes": 2041777,
+      "dataset": "Deviant65/so101_redcube_20260925_154203",
+      "downloads": 794,
+      "elapsed_s": 50.484660665970296,
+      "fps": 30.0,
+      "frames_per_episode": 848.063492063492,
+      "improvement": 0.5107150128634552,
+      "latency_ms": 66.66666666666667,
+      "lock": "deviant65__so101_redcube_20260925_154203",
+      "n_episodes": 63,
+      "n_eval": 10,
+      "n_evaluations": 150,
+      "n_train": 20,
+      "params": {
+        "armature": 0.05379106660298148,
+        "damping": 0.11551415444436981,
+        "frictionloss": 0.0012904551479253272,
+        "kp": 198.55658149509844,
+        "kv": 17.945574597333323,
+        "latency_frames": 2
+      },
+      "per_joint_after": {
+        "elbow_flex": 2.456668415498296,
+        "gripper": 6.183073839040557,
+        "shoulder_lift": 1.6002816003232834,
+        "shoulder_pan": 0.4737773440519521,
+        "wrist_flex": 0.4162378568284327,
+        "wrist_roll": 0.6486686471636293
+      },
+      "per_joint_before": {
+        "elbow_flex": 3.910154104289683,
+        "gripper": 6.601204063679813,
+        "shoulder_lift": 3.894977730662061,
+        "shoulder_pan": 1.7461803263106195,
+        "wrist_flex": 1.6047282738416497,
+        "wrist_roll": 1.8003993168193615
+      },
+      "robot_type": "so_follower"
+    },
+    {
+      "baseline_eval": 3.8278879280937272,
+      "calibrated_eval": 1.422610647692659,
+      "data_bytes": 1934261,
+      "dataset": "Twu31/so101_hand_blue_napkin",
+      "downloads": 765,
+      "elapsed_s": 45.968895124970004,
+      "fps": 30.0,
+      "frames_per_episode": 400.9207920792079,
+      "improvement": 0.6283562438566186,
+      "latency_ms": 66.66666666666667,
+      "lock": "twu31__so101_hand_blue_napkin",
+      "n_episodes": 101,
+      "n_eval": 10,
+      "n_evaluations": 150,
+      "n_train": 20,
+      "params": {
+        "armature": 0.011122844013598403,
+        "damping": 0.09418353693405089,
+        "frictionloss": 1.9756736005853726,
+        "kp": 94.96106824059648,
+        "kv": 5.102762114635482,
+        "latency_frames": 2
+      },
+      "per_joint_after": {
+        "elbow_flex": 1.540233230470611,
+        "gripper": 8.654925881693494,
+        "shoulder_lift": 2.406106101027025,
+        "shoulder_pan": 1.0615324242269344,
+        "wrist_flex": 0.5413257703179326,
+        "wrist_roll": 0.7331818489991503
+      },
+      "per_joint_before": {
+        "elbow_flex": 2.2428175091041886,
+        "gripper": 10.14835934838485,
+        "shoulder_lift": 4.364344245145934,
+        "shoulder_pan": 5.62197925345634,
+        "wrist_flex": 1.7606368768393543,
+        "wrist_roll": 3.80518145987357
+      },
+      "robot_type": "so101_follower"
+    },
+    {
+      "baseline_eval": 5.490381098364075,
+      "calibrated_eval": 2.3823379067373764,
+      "data_bytes": 3975876,
+      "dataset": "shubham4413/so100_smolvla_rc",
+      "downloads": 756,
+      "elapsed_s": 27.90792829100974,
+      "fps": 30.0,
+      "frames_per_episode": 481.9,
+      "improvement": 0.5660887898205786,
+      "latency_ms": 166.66666666666666,
+      "lock": "shubham4413__so100_smolvla_rc",
+      "n_episodes": 160,
+      "n_eval": 10,
+      "n_evaluations": 150,
+      "n_train": 20,
+      "params": {
+        "armature": 0.005725235892734154,
+        "damping": 0.6832911691664169,
+        "frictionloss": 0.03296291218510951,
+        "kp": 50.2823516705152,
+        "kv": 0.3393557725156178,
+        "latency_frames": 5
+      },
+      "per_joint_after": {
+        "elbow_flex": 3.5108603720708036,
+        "gripper": 8.629051031684474,
+        "shoulder_lift": 3.6370201118407994,
+        "shoulder_pan": 0.6935709244504066,
+        "wrist_flex": 1.0233775155023142,
+        "wrist_roll": 1.138099950267481
+      },
+      "per_joint_before": {
+        "elbow_flex": 7.907203681966084,
+        "gripper": 11.86157068643097,
+        "shoulder_lift": 8.001855466394828,
+        "shoulder_pan": 2.3959032611818194,
+        "wrist_flex": 2.900704135171434,
+        "wrist_roll": 3.1643996486623576
+      },
+      "robot_type": "so_follower"
+    },
+    {
+      "baseline_eval": 2.0857102467203026,
+      "calibrated_eval": 0.9639056952434497,
+      "data_bytes": 4887825,
+      "dataset": "hjkso1406/eval_smolvla-so101-4tasks-aug-v2_stack_30",
+      "downloads": 748,
+      "elapsed_s": 184.75022162497044,
+      "fps": 30.0,
+      "frames_per_episode": 3064.6,
+      "improvement": 0.5378525388369964,
+      "latency_ms": 33.333333333333336,
+      "lock": "hjkso1406__eval_smolvla-so101-4tasks-aug-v2_stack_30",
+      "n_episodes": 25,
+      "n_eval": 8,
+      "n_evaluations": 150,
+      "n_train": 17,
+      "params": {
+        "armature": 0.13995987069381946,
+        "damping": 0.027326928769774668,
+        "frictionloss": 0.45674696113654856,
+        "kp": 50.00247027170731,
+        "kv": 6.202646488561838,
+        "latency_frames": 1
+      },
+      "per_joint_after": {
+        "elbow_flex": 1.3443624837247754,
+        "gripper": 1.8632922702110195,
+        "shoulder_lift": 1.5739644899529337,
+        "shoulder_pan": 0.3017105796399466,
+        "wrist_flex": 0.3934906467065821,
+        "wrist_roll": 0.3391637958599181
+      },
+      "per_joint_before": {
+        "elbow_flex": 2.79292516915517,
+        "gripper": 2.4112082556756036,
+        "shoulder_lift": 3.0322277092772154,
+        "shoulder_pan": 1.2551648850281938,
+        "wrist_flex": 1.4405707963461156,
+        "wrist_roll": 1.0513882142521007
+      },
+      "robot_type": "so_follower"
+    },
+    {
+      "baseline_eval": 5.130570600713748,
+      "calibrated_eval": 1.3492476395098856,
+      "data_bytes": 1431759,
+      "dataset": "LUOSYrrrrr/so101_yellow_tape_v1_v21",
+      "downloads": 736,
+      "elapsed_s": 40.89530183398165,
+      "fps": 30.0,
+      "frames_per_episode": 498.12,
+      "improvement": 0.7370180152433371,
+      "latency_ms": 66.66666666666667,
+      "lock": "luosyrrrrr__so101_yellow_tape_v1_v21",
+      "n_episodes": 50,
+      "n_eval": 10,
+      "n_evaluations": 150,
+      "n_train": 20,
+      "params": {
+        "armature": 0.03020364691213134,
+        "damping": 0.08111316464544352,
+        "frictionloss": 0.12370604222985496,
+        "kp": 594.6020166930597,
+        "kv": 38.29240664575961,
+        "latency_frames": 2
+      },
+      "per_joint_after": {
+        "elbow_flex": 2.1271931953556416,
+        "gripper": 1.075346041830484,
+        "shoulder_lift": 1.4611247910684286,
+        "shoulder_pan": 1.3557841917384958,
+        "wrist_flex": 0.5617145525368563,
+        "wrist_roll": 0.5374340937019149
+      },
+      "per_joint_before": {
+        "elbow_flex": 7.14976643440954,
+        "gripper": 2.98960369118383,
+        "shoulder_lift": 6.020052402109744,
+        "shoulder_pan": 3.3692135481001717,
+        "wrist_flex": 3.816717104640911,
+        "wrist_roll": 4.281898301480814
+      },
+      "robot_type": "so_follower"
+    },
+    {
+      "baseline_eval": 2.650258391900907,
+      "calibrated_eval": 1.1696436721141354,
+      "data_bytes": 4442721,
+      "dataset": "samsitol/so100_PnPacorn",
+      "downloads": 718,
+      "elapsed_s": 65.06204287498258,
+      "fps": 30.0,
+      "frames_per_episode": 565.0133333333333,
+      "improvement": 0.5586680620695235,
+      "latency_ms": 66.66666666666667,
+      "lock": "samsitol__so100_pnpacorn",
+      "n_episodes": 150,
+      "n_eval": 10,
+      "n_evaluations": 150,
+      "n_train": 20,
+      "params": {
+        "armature": 0.03750562423892055,
+        "damping": 0.12544417821595286,
+        "frictionloss": 0.07605771475379829,
+        "kp": 1283.6507557412642,
+        "kv": 49.072112555591374,
+        "latency_frames": 2
+      },
+      "per_joint_after": {
+        "elbow_flex": 1.3842253890648792,
+        "gripper": 2.4842029517091317,
+        "shoulder_lift": 1.27325045140214,
+        "shoulder_pan": 0.6892343826779802,
+        "wrist_flex": 1.396829585166442,
+        "wrist_roll": 0.936433678694799
+      },
+      "per_joint_before": {
+        "elbow_flex": 2.407231909661514,
+        "gripper": 3.709428417894526,
+        "shoulder_lift": 2.0838895036099365,
+        "shoulder_pan": 2.5655930995668657,
+        "wrist_flex": 3.041315484886329,
+        "wrist_roll": 3.024916355521774
+      },
+      "robot_type": "so100"
+    },
+    {
+      "baseline_eval": 0.12083799800192241,
+      "calibrated_eval": 0.03665019682021938,
+      "data_bytes": 505046,
+      "dataset": "legalaspro/so101-pick-and-place-cube-lerobot-30hz",
+      "downloads": 678,
+      "elapsed_s": 30.366286000004038,
+      "fps": 30.0,
+      "frames_per_episode": 387.52941176470586,
+      "improvement": 0.6966997349655171,
+      "latency_ms": 166.66666666666666,
+      "lock": "legalaspro__so101-pick-and-place-cube-lerobot-30hz",
+      "n_episodes": 51,
+      "n_eval": 10,
+      "n_evaluations": 150,
+      "n_train": 20,
+      "params": {
+        "armature": 0.003577226356270145,
+        "damping": 1.878909488266509,
+        "frictionloss": 0.0018438871932215392,
+        "kp": 1154.9507603115717,
+        "kv": 0.4722075198057827,
+        "latency_frames": 5
+      },
+      "per_joint_after": {
+        "elbow_flex": 0.04776656081495151,
+        "gripper": 0.11933977471443417,
+        "shoulder_lift": 0.0496049586072915,
+        "shoulder_pan": 0.02039180148987254,
+        "wrist_flex": 0.033996710221163254,
+        "wrist_roll": 0.020057081303629792
+      },
+      "per_joint_before": {
+        "elbow_flex": 0.18080861054412906,
+        "gripper": 0.16302507469987926,
+        "shoulder_lift": 0.14789661398963344,
+        "shoulder_pan": 0.10545619796643937,
+        "wrist_flex": 0.05838293306977669,
+        "wrist_roll": 0.06256492760084491
+      },
+      "robot_type": "so101"
+    },
+    {
+      "baseline_eval": 3.3874534982639584,
+      "calibrated_eval": 1.806628664023638,
+      "data_bytes": 3329127,
+      "dataset": "Askel1419/so101_3_cup_no4",
+      "downloads": 666,
+      "elapsed_s": 77.36066445801407,
+      "fps": 30.0,
+      "frames_per_episode": 885.7217391304348,
+      "improvement": 0.46667056390603734,
+      "latency_ms": 133.33333333333334,
+      "lock": "askel1419__so101_3_cup_no4",
+      "n_episodes": 115,
+      "n_eval": 10,
+      "n_evaluations": 150,
+      "n_train": 20,
+      "params": {
+        "armature": 0.0022778616901234713,
+        "damping": 0.701157590830339,
+        "frictionloss": 0.22662967921731328,
+        "kp": 2954.0496956133406,
+        "kv": 38.64061845385609,
+        "latency_frames": 4
+      },
+      "per_joint_after": {
+        "elbow_flex": 2.0688480217409495,
+        "gripper": 3.5268487952455985,
+        "shoulder_lift": 3.1514525773661286,
+        "shoulder_pan": 0.6551932487199948,
+        "wrist_flex": 0.9953315056874353,
+        "wrist_roll": 0.8293293462357642
+      },
+      "per_joint_before": {
+        "elbow_flex": 4.775334278352705,
+        "gripper": 3.918341021299579,
+        "shoulder_lift": 5.180536651656008,
+        "shoulder_pan": 1.7693020240978337,
+        "wrist_flex": 1.847011890686725,
+        "wrist_roll": 1.091121427031476
+      },
+      "robot_type": "so101_follower"
+    },
+    {
+      "baseline_eval": 2.083968780283526,
+      "calibrated_eval": 0.9069446264166197,
+      "data_bytes": 1444464,
+      "dataset": "JimmyPeng02/so100_test_6",
+      "downloads": 655,
+      "elapsed_s": 107.38871558289975,
+      "fps": 30.0,
+      "frames_per_episode": 896.5,
+      "improvement": 0.5647993218529747,
+      "latency_ms": 166.66666666666666,
+      "lock": "jimmypeng02__so100_test_6",
+      "n_episodes": 40,
+      "n_eval": 10,
+      "n_evaluations": 150,
+      "n_train": 20,
+      "params": {
+        "armature": 0.021935689912008043,
+        "damping": 0.04088624973336431,
+        "frictionloss": 0.24179995701083506,
+        "kp": 274.76485675174104,
+        "kv": 1.4205973888068637,
+        "latency_frames": 5
+      },
+      "per_joint_after": {
+        "elbow_flex": 0.9104910663934406,
+        "gripper": 1.987909002033694,
+        "shoulder_lift": 0.9839393590956271,
+        "shoulder_pan": 0.5298598379891429,
+        "wrist_flex": 1.2881875321677547,
+        "wrist_roll": 0.6127263390974794
+      },
+      "per_joint_before": {
+        "elbow_flex": 2.0340450744736507,
+        "gripper": 2.6281587432830373,
+        "shoulder_lift": 2.2492110436447175,
+        "shoulder_pan": 1.64033488461253,
+        "wrist_flex": 2.252739306939622,
+        "wrist_roll": 2.1800932969555564
+      },
+      "robot_type": "so100"
+    },
+    {
+      "baseline_eval": 1.8303178747076914,
+      "calibrated_eval": 0.8674401987654291,
+      "data_bytes": 6391990,
+      "dataset": "dongdong123123/so101_stack_cubes",
+      "downloads": 611,
+      "elapsed_s": 153.24060283298604,
+      "fps": 30.0,
+      "frames_per_episode": 929.8039215686274,
+      "improvement": 0.5260712848013012,
+      "latency_ms": 66.66666666666667,
+      "lock": "dongdong123123__so101_stack_cubes",
+      "n_episodes": 102,
+      "n_eval": 10,
+      "n_evaluations": 150,
+      "n_train": 20,
+      "params": {
+        "armature": 0.005389873140893446,
+        "damping": 0.11472046570804696,
+        "frictionloss": 0.0011019860161323681,
+        "kp": 50.85589346450804,
+        "kv": 0.12839691643002354,
+        "latency_frames": 2
+      },
+      "per_joint_after": {
+        "elbow_flex": 0.9033640862014785,
+        "gripper": 5.819788136080863,
+        "shoulder_lift": 0.9054229795155037,
+        "shoulder_pan": 0.6715496225016455,
+        "wrist_flex": 0.6023562700612416,
+        "wrist_roll": 1.1456845449483364
+      },
+      "per_joint_before": {
+        "elbow_flex": 2.261916730641009,
+        "gripper": 6.272975586089536,
+        "shoulder_lift": 2.1015248797906536,
+        "shoulder_pan": 0.29147357669625523,
+        "wrist_flex": 1.7152175682087272,
+        "wrist_roll": 2.0471236756570423
+      },
+      "robot_type": "so101_follower"
+    },
+    {
+      "baseline_eval": 2.4904782823530645,
+      "calibrated_eval": 0.986679577136361,
+      "data_bytes": 1449872,
+      "dataset": "Haribot099/so101_60",
+      "downloads": 602,
+      "elapsed_s": 71.34427741589025,
+      "fps": 30.0,
+      "frames_per_episode": 456.96666666666664,
+      "improvement": 0.6038192406142477,
+      "latency_ms": 100.0,
+      "lock": "haribot099__so101_60",
+      "n_episodes": 60,
+      "n_eval": 10,
+      "n_evaluations": 150,
+      "n_train": 20,
+      "params": {
+        "armature": 0.010177707729656508,
+        "damping": 0.07018870774500836,
+        "frictionloss": 0.013297012585855167,
+        "kp": 377.3787508374819,
+        "kv": 4.116874952836606,
+        "latency_frames": 3
+      },
+      "per_joint_after": {
+        "elbow_flex": 1.0750082180125018,
+        "gripper": 3.651091415852382,
+        "shoulder_lift": 1.535854716508506,
+        "shoulder_pan": 0.4037145765356511,
+        "wrist_flex": 0.9240957138789617,
+        "wrist_roll": 0.579872583381277
+      },
+      "per_joint_before": {
+        "elbow_flex": 1.9357753261926476,
+        "gripper": 4.086718061280756,
+        "shoulder_lift": 2.4472963084705226,
+        "shoulder_pan": 1.7353488368349017,
+        "wrist_flex": 1.9939162247772992,
+        "wrist_roll": 3.7800512618848505
+      },
+      "robot_type": "so101"
+    },
+    {
+      "baseline_eval": 2.329729827782168,
+      "calibrated_eval": 1.0439551884928477,
+      "data_bytes": 1191135,
+      "dataset": "rerun/so101-pick-and-place",
+      "downloads": 597,
+      "elapsed_s": 96.7413021249231,
+      "fps": 30.0,
+      "frames_per_episode": 733.2777777777778,
+      "improvement": 0.5518986038451242,
+      "latency_ms": 100.0,
+      "lock": "rerun__so101-pick-and-place",
+      "n_episodes": 72,
+      "n_eval": 10,
+      "n_evaluations": 150,
+      "n_train": 20,
+      "params": {
+        "armature": 0.030601014365881442,
+        "damping": 0.6843418296551472,
+        "frictionloss": 0.03240348951198331,
+        "kp": 1365.5581263804604,
+        "kv": 42.46803688117009,
+        "latency_frames": 3
+      },
+      "per_joint_after": {
+        "elbow_flex": 1.2555679964523296,
+        "gripper": 1.9787879900625076,
+        "shoulder_lift": 1.101899574804899,
+        "shoulder_pan": 0.4258749305332299,
+        "wrist_flex": 1.5194598097238226,
+        "wrist_roll": 0.41042775419373706
+      },
+      "per_joint_before": {
+        "elbow_flex": 2.7140265792718328,
+        "gripper": 3.1512460522040997,
+        "shoulder_lift": 2.255637051786894,
+        "shoulder_pan": 2.037569485307303,
+        "wrist_flex": 3.0206000634715244,
+        "wrist_roll": 1.1868666390973182
+      },
+      "robot_type": "so100"
+    },
+    {
+      "baseline_eval": 0.08254418295066636,
+      "calibrated_eval": 0.019982280617226872,
+      "data_bytes": 6464960,
+      "dataset": "theconstruct-ai/so101_pickplace_auto_v1",
+      "downloads": 595,
+      "elapsed_s": 52.31973195890896,
+      "fps": 50.0,
+      "frames_per_episode": 634.3314917127071,
+      "improvement": 0.7579201840404726,
+      "latency_ms": 100.0,
+      "lock": "theconstruct-ai__so101_pickplace_auto_v1",
+      "n_episodes": 181,
+      "n_eval": 10,
+      "n_evaluations": 150,
+      "n_train": 20,
+      "params": {
+        "armature": 0.008834542592550875,
+        "damping": 3.762958593882419,
+        "frictionloss": 0.002264112383583842,
+        "kp": 831.948967539127,
+        "kv": 43.85696473318202,
+        "latency_frames": 5
+      },
+      "per_joint_after": {
+        "elbow_flex": 0.02642431302635639,
+        "gripper": 0.3319012279831511,
+        "shoulder_lift": 0.029998044087643227,
+        "shoulder_pan": 0.008524451285442367,
+        "wrist_flex": 0.010897659594597039,
+        "wrist_roll": 0.014384209083969673
+      },
+      "per_joint_before": {
+        "elbow_flex": 0.10694128506051612,
+        "gripper": 0.21341179399963012,
+        "shoulder_lift": 0.10620044088431124,
+        "shoulder_pan": 0.04822037164228708,
+        "wrist_flex": 0.040492055424527836,
+        "wrist_roll": 0.08595305583122347
+      },
+      "robot_type": "so101"
+    },
+    {
+      "baseline_eval": 4.009167854564926,
+      "calibrated_eval": 2.2799067350958695,
+      "data_bytes": 4070853,
+      "dataset": "LeRobot-worldwide-hackathon/190-RecycloBots-recyclobots",
+      "downloads": 591,
+      "elapsed_s": 243.80828633299097,
+      "fps": 30.0,
+      "frames_per_episode": 1681.4,
+      "improvement": 0.43132669476536933,
+      "latency_ms": 166.66666666666666,
+      "lock": "lerobot-worldwide-hackathon__190-recyclobots-recyclobots",
+      "n_episodes": 50,
+      "n_eval": 10,
+      "n_evaluations": 150,
+      "n_train": 20,
+      "params": {
+        "armature": 0.0013657568326769917,
+        "damping": 0.6427609624681635,
+        "frictionloss": 0.08330633380070396,
+        "kp": 488.4665365431917,
+        "kv": 0.6348771181940529,
+        "latency_frames": 5
+      },
+      "per_joint_after": {
+        "elbow_flex": 3.642034154058951,
+        "gripper": 3.5006449161091675,
+        "shoulder_lift": 2.850156370795783,
+        "shoulder_pan": 1.0336646899509965,
+        "wrist_flex": 1.1719716811604393,
+        "wrist_roll": 1.4697241828534822
+      },
+      "per_joint_before": {
+        "elbow_flex": 4.695235402859576,
+        "gripper": 4.573425307235741,
+        "shoulder_lift": 4.245952152444753,
+        "shoulder_pan": 3.9163437626206914,
+        "wrist_flex": 2.7840925214699337,
+        "wrist_roll": 4.147875314681567
+      },
+      "robot_type": "so100"
+    },
+    {
+      "baseline_eval": 7.620880701241547,
+      "calibrated_eval": 1.2069356058569634,
+      "data_bytes": 1613205,
+      "dataset": "Jiamo0912/robocolosseum-so101-black-screwdriver-box-to-table-100episodes",
+      "downloads": 590,
+      "elapsed_s": 55.21450824989006,
+      "fps": 30.0,
+      "frames_per_episode": 237.46,
+      "improvement": 0.8416278048204668,
+      "latency_ms": 100.0,
+      "lock": "jiamo0912__robocolosseum-so101-black-screwdriver-box-to-table-100episodes",
+      "n_episodes": 100,
+      "n_eval": 10,
+      "n_evaluations": 150,
+      "n_train": 20,
+      "params": {
+        "armature": 0.044168627659096626,
+        "damping": 0.010936811551939938,
+        "frictionloss": 0.3585066027699427,
+        "kp": 235.7468391665016,
+        "kv": 10.48599454923526,
+        "latency_frames": 3
+      },
+      "per_joint_after": {
+        "elbow_flex": 1.7864837696442717,
+        "gripper": 3.009815326044899,
+        "shoulder_lift": 1.7189886022479581,
+        "shoulder_pan": 0.5187652056711167,
+        "wrist_flex": 0.6017514857377793,
+        "wrist_roll": 0.7111958382633845
+      },
+      "per_joint_before": {
+        "elbow_flex": 11.013712812213216,
+        "gripper": 4.938341510760068,
+        "shoulder_lift": 11.294205350195801,
+        "shoulder_pan": 3.755555935266745,
+        "wrist_flex": 3.8222650943206826,
+        "wrist_roll": 3.5797008361452103
+      },
+      "robot_type": "so_follower"
+    },
+    {
+      "baseline_eval": 1.8256537069051098,
+      "calibrated_eval": 0.9059943528769576,
+      "data_bytes": 1069695,
+      "dataset": "jccj/so100_block_in_cup",
+      "downloads": 586,
+      "elapsed_s": 62.64185066707432,
+      "fps": 30.0,
+      "frames_per_episode": 435.64,
+      "improvement": 0.5037424953865867,
+      "latency_ms": 133.33333333333334,
+      "lock": "jccj__so100_block_in_cup",
+      "n_episodes": 50,
+      "n_eval": 10,
+      "n_evaluations": 150,
+      "n_train": 20,
+      "params": {
+        "armature": 0.0700414326032171,
+        "damping": 0.02884305631481747,
+        "frictionloss": 0.039740790935536945,
+        "kp": 1549.8560644432655,
+        "kv": 5.037141659859984,
+        "latency_frames": 4
+      },
+      "per_joint_after": {
+        "elbow_flex": 1.1719150353450385,
+        "gripper": 3.0035020869428832,
+        "shoulder_lift": 0.7133650121623096,
+        "shoulder_pan": 0.3812908983657512,
+        "wrist_flex": 1.3234656198496952,
+        "wrist_roll": 0.570009079295139
+      },
+      "per_joint_before": {
+        "elbow_flex": 2.1783760716772953,
+        "gripper": 3.382486817313884,
+        "shoulder_lift": 1.6070305799500155,
+        "shoulder_pan": 1.791733347555303,
+        "wrist_flex": 1.898773125555569,
+        "wrist_roll": 1.5879357424207559
+      },
+      "robot_type": "so100"
+    },
+    {
+      "baseline_eval": 4.36795064018103,
+      "calibrated_eval": 3.4135501644670008,
+      "data_bytes": 2715372,
+      "dataset": "OkzRIKU/so101-turn-up-drone",
+      "downloads": 579,
+      "elapsed_s": 127.12563783302903,
+      "fps": 30.0,
+      "frames_per_episode": 996.21,
+      "improvement": 0.2185007465364751,
+      "latency_ms": 166.66666666666666,
+      "lock": "okzriku__so101-turn-up-drone",
+      "n_episodes": 100,
+      "n_eval": 10,
+      "n_evaluations": 150,
+      "n_train": 20,
+      "params": {
+        "armature": 0.004083983198604419,
+        "damping": 0.08250110228915536,
+        "frictionloss": 0.49115968861532144,
+        "kp": 55.84085228419794,
+        "kv": 0.13678311538474286,
+        "latency_frames": 5
+      },
+      "per_joint_after": {
+        "elbow_flex": 3.405525080348035,
+        "gripper": 8.370780898954365,
+        "shoulder_lift": 2.1775138777556493,
+        "shoulder_pan": 0.8110511184510356,
+        "wrist_flex": 4.885766390785652,
+        "wrist_roll": 4.170604119776196
+      },
+      "per_joint_before": {
+        "elbow_flex": 5.337589733868829,
+        "gripper": 8.805251429265214,
+        "shoulder_lift": 3.906617174746731,
+        "shoulder_pan": 1.2704382735467754,
+        "wrist_flex": 5.390634787332935,
+        "wrist_roll": 4.579354238412311
+      },
+      "robot_type": "so_follower"
+    },
+    {
+      "baseline_eval": 3.5166694872091315,
+      "calibrated_eval": 1.3296761904190093,
+      "data_bytes": 3965888,
+      "dataset": "SGPatil/so101_table_cleanup",
+      "downloads": 571,
+      "elapsed_s": 313.5668680409435,
+      "fps": 30.0,
+      "frames_per_episode": 1959.3170731707316,
+      "improvement": 0.621893329681586,
+      "latency_ms": 100.0,
+      "lock": "sgpatil__so101_table_cleanup",
+      "n_episodes": 41,
+      "n_eval": 10,
+      "n_evaluations": 150,
+      "n_train": 20,
+      "params": {
+        "armature": 0.0001293892706572716,
+        "damping": 0.2878266631430713,
+        "frictionloss": 0.00865531728891434,
+        "kp": 52.81876866409313,
+        "kv": 0.1477406877032929,
+        "latency_frames": 3
+      },
+      "per_joint_after": {
+        "elbow_flex": 1.4999183579637176,
+        "gripper": 4.674191860493048,
+        "shoulder_lift": 1.9905884747529539,
+        "shoulder_pan": 0.7356987512127123,
+        "wrist_flex": 0.9180548211159549,
+        "wrist_roll": 1.1153111643617606
+      },
+      "per_joint_before": {
+        "elbow_flex": 3.674946074893183,
+        "gripper": 5.369035999850349,
+        "shoulder_lift": 3.756426643176003,
+        "shoulder_pan": 3.3300520755733727,
+        "wrist_flex": 3.0880758237628547,
+        "wrist_roll": 3.6869218208505825
+      },
+      "robot_type": "so101_follower"
+    },
+    {
+      "baseline_eval": 2.394595660253065,
+      "calibrated_eval": 0.9313295663456925,
+      "data_bytes": 2443974,
+      "dataset": "Selinaliu1030/egg_0806",
+      "downloads": 565,
+      "elapsed_s": 98.61184433288872,
+      "fps": 30.0,
+      "frames_per_episode": 555.0777777777778,
+      "improvement": 0.6110702187411181,
+      "latency_ms": 100.0,
+      "lock": "selinaliu1030__egg_0806",
+      "n_episodes": 90,
+      "n_eval": 10,
+      "n_evaluations": 150,
+      "n_train": 20,
+      "params": {
+        "armature": 0.029418574335551437,
+        "damping": 0.2365674154520598,
+        "frictionloss": 0.2812120750516808,
+        "kp": 642.9237624612599,
+        "kv": 17.266140863845806,
+        "latency_frames": 3
+      },
+      "per_joint_after": {
+        "elbow_flex": 1.3528387281818364,
+        "gripper": 7.622624664455171,
+        "shoulder_lift": 1.2223122441997096,
+        "shoulder_pan": 0.38242618565776465,
+        "wrist_flex": 0.7949806669847955,
+        "wrist_roll": 0.4841589724488859
+      },
+      "per_joint_before": {
+        "elbow_flex": 1.799458576359432,
+        "gripper": 8.327748497436133,
+        "shoulder_lift": 2.049026825249949,
+        "shoulder_pan": 2.193286072226417,
+        "wrist_flex": 3.888662885039756,
+        "wrist_roll": 1.1409105809740552
+      },
+      "robot_type": "so101"
+    },
+    {
+      "baseline_eval": 2.129616971227815,
+      "calibrated_eval": 0.8814284810045802,
+      "data_bytes": 1504968,
+      "dataset": "sreetz-nv/so101_teleop_vials_rack_left",
+      "downloads": 553,
+      "elapsed_s": 77.50222612498328,
+      "fps": 30.0,
+      "frames_per_episode": 243.33333333333334,
+      "improvement": 0.5861093835590543,
+      "latency_ms": 33.333333333333336,
+      "lock": "sreetz-nv__so101_teleop_vials_rack_left",
+      "n_episodes": 75,
+      "n_eval": 10,
+      "n_evaluations": 150,
+      "n_train": 20,
+      "params": {
+        "armature": 0.0009806749797616266,
+        "damping": 0.9093530169135646,
+        "frictionloss": 0.05229400271523159,
+        "kp": 50.07582933144314,
+        "kv": 0.11037252335288834,
+        "latency_frames": 1
+      },
+      "per_joint_after": {
+        "elbow_flex": 0.5780846692926301,
+        "gripper": 10.634157840186404,
+        "shoulder_lift": 0.6276236763031832,
+        "shoulder_pan": 0.5875834512471764,
+        "wrist_flex": 1.44732435263335,
+        "wrist_roll": 0.846454592874082
+      },
+      "per_joint_before": {
+        "elbow_flex": 1.6673278652462313,
+        "gripper": 10.840200861860703,
+        "shoulder_lift": 2.5128904255527047,
+        "shoulder_pan": 0.49039400788195187,
+        "wrist_flex": 3.4489173062510496,
+        "wrist_roll": 1.2025908910856349
+      },
+      "robot_type": "so101_follower"
+    },
+    {
+      "baseline_eval": 3.939621056863223,
+      "calibrated_eval": 1.740229646573384,
+      "data_bytes": 1647549,
+      "dataset": "Aaaay-0610/so101-task-1",
+      "downloads": 546,
+      "elapsed_s": 57.64362720795907,
+      "fps": 30.0,
+      "frames_per_episode": 474.85333333333335,
+      "improvement": 0.5582748641416346,
+      "latency_ms": 133.33333333333334,
+      "lock": "aaaay-0610__so101-task-1",
+      "n_episodes": 75,
+      "n_eval": 10,
+      "n_evaluations": 150,
+      "n_train": 20,
+      "params": {
+        "armature": 0.04301218715410878,
+        "damping": 0.01006147972823808,
+        "frictionloss": 0.008792047399783575,
+        "kp": 227.42558584671087,
+        "kv": 9.525020008676229,
+        "latency_frames": 4
+      },
+      "per_joint_after": {
+        "elbow_flex": 2.5016844481291134,
+        "gripper": 6.901629386369619,
+        "shoulder_lift": 2.7878910513167696,
+        "shoulder_pan": 0.4181837697933438,
+        "wrist_flex": 0.595482086356445,
+        "wrist_roll": 0.7627305825463119
+      },
+      "per_joint_before": {
+        "elbow_flex": 5.331025966954132,
+        "gripper": 7.285373147163263,
+        "shoulder_lift": 5.6335915502280764,
+        "shoulder_pan": 1.9686264705591479,
+        "wrist_flex": 2.6976046210336535,
+        "wrist_roll": 2.5086486145436466
+      },
+      "robot_type": "so_follower"
+    },
+    {
+      "baseline_eval": 5.957218335892028,
+      "calibrated_eval": 1.333257665574106,
+      "data_bytes": 636862,
+      "dataset": "TeamIORobotics/so101_pickplace_v1",
+      "downloads": 546,
+      "elapsed_s": 57.40610870812088,
+      "fps": 30.0,
+      "frames_per_episode": 400.8,
+      "improvement": 0.7761945944567322,
+      "latency_ms": 133.33333333333334,
+      "lock": "teamiorobotics__so101_pickplace_v1",
+      "n_episodes": 30,
+      "n_eval": 10,
+      "n_evaluations": 150,
+      "n_train": 20,
+      "params": {
+        "armature": 0.0023765201704129563,
+        "damping": 0.10688898570767989,
+        "frictionloss": 1.119859061289292,
+        "kp": 50.01883334763679,
+        "kv": 0.13894601748605492,
+        "latency_frames": 4
+      },
+      "per_joint_after": {
+        "elbow_flex": 2.0075047725256967,
+        "gripper": 2.6408149064747737,
+        "shoulder_lift": 1.7067672241929053,
+        "shoulder_pan": 0.46391410678155226,
+        "wrist_flex": 1.0498882700923793,
+        "wrist_roll": 0.7920028829615926
+      },
+      "per_joint_before": {
+        "elbow_flex": 5.800427326745359,
+        "gripper": 4.424837727796707,
+        "shoulder_lift": 5.97311233400364,
+        "shoulder_pan": 3.2461252359816344,
+        "wrist_flex": 6.90798777888486,
+        "wrist_roll": 7.061274614335631
+      },
+      "robot_type": "so101_follower"
+    },
+    {
+      "baseline_eval": 3.9238500841411117,
+      "calibrated_eval": 1.1927153130155221,
+      "data_bytes": 1834709,
+      "dataset": "tshiamor/so101-long-horizon-datasetombo",
+      "downloads": 541,
+      "elapsed_s": 179.41917470889166,
+      "fps": 30.0,
+      "frames_per_episode": 1300.6,
+      "improvement": 0.6960344336711338,
+      "latency_ms": 100.0,
+      "lock": "tshiamor__so101-long-horizon-datasetombo",
+      "n_episodes": 30,
+      "n_eval": 10,
+      "n_evaluations": 150,
+      "n_train": 20,
+      "params": {
+        "armature": 0.002321169123670033,
+        "damping": 0.2429822741300925,
+        "frictionloss": 0.5429462307871668,
+        "kp": 50.03402386535898,
+        "kv": 0.1008084649430082,
+        "latency_frames": 3
+      },
+      "per_joint_after": {
+        "elbow_flex": 1.951646019927366,
+        "gripper": 5.181019980836084,
+        "shoulder_lift": 1.5893903493692472,
+        "shoulder_pan": 0.5463614962585158,
+        "wrist_flex": 0.5664721331278163,
+        "wrist_roll": 0.3979493152876739
+      },
+      "per_joint_before": {
+        "elbow_flex": 5.352540197358337,
+        "gripper": 5.481028888717053,
+        "shoulder_lift": 4.954499016029414,
+        "shoulder_pan": 3.037977464808256,
+        "wrist_flex": 3.1473369169700414,
+        "wrist_roll": 2.156667244683913
+      },
+      "robot_type": "so101_follower"
+    },
+    {
+      "baseline_eval": 1.285342181665704,
+      "calibrated_eval": 0.7110450940587899,
+      "data_bytes": 1468593,
+      "dataset": "sergiov2000/so100_lego_leader_40",
+      "downloads": 530,
+      "elapsed_s": 135.43548712483607,
+      "fps": 30.0,
+      "frames_per_episode": 896.95,
+      "improvement": 0.44680482427073975,
+      "latency_ms": 100.0,
+      "lock": "sergiov2000__so100_lego_leader_40",
+      "n_episodes": 40,
+      "n_eval": 10,
+      "n_evaluations": 150,
+      "n_train": 20,
+      "params": {
+        "armature": 0.033463820865941483,
+        "damping": 0.028998695211821208,
+        "frictionloss": 0.7176775943497571,
+        "kp": 794.0031889506025,
+        "kv": 13.791595663613112,
+        "latency_frames": 3
+      },
+      "per_joint_after": {
+        "elbow_flex": 1.0709813344095478,
+        "gripper": 2.5054659426781734,
+        "shoulder_lift": 0.9256933123384082,
+        "shoulder_pan": 0.2741713607359658,
+        "wrist_flex": 0.4374050020535397,
+        "wrist_roll": 0.5074676648756933
+      },
+      "per_joint_before": {
+        "elbow_flex": 1.6287740448948147,
+        "gripper": 2.6594706540484534,
+        "shoulder_lift": 1.378884179564258,
+        "shoulder_pan": 1.220698900367635,
+        "wrist_flex": 1.0293971653871872,
+        "wrist_roll": 1.0754216942224193
+      },
+      "robot_type": "so100"
+    },
+    {
+      "baseline_eval": 2.792188345530208,
+      "calibrated_eval": 0.9158319453203129,
+      "data_bytes": 2653359,
+      "dataset": "tenkau/SO101-Stack3Blocks",
+      "downloads": 524,
+      "elapsed_s": 133.35726224980317,
+      "fps": 30.0,
+      "frames_per_episode": 1111.12,
+      "improvement": 0.6720020886891833,
+      "latency_ms": 66.66666666666667,
+      "lock": "tenkau__so101-stack3blocks",
+      "n_episodes": 50,
+      "n_eval": 10,
+      "n_evaluations": 150,
+      "n_train": 20,
+      "params": {
+        "armature": 0.02201487895216566,
+        "damping": 0.04226309574023727,
+        "frictionloss": 0.0015088257389924483,
+        "kp": 195.06643670454346,
+        "kv": 10.255809535177102,
+        "latency_frames": 2
+      },
+      "per_joint_after": {
+        "elbow_flex": 1.1892434071572224,
+        "gripper": 3.8191280316281544,
+        "shoulder_lift": 1.1550157289080438,
+        "shoulder_pan": 0.4296569957090579,
+        "wrist_flex": 0.7946099729481776,
+        "wrist_roll": 0.7933280543278456
+      },
+      "per_joint_before": {
+        "elbow_flex": 2.0142302053510015,
+        "gripper": 4.241463288439389,
+        "shoulder_lift": 2.2099330129172605,
+        "shoulder_pan": 2.093079684863876,
+        "wrist_flex": 2.1362971131441912,
+        "wrist_roll": 4.593027718186081
+      },
+      "robot_type": "so101"
+    },
+    {
+      "baseline_eval": 3.1832400169121446,
+      "calibrated_eval": 1.5052950301958974,
+      "data_bytes": 2573954,
+      "dataset": "SalZa2004/so101_track_rails_depth_2",
+      "downloads": 514,
+      "elapsed_s": 129.6687866661232,
+      "fps": 30.0,
+      "frames_per_episode": 1256.92,
+      "improvement": 0.5271185891737793,
+      "latency_ms": 133.33333333333334,
+      "lock": "salza2004__so101_track_rails_depth_2",
+      "n_episodes": 50,
+      "n_eval": 10,
+      "n_evaluations": 150,
+      "n_train": 20,
+      "params": {
+        "armature": 0.003670124583905139,
+        "damping": 0.6493000366164664,
+        "frictionloss": 0.0010428602214679827,
+        "kp": 2639.7185724657697,
+        "kv": 47.7499887692911,
+        "latency_frames": 4
+      },
+      "per_joint_after": {
+        "elbow_flex": 1.5039990620569454,
+        "gripper": 1.8690859240361706,
+        "shoulder_lift": 2.797048538266583,
+        "shoulder_pan": 0.4874206271492039,
+        "wrist_flex": 0.7036589353353321,
+        "wrist_roll": 0.7150924209688994
+      },
+      "per_joint_before": {
+        "elbow_flex": 3.6475515319879848,
+        "gripper": 3.495568885956416,
+        "shoulder_lift": 4.919430091623645,
+        "shoulder_pan": 1.8283612789555028,
+        "wrist_flex": 1.3146123126447553,
+        "wrist_roll": 2.8440376091980637
+      },
+      "robot_type": "so-101"
+    },
+    {
+      "baseline_eval": 2.836788875847139,
+      "calibrated_eval": 1.388053621857847,
+      "data_bytes": 3674828,
+      "dataset": "shylee/so100_cube",
+      "downloads": 513,
+      "elapsed_s": 71.78556975000538,
+      "fps": 30.0,
+      "frames_per_episode": 291.065,
+      "improvement": 0.5106954790763771,
+      "latency_ms": 133.33333333333334,
+      "lock": "shylee__so100_cube",
+      "n_episodes": 200,
+      "n_eval": 10,
+      "n_evaluations": 150,
+      "n_train": 20,
+      "params": {
+        "armature": 0.03309802025117051,
+        "damping": 0.4101168444086235,
+        "frictionloss": 0.010159901382059022,
+        "kp": 918.5778617312338,
+        "kv": 13.470758353633059,
+        "latency_frames": 4
+      },
+      "per_joint_after": {
+        "elbow_flex": 2.1481556145921643,
+        "gripper": 2.718811148463052,
+        "shoulder_lift": 1.9723898340156691,
+        "shoulder_pan": 0.513716990997713,
+        "wrist_flex": 0.6625636699613122,
+        "wrist_roll": 0.652437215629896
+      },
+      "per_joint_before": {
+        "elbow_flex": 4.122395686903833,
+        "gripper": 3.9783894376255517,
+        "shoulder_lift": 3.516639273809509,
+        "shoulder_pan": 1.9276087936985824,
+        "wrist_flex": 1.5427765922614638,
+        "wrist_roll": 2.186349097004772
+      },
+      "robot_type": "so100"
+    },
+    {
+      "baseline_eval": 2.952336254830856,
+      "calibrated_eval": 1.1001435540252318,
+      "data_bytes": 4383370,
+      "dataset": "pranavsaroha/so100_medicine_0605",
+      "downloads": 509,
+      "elapsed_s": 285.94246966717765,
+      "fps": 30.0,
+      "frames_per_episode": 2257.875,
+      "improvement": 0.6273650901976067,
+      "latency_ms": 133.33333333333334,
+      "lock": "pranavsaroha__so100_medicine_0605",
+      "n_episodes": 40,
+      "n_eval": 10,
+      "n_evaluations": 150,
+      "n_train": 20,
+      "params": {
+        "armature": 0.01156277402722082,
+        "damping": 0.13299072368049317,
+        "frictionloss": 1.8798747585458007,
+        "kp": 2279.9936006404755,
+        "kv": 17.50270152277949,
+        "latency_frames": 4
+      },
+      "per_joint_after": {
+        "elbow_flex": 1.6001920802789076,
+        "gripper": 4.808104801198354,
+        "shoulder_lift": 1.0764668761773342,
+        "shoulder_pan": 0.8107926049697335,
+        "wrist_flex": 0.8166863962752718,
+        "wrist_roll": 1.0039035062630866
+      },
+      "per_joint_before": {
+        "elbow_flex": 2.168624115927566,
+        "gripper": 5.587203577595764,
+        "shoulder_lift": 1.3617009170828938,
+        "shoulder_pan": 2.4334671992943417,
+        "wrist_flex": 3.3656290560458406,
+        "wrist_roll": 4.4469163823075135
+      },
+      "robot_type": "so100"
+    }
+  ],
+  "settings": {
+    "max_evaluations": 150,
+    "n_candidates": 60,
+    "n_eval": 10,
+    "n_train": 20,
+    "seed": 0,
+    "time_budget_s": 3300.0
+  },
+  "skipped": [
+    {
+      "dataset": "Cornito/so101_chess17",
+      "reason": "time budget exhausted"
+    },
+    {
+      "dataset": "jyang-ca/so101_test_grab_place_v2",
+      "reason": "time budget exhausted"
+    },
+    {
+      "dataset": "aivanni/so101-algebra",
+      "reason": "time budget exhausted"
+    },
+    {
+      "dataset": "jiajun001/eraser00_3",
+      "reason": "time budget exhausted"
+    },
+    {
+      "dataset": "lucasfv/so101_finetuning",
+      "reason": "time budget exhausted"
+    },
+    {
+      "dataset": "DecisionFacts/Physical_AI_SO101_Cup_Nesting_Task",
+      "reason": "time budget exhausted"
+    },
+    {
+      "dataset": "HashtagRobotics/tic-tac-toe-so101-block-a-clean-v1",
+      "reason": "time budget exhausted"
+    },
+    {
+      "dataset": "Jeevesh2009/so101_gray_block_lowvar_test",
+      "reason": "time budget exhausted"
+    },
+    {
+      "dataset": "tsangb34/robocolosseum-so101-soccer-red_bowl-40episodes",
+      "reason": "time budget exhausted"
+    },
+    {
+      "dataset": "drjaisree25/onion_data",
+      "reason": "time budget exhausted"
+    },
+    {
+      "dataset": "yangsamy/so101_dataset2_20260728_200633",
+      "reason": "time budget exhausted"
+    },
+    {
+      "dataset": "aaronsu11/so100_lego",
+      "reason": "time budget exhausted"
+    },
+    {
+      "dataset": "jonhpark/so101_pick_place",
+      "reason": "time budget exhausted"
+    },
+    {
+      "dataset": "juni3227/so100_test03",
+      "reason": "time budget exhausted"
+    },
+    {
+      "dataset": "ted88168/rollout_colorlogo_acp_r2_targeted_v1",
+      "reason": "time budget exhausted"
+    },
+    {
+      "dataset": "Masterji/dataset",
+      "reason": "time budget exhausted"
+    },
+    {
+      "dataset": "boyangs235/so100-Put_square_into_area",
+      "reason": "time budget exhausted"
+    },
+    {
+      "dataset": "Spring14th/so100_0327",
+      "reason": "time budget exhausted"
+    },
+    {
+      "dataset": "Aneysait/so101_pick_red_all",
+      "reason": "time budget exhausted"
+    },
+    {
+      "dataset": "00ri/so100_battery",
+      "reason": "time budget exhausted"
+    }
+  ],
+  "stats": {
+    "armature": {
+      "iqr": 0.03126023328308641,
+      "max": 0.1531215547592672,
+      "median": 0.016730238784264564,
+      "min": 0.0001293892706572716,
+      "n": 40,
+      "q25": 0.003980518544929599,
+      "q75": 0.035240751828016004,
+      "scale": "log",
+      "z": {
+        "Aaaay-0610/so101-task-1": 0.6104299940360476,
+        "Askel1419/so101_3_cup_no4": -1.2572963361574439,
+        "BlackWhite123/fold_cloth": 0.8684972893026386,
+        "Deviant65/so101_redcube_20260925_154203": 0.752578816879111,
+        "Haribot099/so101_60": -0.30573671517712087,
+        "Jiamo0912/robocolosseum-so101-black-screwdriver-box-to-table-100episodes": 0.6272948593345843,
+        "JimmyPeng02/so100_test_6": 0.18239641612488086,
+        "LUOSYrrrrr/so101_yellow_tape_v1_v21": 0.38571086950392836,
+        "LeRobot-worldwide-hackathon/190-RecycloBots-recyclobots": -1.5824546035039881,
+        "MaxT90/so101-pick-place": -1.1503248375141308,
+        "OkzRIKU/so101-turn-up-drone": -0.8861752438820252,
+        "SGPatil/so101_table_cleanup": -3.0804759882888546,
+        "SalZa2004/so101_track_rails_depth_2": -0.9540937450580074,
+        "Selinaliu1030/egg_0806": 0.3689698543883484,
+        "TeamIORobotics/so101_pickplace_v1": -1.2303442430388163,
+        "Twu31/so101_hand_blue_napkin": -0.2492893240211806,
+        "apayan/so100_ball8": -0.6775392692052117,
+        "codywang/so101_pickup_test": 0.34229257156915954,
+        "dharak22/so101-red-cube-3D-print-clean": 0.4742988884271631,
+        "dongdong123123/so101_stack_cubes": -0.7098119110635454,
+        "hjkso1406/eval_smolvla-so101-4tasks-aug-v2_stack_30": 1.3604278490144912,
+        "hungho77/so101_left_arm_pick_red_cube_into_pot": -0.8412365077728584,
+        "jccj/so100_block_in_cup": 0.9203801204323747,
+        "kmg0620/so101_bomb_pick_place_v1": -2.3270404706397425,
+        "legalaspro/so101-pick-and-place-cube-lerobot-30hz": -0.9703907184235798,
+        "lerobot/svla_so100_pickplace": -0.11416743883888462,
+        "lerobot/svla_so101_pickplace": 0.11416743883888462,
+        "pranavsaroha/so100_medicine_0605": -0.224632197796197,
+        "rerun/so101-pick-and-place": 0.394019254912389,
+        "samanthalhy/so100_popcorn_2_transport": 0.5113090334974675,
+        "samsitol/so100_PnPacorn": 0.52334924972375,
+        "sergiov2000/so100_lego_leader_40": 0.45086744419788227,
+        "shubham4413/so100_smolvla_rc": -0.6714422497479788,
+        "shylee/so100_cube": 0.4438806410256448,
+        "sreetz-nv/so101_teleop_vials_rack_left": -1.7929998391493933,
+        "tenkau/SO101-Stack3Blocks": 0.18468705211440917,
+        "theconstruct-ai/so101_pickplace_auto_v1": -0.3957020114304378,
+        "tshiamor/so101-long-horizon-datasetombo": -1.2453244108913157,
+        "witsense-ai/so101_pick_and_place_ring_33": 0.6970852258559854,
+        "youliangtan/so101-table-cleanup": 1.4175586620064764
+      }
+    },
+    "baseline_eval": {
+      "iqr": 1.9747441135309987,
+      "max": 21.328469713322985,
+      "median": 3.452061492736545,
+      "min": 0.08254418295066636,
+      "n": 40,
+      "q25": 2.3783792021353407,
+      "q75": 4.353123315666339,
+      "scale": "log",
+      "z": {
+        "Aaaay-0610/so101-task-1": 0.302228699014393,
+        "Askel1419/so101_3_cup_no4": -0.042763505203343474,
+        "BlackWhite123/fold_cloth": 0.39764475893618184,
+        "Deviant65/so101_redcube_20260925_154203": -0.47422819210551176,
+        "Haribot099/so101_60": -0.7455224427373095,
+        "Jiamo0912/robocolosseum-so101-black-screwdriver-box-to-table-100episodes": 1.8096408976828224,
+        "JimmyPeng02/so100_test_6": -1.1526439809306233,
+        "LUOSYrrrrr/so101_yellow_tape_v1_v21": 0.9056719350667225,
+        "LeRobot-worldwide-hackathon/190-RecycloBots-recyclobots": 0.34220771447122345,
+        "MaxT90/so101-pick-place": 0.15868122909202165,
+        "OkzRIKU/so101-turn-up-drone": 0.5380234251962001,
+        "SGPatil/so101_table_cleanup": 0.042763505203343474,
+        "SalZa2004/so101_track_rails_depth_2": -0.18481896464201292,
+        "Selinaliu1030/egg_0806": -0.8352176790782655,
+        "TeamIORobotics/so101_pickplace_v1": 1.2469646174624387,
+        "Twu31/so101_hand_blue_napkin": 0.23649697971674943,
+        "apayan/so100_ball8": -1.1007312578820245,
+        "codywang/so101_pickup_test": 1.5133317255981154,
+        "dharak22/so101-red-cube-3D-print-clean": 0.5276595222236757,
+        "dongdong123123/so101_stack_cubes": -1.4491528140761853,
+        "hjkso1406/eval_smolvla-so101-4tasks-aug-v2_stack_30": -1.1507356339256947,
+        "hungho77/so101_left_arm_pick_red_cube_into_pot": 0.5391979677011762,
+        "jccj/so100_block_in_cup": -1.454982114389692,
+        "kmg0620/so101_bomb_pick_place_v1": 4.160864206894049,
+        "legalaspro/so101-pick-and-place-cube-lerobot-30hz": -7.658292092205227,
+        "lerobot/svla_so100_pickplace": -0.5241637663765857,
+        "lerobot/svla_so101_pickplace": 1.2659152504287534,
+        "pranavsaroha/so100_medicine_0605": -0.35685746293967746,
+        "rerun/so101-pick-and-place": -0.897958228381876,
+        "samanthalhy/so100_popcorn_2_transport": 0.267584727871311,
+        "samsitol/so100_PnPacorn": -0.603459076215881,
+        "sergiov2000/so100_lego_leader_40": -2.25668691057696,
+        "shubham4413/so100_smolvla_rc": 1.0605255904008084,
+        "shylee/so100_cube": -0.4480689805134067,
+        "sreetz-nv/so101_teleop_vials_rack_left": -1.1031407477849704,
+        "tenkau/SO101-Stack3Blocks": -0.48427363930659406,
+        "theconstruct-ai/so101_pickplace_auto_v1": -8.52900155596154,
+        "tshiamor/so101-long-horizon-datasetombo": 0.2930646035545832,
+        "witsense-ai/so101_pick_and_place_ring_33": 0.04467905969951796,
+        "youliangtan/so101-table-cleanup": 1.4367980397830702
+      }
+    },
+    "calibrated_eval": {
+      "iqr": 0.604292195004253,
+      "max": 14.940197012967706,
+      "median": 1.1791116360674954,
+      "min": 0.019982280617226872,
+      "n": 40,
+      "q25": 0.9274551610893476,
+      "q75": 1.5317473560936006,
+      "scale": "log",
+      "z": {
+        "Aaaay-0610/so101-task-1": 1.0568130277987522,
+        "Askel1419/so101_3_cup_no4": 1.1584673079578414,
+        "BlackWhite123/fold_cloth": -0.2133661503219091,
+        "Deviant65/so101_redcube_20260925_154203": 0.4117799088733716,
+        "Haribot099/so101_60": -0.4835998187002433,
+        "Jiamo0912/robocolosseum-so101-black-screwdriver-box-to-table-100episodes": 0.06340401503000379,
+        "JimmyPeng02/so100_test_6": -0.7123539334965273,
+        "LUOSYrrrrr/so101_yellow_tape_v1_v21": 0.365995056199028,
+        "LeRobot-worldwide-hackathon/190-RecycloBots-recyclobots": 1.790109780667836,
+        "MaxT90/so101-pick-place": -0.5756263830519529,
+        "OkzRIKU/so101-turn-up-drone": 2.8858257372946454,
+        "SGPatil/so101_table_cleanup": 0.32632822954562785,
+        "SalZa2004/so101_track_rails_depth_2": 0.6631002637686922,
+        "Selinaliu1030/egg_0806": -0.6403271551909405,
+        "TeamIORobotics/so101_pickplace_v1": 0.33363051725163995,
+        "Twu31/so101_hand_blue_napkin": 0.5097307606908635,
+        "apayan/so100_ball8": -1.3970936130661673,
+        "codywang/so101_pickup_test": 3.6030366519455295,
+        "dharak22/so101-red-cube-3D-print-clean": 1.3616270207925338,
+        "dongdong123123/so101_stack_cubes": -0.833254085087453,
+        "hjkso1406/eval_smolvla-so101-4tasks-aug-v2_stack_30": -0.5469939379612354,
+        "hungho77/so101_left_arm_pick_red_cube_into_pot": 0.8475146625097449,
+        "jccj/so100_block_in_cup": -0.7151998529487438,
+        "kmg0620/so101_bomb_pick_place_v1": 6.893592855986965,
+        "legalaspro/so101-pick-and-place-cube-lerobot-30hz": -9.423016107531696,
+        "lerobot/svla_so100_pickplace": -1.082030136261222,
+        "lerobot/svla_so101_pickplace": -0.30313955094753253,
+        "pranavsaroha/so100_medicine_0605": -0.18809947678146594,
+        "rerun/so101-pick-and-place": -0.33041693521635035,
+        "samanthalhy/so100_popcorn_2_transport": -0.17581633248328413,
+        "samsitol/so100_PnPacorn": -0.021799077914685817,
+        "sergiov2000/so100_lego_leader_40": -1.3729721116123488,
+        "shubham4413/so100_smolvla_rc": 1.9094162760263507,
+        "shylee/so100_cube": 0.4429722892090534,
+        "sreetz-nv/so101_teleop_vials_rack_left": -0.7898257117658981,
+        "tenkau/SO101-Stack3Blocks": -0.6858812551844982,
+        "theconstruct-ai/so101_pickplace_auto_v1": -11.06969952767256,
+        "tshiamor/so101-long-horizon-datasetombo": 0.03122871024213508,
+        "witsense-ai/so101_pick_and_place_ring_33": 1.6756413063317301,
+        "youliangtan/so101-table-cleanup": 0.021799077914685817
+      }
+    },
+    "damping": {
+      "iqr": 0.4569523311281486,
+      "max": 3.762958593882419,
+      "median": 0.12047916633016134,
+      "min": 0.01006147972823808,
+      "n": 40,
+      "q25": 0.0462727558880053,
+      "q75": 0.5032250870161539,
+      "scale": "log",
+      "z": {
+        "Aaaay-0610/so101-task-1": -1.4521097640987677,
+        "Askel1419/so101_3_cup_no4": 1.030967314375168,
+        "BlackWhite123/fold_cloth": -1.3057846079197968,
+        "Deviant65/so101_redcube_20260925_154203": -0.02412499963283907,
+        "Haribot099/so101_60": -0.3156135986285937,
+        "Jiamo0912/robocolosseum-so101-black-screwdriver-box-to-table-100episodes": -1.4033026142714613,
+        "JimmyPeng02/so100_test_6": -0.6317854174695275,
+        "LUOSYrrrrr/so101_yellow_tape_v1_v21": -0.23097764363740297,
+        "LeRobot-worldwide-hackathon/190-RecycloBots-recyclobots": 0.9800891637710345,
+        "MaxT90/so101-pick-place": -0.08203763518435515,
+        "OkzRIKU/so101-turn-up-drone": -0.2210510067108143,
+        "SGPatil/so101_table_cleanup": 0.5100299306436687,
+        "SalZa2004/so101_track_rails_depth_2": 0.9860113203838122,
+        "Selinaliu1030/egg_0806": 0.3952816021838333,
+        "TeamIORobotics/so101_pickplace_v1": -0.06952830723698969,
+        "Twu31/so101_hand_blue_napkin": -0.14356708389090395,
+        "apayan/so100_ball8": 0.9197465096262377,
+        "codywang/so101_pickup_test": 0.8064553777217397,
+        "dharak22/so101-red-cube-3D-print-clean": 1.2086653385572006,
+        "dongdong123123/so101_stack_cubes": -0.028158891428099842,
+        "hjkso1406/eval_smolvla-so101-4tasks-aug-v2_stack_30": -0.8675252957161789,
+        "hungho77/so101_left_arm_pick_red_cube_into_pot": 0.455102475737265,
+        "jccj/so100_block_in_cup": -0.8359330958779794,
+        "kmg0620/so101_bomb_pick_place_v1": -0.5427165300073615,
+        "legalaspro/so101-pick-and-place-cube-lerobot-30hz": 1.6076858827566598,
+        "lerobot/svla_so100_pickplace": 0.25270405760864406,
+        "lerobot/svla_so101_pickplace": -0.4830680358995901,
+        "pranavsaroha/so100_medicine_0605": 0.05830432209036301,
+        "rerun/so101-pick-and-place": 1.0167644989192126,
+        "samanthalhy/so100_popcorn_2_transport": -1.3078457597126865,
+        "samsitol/so100_PnPacorn": 0.02412499963283907,
+        "sergiov2000/so100_lego_leader_40": -0.8327844726663046,
+        "shubham4413/so100_smolvla_rc": 1.0158655482696624,
+        "shylee/so100_cube": 0.7171961014836628,
+        "sreetz-nv/so101_teleop_vials_rack_left": 1.1830877173183003,
+        "tenkau/SO101-Stack3Blocks": -0.6124074078064309,
+        "theconstruct-ai/so101_pickplace_auto_v1": 2.014029946086293,
+        "tshiamor/so101-long-horizon-datasetombo": 0.41093549374096433,
+        "witsense-ai/so101_pick_and_place_ring_33": 0.16377873583829014,
+        "youliangtan/so101-table-cleanup": -1.421605651841564
+      }
+    },
+    "frictionloss": {
+      "iqr": 0.4831876347027177,
+      "max": 1.991804412484709,
+      "median": 0.11614166691402515,
+      "min": 0.0010428602214679827,
+      "n": 40,
+      "q25": 0.009817937886490161,
+      "q75": 0.49300557258920785,
+      "scale": "log",
+      "z": {
+        "Aaaay-0610/so101-task-1": -1.0788539268828692,
+        "Askel1419/so101_3_cup_no4": 0.28055822079336346,
+        "BlackWhite123/fold_cloth": 0.7962132807556473,
+        "Deviant65/so101_redcube_20260925_154203": -1.8816038527395316,
+        "Haribot099/so101_60": -0.9057864151965512,
+        "Jiamo0912/robocolosseum-so101-black-screwdriver-box-to-table-100episodes": 0.4724254868203969,
+        "JimmyPeng02/so100_test_6": 0.3076644882634722,
+        "LUOSYrrrrr/so101_yellow_tape_v1_v21": 0.02728593817705291,
+        "LeRobot-worldwide-hackathon/190-RecycloBots-recyclobots": -0.13812234007661084,
+        "MaxT90/so101-pick-place": 1.1898307872375367,
+        "OkzRIKU/so101-turn-up-drone": 0.6041310266427623,
+        "SGPatil/so101_table_cleanup": -1.0854110277930502,
+        "SalZa2004/so101_track_rails_depth_2": -1.9707238168379064,
+        "Selinaliu1030/egg_0806": 0.3708344808518394,
+        "TeamIORobotics/so101_pickplace_v1": 0.9489295272010542,
+        "Twu31/so101_hand_blue_napkin": 1.1864289561887964,
+        "apayan/so100_ball8": 0.6103732060798672,
+        "codywang/so101_pickup_test": -1.807512095667999,
+        "dharak22/so101-red-cube-3D-print-clean": 0.5590235567537912,
+        "dongdong123123/so101_stack_cubes": -1.9476531832809276,
+        "hjkso1406/eval_smolvla-so101-4tasks-aug-v2_stack_30": 0.5737422595878038,
+        "hungho77/so101_left_arm_pick_red_cube_into_pot": -0.02728593817705291,
+        "jccj/so100_block_in_cup": -0.44776180608050997,
+        "kmg0620/so101_bomb_pick_place_v1": 0.5971838513241814,
+        "legalaspro/so101-pick-and-place-cube-lerobot-30hz": -1.7323030862606992,
+        "lerobot/svla_so100_pickplace": 0.7029147838355578,
+        "lerobot/svla_so101_pickplace": -0.638636341669767,
+        "pranavsaroha/so100_medicine_0605": 1.1656352380788984,
+        "rerun/so101-pick-and-place": -0.5331518502167714,
+        "samanthalhy/so100_popcorn_2_transport": 1.1735777476457243,
+        "samsitol/so100_PnPacorn": -0.17620553162630626,
+        "sergiov2000/so100_lego_leader_40": 0.7627903274065003,
+        "shubham4413/so100_smolvla_rc": -0.5259909975472117,
+        "shylee/so100_cube": -1.0183602012388975,
+        "sreetz-nv/so101_teleop_vials_rack_left": -0.33292354033362526,
+        "tenkau/SO101-Stack3Blocks": -1.8162005595587534,
+        "theconstruct-ai/so101_pickplace_auto_v1": -1.6464131868747036,
+        "tshiamor/so101-long-horizon-datasetombo": 0.6460667351176327,
+        "witsense-ai/so101_pick_and_place_ring_33": 0.36571063993810937,
+        "youliangtan/so101-table-cleanup": -1.7528580263890028
+      }
+    },
+    "improvement": {
+      "iqr": 0.17817862825507613,
+      "max": 0.8416278048204668,
+      "median": 0.594964312086651,
+      "min": 0.2185007465364751,
+      "n": 40,
+      "q25": 0.5222322168168396,
+      "q75": 0.7004108450719158,
+      "scale": "linear",
+      "z": {
+        "Aaaay-0610/so101-task-1": -0.2820286283064945,
+        "Askel1419/so101_3_cup_no4": -0.9861829993708602,
+        "BlackWhite123/fold_cloth": 1.073772203208367,
+        "Deviant65/so101_redcube_20260925_154203": -0.6476171113642717,
+        "Haribot099/so101_60": 0.06806707340303202,
+        "Jiamo0912/robocolosseum-so101-black-screwdriver-box-to-table-100episodes": 1.8960810370671275,
+        "JimmyPeng02/so100_test_6": -0.2318756834725862,
+        "LUOSYrrrrr/so101_yellow_tape_v1_v21": 1.0919545888828237,
+        "LeRobot-worldwide-hackathon/190-RecycloBots-recyclobots": -1.2578682792291203,
+        "MaxT90/so101-pick-place": 1.1317687415976379,
+        "OkzRIKU/so101-turn-up-drone": -2.89384302425597,
+        "SGPatil/so101_table_cleanup": 0.20700104033515634,
+        "SalZa2004/so101_track_rails_depth_2": -0.5215242322058103,
+        "Selinaliu1030/egg_0806": 0.12380471813582554,
+        "TeamIORobotics/so101_pickplace_v1": 1.3931015811693443,
+        "Twu31/so101_hand_blue_napkin": 0.25668090530283405,
+        "apayan/so100_ball8": 0.5723218437277552,
+        "codywang/so101_pickup_test": -1.9917757648682273,
+        "dharak22/so101-red-cube-3D-print-clean": -0.3285516993666264,
+        "dongdong123123/so101_stack_cubes": -0.5295747707702513,
+        "hjkso1406/eval_smolvla-so101-4tasks-aug-v2_stack_30": -0.43901328507014303,
+        "hungho77/so101_left_arm_pick_red_cube_into_pot": 0.27963863408342515,
+        "jccj/so100_block_in_cup": -0.7012142530490215,
+        "kmg0620/so101_bomb_pick_place_v1": -2.271066006374784,
+        "legalaspro/so101-pick-and-place-cube-lerobot-30hz": 0.7820314387860692,
+        "lerobot/svla_so100_pickplace": 0.8961393746013502,
+        "lerobot/svla_so101_pickplace": 1.7640403161740885,
+        "pranavsaroha/so100_medicine_0605": 0.24906199243963126,
+        "rerun/so101-pick-and-place": -0.3310423923687105,
+        "samanthalhy/so100_popcorn_2_transport": 0.9242133080243039,
+        "samsitol/so100_PnPacorn": -0.2790061496793527,
+        "sergiov2000/so100_lego_leader_40": -1.138889230002438,
+        "shubham4413/so100_smolvla_rc": -0.22196365419666156,
+        "shylee/so100_cube": -0.6477672659041688,
+        "sreetz-nv/so101_teleop_vials_rack_left": -0.06806707340303202,
+        "tenkau/SO101-Stack3Blocks": 0.5921827577115549,
+        "theconstruct-ai/so101_pickplace_auto_v1": 1.2526277612707353,
+        "tshiamor/so101-long-horizon-datasetombo": 0.7769173250020015,
+        "witsense-ai/so101_pick_and_place_ring_33": -1.6602912548718438,
+        "youliangtan/so101-table-cleanup": 1.7020732447631604
+      }
+    },
+    "kp": {
+      "iqr": 938.9448915058497,
+      "max": 2954.0496956133406,
+      "median": 345.08786440231506,
+      "min": 50.00247027170731,
+      "n": 40,
+      "q25": 93.29694193185122,
+      "q75": 1032.241833437701,
+      "scale": "log",
+      "z": {
+        "Aaaay-0610/so101-task-1": -0.21619780588180437,
+        "Askel1419/so101_3_cup_no4": 1.1274360712797924,
+        "BlackWhite123/fold_cloth": 0.555275799261458,
+        "Deviant65/so101_redcube_20260925_154203": -0.28733242648616075,
+        "Haribot099/so101_60": 0.0491775728345213,
+        "Jiamo0912/robocolosseum-so101-black-screwdriver-box-to-table-100episodes": -0.19736707380874718,
+        "JimmyPeng02/so100_test_6": -0.11711029776894903,
+        "LUOSYrrrrr/so101_yellow_tape_v1_v21": 0.2874177008478962,
+        "LeRobot-worldwide-hackathon/190-RecycloBots-recyclobots": 0.18438500324736787,
+        "MaxT90/so101-pick-place": 0.7020197533739353,
+        "OkzRIKU/so101-turn-up-drone": -0.9520823747258271,
+        "SGPatil/so101_table_cleanup": -0.9812381593341392,
+        "SalZa2004/so101_track_rails_depth_2": 1.0684818261066167,
+        "Selinaliu1030/egg_0806": 0.3283610769764347,
+        "TeamIORobotics/so101_pickplace_v1": -1.0097797274426346,
+        "Twu31/so101_hand_blue_napkin": -0.6738502456133378,
+        "apayan/so100_ball8": -0.689954311446612,
+        "codywang/so101_pickup_test": -0.21997039439338423,
+        "dharak22/so101-red-cube-3D-print-clean": 0.11793555034927966,
+        "dongdong123123/so101_stack_cubes": -1.0010829436958073,
+        "hjkso1406/eval_smolvla-so101-4tasks-aug-v2_stack_30": -1.009951181143341,
+        "hungho77/so101_left_arm_pick_red_cube_into_pot": -0.9681879029187198,
+        "jccj/so100_block_in_cup": 0.7894380137971538,
+        "kmg0620/so101_bomb_pick_place_v1": 0.7879791332570459,
+        "legalaspro/so101-pick-and-place-cube-lerobot-30hz": 0.6353226689572146,
+        "lerobot/svla_so100_pickplace": 0.6751312733398526,
+        "lerobot/svla_so101_pickplace": -0.6808544885734799,
+        "pranavsaroha/so100_medicine_0605": 0.9917136739793729,
+        "rerun/so101-pick-and-place": 0.723098216240103,
+        "samanthalhy/so100_popcorn_2_transport": 0.22376090829346157,
+        "samsitol/so100_PnPacorn": 0.6906851852011344,
+        "sergiov2000/so100_lego_leader_40": 0.4389605583847743,
+        "shubham4413/so100_smolvla_rc": -1.0070262585298164,
+        "shylee/so100_cube": 0.5153302070018176,
+        "sreetz-nv/so101_teleop_vials_rack_left": -1.0091829563119887,
+        "tenkau/SO101-Stack3Blocks": -0.29662527298341906,
+        "theconstruct-ai/so101_pickplace_auto_v1": 0.4634235177639513,
+        "tshiamor/so101-long-horizon-datasetombo": -1.0096206101032519,
+        "witsense-ai/so101_pick_and_place_ring_33": -0.40389826187783934,
+        "youliangtan/so101-table-cleanup": -0.0491775728345213
+      }
+    },
+    "kv": {
+      "iqr": 22.40801809612098,
+      "max": 49.072112555591374,
+      "median": 9.890414771926665,
+      "min": 0.1008084649430082,
+      "n": 40,
+      "q25": 0.7238301251790612,
+      "q75": 23.13184822130004,
+      "scale": "log",
+      "z": {
+        "Aaaay-0610/so101-task-1": -0.01834576121657754,
+        "Askel1419/so101_3_cup_no4": 0.6767373497209787,
+        "BlackWhite123/fold_cloth": 0.5661827316924309,
+        "Deviant65/so101_redcube_20260925_154203": 0.2960545984390592,
+        "Haribot099/so101_60": -0.4346999683236333,
+        "Jiamo0912/robocolosseum-so101-black-screwdriver-box-to-table-100episodes": 0.02936289344951795,
+        "JimmyPeng02/so100_test_6": -0.9628274173127741,
+        "LUOSYrrrrr/so101_yellow_tape_v1_v21": 0.6722441692322116,
+        "LeRobot-worldwide-hackathon/190-RecycloBots-recyclobots": -1.3625903670112838,
+        "MaxT90/so101-pick-place": -1.2775788296322936,
+        "OkzRIKU/so101-turn-up-drone": -2.1245087824354694,
+        "SGPatil/so101_table_cleanup": -2.0862588384112,
+        "SalZa2004/so101_track_rails_depth_2": 0.7818026754805818,
+        "Selinaliu1030/egg_0806": 0.27689730974833093,
+        "TeamIORobotics/so101_pickplace_v1": -2.116721546559222,
+        "Twu31/so101_hand_blue_napkin": -0.32813923258259975,
+        "apayan/so100_ball8": -0.9681063983112957,
+        "codywang/so101_pickup_test": 0.11594136923256247,
+        "dharak22/so101-red-cube-3D-print-clean": 0.47655043992916907,
+        "dongdong123123/so101_stack_cubes": -2.155913102940411,
+        "hjkso1406/eval_smolvla-so101-4tasks-aug-v2_stack_30": -0.23125416700645027,
+        "hungho77/so101_left_arm_pick_red_cube_into_pot": -2.019225554171921,
+        "jccj/so100_block_in_cup": -0.3345636193558604,
+        "kmg0620/so101_bomb_pick_place_v1": 0.4024836977744932,
+        "legalaspro/so101-pick-and-place-cube-lerobot-30hz": -1.5095171195017578,
+        "lerobot/svla_so100_pickplace": 0.7230489649644113,
+        "lerobot/svla_so101_pickplace": -0.9126056582241662,
+        "pranavsaroha/so100_medicine_0605": 0.28365159200684953,
+        "rerun/so101-pick-and-place": 0.7236167046607784,
+        "samanthalhy/so100_popcorn_2_transport": -0.07510778542177353,
+        "samsitol/so100_PnPacorn": 0.7953590895197349,
+        "sergiov2000/so100_lego_leader_40": 0.1653728522955855,
+        "shubham4413/so100_smolvla_rc": -1.6734968565393464,
+        "shylee/so100_cube": 0.1536896531828033,
+        "sreetz-nv/so101_teleop_vials_rack_left": -2.230993941834713,
+        "tenkau/SO101-Stack3Blocks": 0.01834576121657754,
+        "theconstruct-ai/so101_pickplace_auto_v1": 0.739590230392863,
+        "tshiamor/so101-long-horizon-datasetombo": -2.27598278221728,
+        "witsense-ai/so101_pick_and_place_ring_33": 0.34375847067671533,
+        "youliangtan/so101-table-cleanup": 0.5008539600359353
+      }
+    },
+    "latency_frames": {
+      "iqr": 2.0,
+      "max": 5.0,
+      "median": 3.0,
+      "min": 1.0,
+      "n": 40,
+      "q25": 2.0,
+      "q75": 4.0,
+      "scale": "linear",
+      "z": {
+        "Aaaay-0610/so101-task-1": 0.6744907594765952,
+        "Askel1419/so101_3_cup_no4": 0.6744907594765952,
+        "BlackWhite123/fold_cloth": -0.6744907594765952,
+        "Deviant65/so101_redcube_20260925_154203": -0.6744907594765952,
+        "Haribot099/so101_60": 0.0,
+        "Jiamo0912/robocolosseum-so101-black-screwdriver-box-to-table-100episodes": 0.0,
+        "JimmyPeng02/so100_test_6": 1.3489815189531904,
+        "LUOSYrrrrr/so101_yellow_tape_v1_v21": -0.6744907594765952,
+        "LeRobot-worldwide-hackathon/190-RecycloBots-recyclobots": 1.3489815189531904,
+        "MaxT90/so101-pick-place": 0.6744907594765952,
+        "OkzRIKU/so101-turn-up-drone": 1.3489815189531904,
+        "SGPatil/so101_table_cleanup": 0.0,
+        "SalZa2004/so101_track_rails_depth_2": 0.6744907594765952,
+        "Selinaliu1030/egg_0806": 0.0,
+        "TeamIORobotics/so101_pickplace_v1": 0.6744907594765952,
+        "Twu31/so101_hand_blue_napkin": -0.6744907594765952,
+        "apayan/so100_ball8": 0.0,
+        "codywang/so101_pickup_test": 0.0,
+        "dharak22/so101-red-cube-3D-print-clean": 0.0,
+        "dongdong123123/so101_stack_cubes": -0.6744907594765952,
+        "hjkso1406/eval_smolvla-so101-4tasks-aug-v2_stack_30": -1.3489815189531904,
+        "hungho77/so101_left_arm_pick_red_cube_into_pot": 0.6744907594765952,
+        "jccj/so100_block_in_cup": 0.6744907594765952,
+        "kmg0620/so101_bomb_pick_place_v1": -0.6744907594765952,
+        "legalaspro/so101-pick-and-place-cube-lerobot-30hz": 1.3489815189531904,
+        "lerobot/svla_so100_pickplace": 0.0,
+        "lerobot/svla_so101_pickplace": 0.6744907594765952,
+        "pranavsaroha/so100_medicine_0605": 0.6744907594765952,
+        "rerun/so101-pick-and-place": 0.0,
+        "samanthalhy/so100_popcorn_2_transport": 0.6744907594765952,
+        "samsitol/so100_PnPacorn": -0.6744907594765952,
+        "sergiov2000/so100_lego_leader_40": 0.0,
+        "shubham4413/so100_smolvla_rc": 1.3489815189531904,
+        "shylee/so100_cube": 0.6744907594765952,
+        "sreetz-nv/so101_teleop_vials_rack_left": -1.3489815189531904,
+        "tenkau/SO101-Stack3Blocks": -0.6744907594765952,
+        "theconstruct-ai/so101_pickplace_auto_v1": 1.3489815189531904,
+        "tshiamor/so101-long-horizon-datasetombo": 0.0,
+        "witsense-ai/so101_pick_and_place_ring_33": -1.3489815189531904,
+        "youliangtan/so101-table-cleanup": -0.6744907594765952
+      }
+    },
+    "latency_ms": {
+      "iqr": 66.66666666666667,
+      "max": 166.66666666666666,
+      "median": 100.0,
+      "min": 33.333333333333336,
+      "n": 40,
+      "q25": 66.66666666666667,
+      "q75": 133.33333333333334,
+      "scale": "linear",
+      "z": {
+        "Aaaay-0610/so101-task-1": 0.6744907594765955,
+        "Askel1419/so101_3_cup_no4": 0.6744907594765955,
+        "BlackWhite123/fold_cloth": -0.6744907594765952,
+        "Deviant65/so101_redcube_20260925_154203": -0.6744907594765952,
+        "Haribot099/so101_60": 0.0,
+        "Jiamo0912/robocolosseum-so101-black-screwdriver-box-to-table-100episodes": 0.0,
+        "JimmyPeng02/so100_test_6": 1.3489815189531904,
+        "LUOSYrrrrr/so101_yellow_tape_v1_v21": -0.6744907594765952,
+        "LeRobot-worldwide-hackathon/190-RecycloBots-recyclobots": 1.3489815189531904,
+        "MaxT90/so101-pick-place": 0.6744907594765955,
+        "OkzRIKU/so101-turn-up-drone": 1.3489815189531904,
+        "SGPatil/so101_table_cleanup": 0.0,
+        "SalZa2004/so101_track_rails_depth_2": 0.6744907594765955,
+        "Selinaliu1030/egg_0806": 0.0,
+        "TeamIORobotics/so101_pickplace_v1": 0.6744907594765955,
+        "Twu31/so101_hand_blue_napkin": -0.6744907594765952,
+        "apayan/so100_ball8": 0.0,
+        "codywang/so101_pickup_test": 0.0,
+        "dharak22/so101-red-cube-3D-print-clean": 0.0,
+        "dongdong123123/so101_stack_cubes": -0.6744907594765952,
+        "hjkso1406/eval_smolvla-so101-4tasks-aug-v2_stack_30": -1.3489815189531904,
+        "hungho77/so101_left_arm_pick_red_cube_into_pot": 0.6744907594765955,
+        "jccj/so100_block_in_cup": 0.6744907594765955,
+        "kmg0620/so101_bomb_pick_place_v1": -0.6744907594765952,
+        "legalaspro/so101-pick-and-place-cube-lerobot-30hz": 1.3489815189531904,
+        "lerobot/svla_so100_pickplace": 0.0,
+        "lerobot/svla_so101_pickplace": 0.6744907594765955,
+        "pranavsaroha/so100_medicine_0605": 0.6744907594765955,
+        "rerun/so101-pick-and-place": 0.0,
+        "samanthalhy/so100_popcorn_2_transport": 0.6744907594765955,
+        "samsitol/so100_PnPacorn": -0.6744907594765952,
+        "sergiov2000/so100_lego_leader_40": 0.0,
+        "shubham4413/so100_smolvla_rc": 1.3489815189531904,
+        "shylee/so100_cube": 0.6744907594765955,
+        "sreetz-nv/so101_teleop_vials_rack_left": -1.3489815189531904,
+        "tenkau/SO101-Stack3Blocks": -0.6744907594765952,
+        "theconstruct-ai/so101_pickplace_auto_v1": 0.0,
+        "tshiamor/so101-long-horizon-datasetombo": 0.0,
+        "witsense-ai/so101_pick_and_place_ring_33": -1.3489815189531904,
+        "youliangtan/so101-table-cleanup": -0.6744907594765952
+      }
+    }
+  },
+  "summary": {
+    "median_improvement": 0.594964312086651,
+    "n_failed": 0,
+    "n_improved": 40,
+    "n_rejected": 106,
+    "n_robots": 40,
+    "n_skipped": 20
+  }
+}
