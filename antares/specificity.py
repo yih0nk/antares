@@ -283,6 +283,45 @@ def latency_profile(
     return {int(f): _safe_score(params.replace(latency_frames=int(f)), episodes, simulate)[1] for f in frames}
 
 
+def seed_restarts(
+    train: Sequence[Episode],
+    eval: Sequence[Episode],
+    seeds: Sequence[int],
+    simulate: SimulateFn,
+    max_evaluations: int = 150,
+    start=None,
+) -> dict:
+    """Re-run the calibration with different CMA-ES seeds on the same split.
+
+    If the data identifies the parameters, every restart lands on about the
+    same values. ``spread[name]`` is ``max / min`` over the restarts (for
+    latency, ``max - min`` frames).
+    """
+    runs = []
+    for seed in seeds:
+        res = calibrate(train, eval, simulate=simulate, start=start, max_evaluations=max_evaluations, seed=seed)
+        runs.append(
+            {
+                "seed": int(seed),
+                "params": res.params.to_dict(),
+                "train_score": float(res.train_score),
+                "eval_score": float(res.eval_score),
+            }
+        )
+    return {"runs": runs, "spread": _spread([r["params"] for r in runs])}
+
+
+def _spread(param_dicts: Sequence[dict]) -> dict[str, float]:
+    out = {}
+    for name in DIMS:
+        v = np.array([d[name] for d in param_dicts], dtype=np.float64)
+        if SPACE[name][2] == "int":
+            out[name] = float(v.max() - v.min())
+        else:
+            out[name] = float(v.max() / v.min()) if v.min() > 0 else math.inf
+    return out
+
+
 def pinned_refit(
     train: Sequence[Episode],
     eval: Sequence[Episode],
@@ -342,6 +381,7 @@ __all__ = [
     "interpolate",
     "latency_profile",
     "pinned_refit",
+    "seed_restarts",
     "Identifiability",
     "identifiability",
     "jacobian",

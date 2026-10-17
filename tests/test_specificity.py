@@ -168,7 +168,7 @@ def test_residuals_raise_on_divergence():
 # direct checks, on a toy first-order servo
 # --------------------------------------------------------------------------
 
-from antares.specificity import interpolate, latency_profile, pinned_refit  # noqa: E402
+from antares.specificity import interpolate, latency_profile, pinned_refit, seed_restarts  # noqa: E402
 
 
 def toy_response(p, action, fps):
@@ -245,3 +245,13 @@ def test_perturbations_keep_fields_outside_the_search():
 
     jacobian(TRUE.replace(forcerange=7.5), flat_episodes(1), sim)
     assert set(seen) == {7.5}
+
+
+def test_seed_restarts_report_spread():
+    eps = toy_episodes(TRUE)
+    out = seed_restarts(eps[:3], eps[3:], [0, 1], toy_simulate, max_evaluations=40)
+    assert [r["seed"] for r in out["runs"]] == [0, 1]
+    from antares.calibrate import DIMS
+    assert set(out["spread"]) == set(DIMS)
+    assert all(v >= 1.0 for k, v in out["spread"].items() if k != "latency_frames")
+    assert out["spread"]["latency_frames"] >= 0
