@@ -243,9 +243,12 @@ class Arm:
     Not thread-safe: ``replay`` and ``fk`` share state. Use one ``Arm`` per
     thread, or serialize calls.
 
-    ``model_path`` loads another MJCF with the same six joints (for example
-    one written by :mod:`antares.export`). With ``params=None`` the values
-    already compiled into that model are kept (see
+    ``robot`` names an entry of :data:`antares.robots.REGISTRY` (default
+    ``so101``), which supplies the MJCF, the mesh directory, the MJCF's own
+    joint names (checked against the compiled model, in canonical order) and
+    the unit map. ``model_path`` loads another MJCF with the same six joints
+    (for example one written by :mod:`antares.export`). With ``params=None``
+    the values already compiled into that model are kept (see
     :meth:`SimParams.from_model`); for the stock model that is the default
     ``SimParams()``.
     """
@@ -256,20 +259,24 @@ class Arm:
         unit_map: UnitMap | None = None,
         contacts: bool = False,
         model_path: str | Path | None = None,
+        robot: str | None = None,
     ):
-        self.model_path = Path(model_path) if model_path is not None else MODEL_PATH
+        from antares.robots import get_robot
+
+        self.robot = get_robot(robot)
+        self.model_path = Path(model_path) if model_path is not None else self.robot.model_path
         self.model = load_model(self.model_path)
         if not contacts:
             self.model.opt.disableflags |= int(mujoco.mjtDisableBit.mjDSBL_CONTACT)
         self.data = mujoco.MjData(self.model)
         self._fk_data = mujoco.MjData(self.model)
-        self.unit_map = unit_map if unit_map is not None else UnitMap.from_model(self.model)
+        self.unit_map = unit_map if unit_map is not None else self.robot.unit_map_factory(self.model)
         self.body_names: list[str] = [
             mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY, i) for i in range(self.model.nbody)
         ]
         joint_names = [mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_JOINT, i) for i in range(self.model.njnt)]
-        if tuple(joint_names) != JOINTS:
-            raise RuntimeError(f"MJCF joints {joint_names} != expected {JOINTS}")
+        if tuple(joint_names) != tuple(self.robot.joint_names):
+            raise RuntimeError(f"MJCF joints {joint_names} != expected {list(self.robot.joint_names)} for {self.robot.name}")
         self._ctrl_lo = self.model.actuator_ctrlrange[:, 0].copy()
         self._ctrl_hi = self.model.actuator_ctrlrange[:, 1].copy()
         self._base_timestep = float(self.model.opt.timestep)
@@ -277,6 +284,11 @@ class Arm:
             params = SimParams.from_model(self.model)
         self.params = params
         self.apply(params)
+
+    @property
+    def robot_name(self) -> str:
+        """Registry name of the model this arm simulates (``so101`` by default)."""
+        return self.robot.name
 
     # -- parameters ---------------------------------------------------------
 
