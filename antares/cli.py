@@ -165,6 +165,146 @@ def cmd_locks(args: argparse.Namespace) -> int:
     return 0
 
 
+def _f(v, fmt: str = "{:.3f}") -> str:
+    return "-" if v is None else fmt.format(v)
+
+
+def _fleet_tables(report: dict) -> str:
+    """Human-readable fleet report: robots, parameter spread, outliers, cross matrix."""
+    out: list[str] = []
+    robots = report.get("robots", [])
+    rows = []
+    for r in robots:
+        p = r.get("params") or {}
+        rows.append(
+            [
+                r["dataset"],
+                r.get("robot_type", "?"),
+                str(r.get("n_episodes", "?")),
+                f"{r.get('fps', 0):g}",
+                _f(r.get("baseline_eval")),
+                _f(r.get("calibrated_eval")),
+                _f(r.get("improvement"), "{:.0%}"),
+                f"{p.get('latency_frames', '-')} ({_f(r.get('latency_ms'), '{:.0f}')} ms)",
+                _f(p.get("kp"), "{:.0f}"),
+            ]
+        )
+    s = report.get("summary") or {}
+    out.append(
+        f"{s.get('n_robots', len(robots))} robots calibrated, {s.get('n_failed', 0)} failed, "
+        f"{s.get('n_skipped', 0)} skipped, {s.get('n_rejected', 0)} rejected; "
+        f"median gap closed {_f(s.get('median_improvement'), '{:.0%}')}"
+    )
+    if rows:
+        out.append("")
+        out.append(
+            _table(
+                ["dataset", "robot", "eps", "fps", "baseline", "calibrated", "closed", "latency", "kp"],
+                rows,
+            )
+        )
+    stats = report.get("stats") or {}
+    if stats:
+        out.append("")
+        out.append("fitted parameters across the fleet")
+        srows = [
+            [p, _f(st.get("median"), "{:.4g}"), _f(st.get("q25"), "{:.4g}"), _f(st.get("q75"), "{:.4g}"),
+             _f(st.get("min"), "{:.4g}"), _f(st.get("max"), "{:.4g}"), str(st.get("n", ""))]
+            for p, st in stats.items()
+        ]
+        out.append(_table(["param", "median", "q25", "q75", "min", "max", "n"], srows))
+    outliers = report.get("outliers") or []
+    if outliers:
+        out.append("")
+        out.append("outliers (|robust z| > 2.5)")
+        out.append(_table(["dataset", "param", "z", "note"], [[o["dataset"], o["param"], f"{o['z']:+.1f}", o["note"]] for o in outliers]))
+    cross = report.get("cross")
+    if cross:
+        out.append("")
+        out.append("cross matrix: eval RMSE (deg), rows = robots, cols = locks")
+        short = [c.split("__", 1)[-1][:18] for c in cross["cols"]]
+        crow = [[row.split("/", 1)[-1][:28]] + [f"{v:.3f}" for v in scores] for row, scores in zip(cross["rows"], cross["scores"])]
+        out.append(_table(["robot"] + short, crow))
+        cs = cross.get("summary") or {}
+        out.append(
+            f"own lock {_f(cs.get('mean_diagonal'))} deg vs other robots' locks {_f(cs.get('mean_off_diagonal'))} deg "
+            f"({_f(cs.get('off_over_diagonal'), '{:.2f}')}x) vs default {_f(cs.get('mean_default'))} deg "
+            f"({_f(cs.get('default_over_diagonal'), '{:.2f}')}x); own lock best for {cs.get('own_lock_is_best', '-')}/{cs.get('n', '-')}"
+        )
+    failures = report.get("failures") or []
+    if failures:
+        out.append("")
+        out.append("failures")
+        out.append(_table(["dataset", "error"], [[f["dataset"], f["error"][:100]] for f in failures]))
+    return "\n".join(out)
+
+
+def cmd_fleet_scan(args: argparse.Namespace) -> int:
+    from antares import fleet
+
+    counts = {"ok": 0, "no": 0}
+
+    def on_candidate(c) -> None:
+        counts["ok" if c.accepted else "no"] += 1
+        mark = "+" if c.accepted else "-"
+        detail = f"{c.robot_type}, {c.n_episodes} eps, {c.data_bytes / 2**20:.1f} MB" if c.accepted else c.reason
+        print(f"  {mark} {c.repo_id}: {detail}", flush=True)
+
+    print(f"discovering up to {args.limit} SO-100/101 datasets on the Hub", flush=True)
+    candidates = fleet.discover(limit=args.limit, max_inspect=args.max_inspect, on_progress=on_candidate)
+    print(f"{counts['ok']} accepted, {counts['no']} rejected", flush=True)
+
+    def on_progress(ev: dict) -> None:
+        t = ev["type"]
+        if t == "start":
+            print(f"[{ev['index'] + 1}/{ev['total']}] {ev['dataset']}", flush=True)
+        elif t == "fit":
+            print(f"    eval {ev['evaluation']:4d}  best {_f(ev['best_score'])} deg", flush=True)
+        elif t == "robot":
+            e = ev["entry"]
+            print(
+                f"    {_f(e['baseline_eval'])} -> {_f(e['calibrated_eval'])} deg "
+                f"({_f(e['improvement'], '{:.0%}')} closed), latency {e['params']['latency_frames']} frames, "
+                f"kp {e['params']['kp']:.0f}  [{e['elapsed_s']:.0f}s]",
+                flush=True,
+            )
+        elif t == "failed":
+            print(f"    FAILED {ev['dataset']}: {ev['error']}", flush=True)
+        elif t == "skipped":
+            print(f"    skipped {ev['dataset']}: {ev['reason']}", flush=True)
+        elif t == "done":
+            print(f"saved {ev['path']}", flush=True)
+
+    report = fleet.scan(
+        candidates,
+        n_train=args.n_train,
+        n_eval=args.n_eval,
+        max_evaluations=args.max_evaluations,
+        time_budget_s=args.budget_s,
+        on_progress=on_progress,
+        lock_dir=args.lock_dir,
+        seed=args.seed,
+        cross_n=args.cross_n,
+    )
+    print()
+    print(_fleet_tables(report.to_dict()))
+    return 0
+
+
+def cmd_fleet_list(args: argparse.Namespace) -> int:
+    import json
+    from pathlib import Path
+
+    from antares import fleet
+
+    path = Path(args.path) if args.path else fleet.FLEET_LOCK_DIR / fleet.FLEET_REPORT_NAME
+    if not path.is_file():
+        print(f"no fleet report at {path}; run `antares fleet scan`")
+        return 1
+    print(_fleet_tables(json.loads(path.read_text())))
+    return 0
+
+
 # --------------------------------------------------------------------------
 # parser
 # --------------------------------------------------------------------------
@@ -212,6 +352,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("locks", help="list saved locks")
     p.set_defaults(func=cmd_locks)
+
+    p = sub.add_parser("fleet", help="calibrate every public SO-100/101 arm on the Hub")
+    fsub = p.add_subparsers(dest="fleet_cmd", required=True)
+    f = fsub.add_parser("scan", help="discover datasets, calibrate each, write locks/fleet/fleet.json")
+    f.add_argument("--limit", type=int, default=60, help="max datasets to accept from the Hub")
+    f.add_argument("--budget-s", type=float, default=2400.0, help="stop starting new robots after this many seconds")
+    f.add_argument("--max-inspect", type=int, default=None, help="max Hub hits to inspect (default 5x limit)")
+    f.add_argument("--n-train", type=int, default=20)
+    f.add_argument("--n-eval", type=int, default=10)
+    f.add_argument("--max-evaluations", type=int, default=150)
+    f.add_argument("--seed", type=int, default=0)
+    f.add_argument("--cross-n", type=int, default=6, help="robots in the partial cross matrix (0 = skip)")
+    f.add_argument("--lock-dir", default="locks/fleet")
+    f.set_defaults(func=cmd_fleet_scan)
+    f = fsub.add_parser("list", help="print the fleet table from fleet.json")
+    f.add_argument("--path", default=None, help="fleet report (default locks/fleet/fleet.json)")
+    f.set_defaults(func=cmd_fleet_list)
 
     return parser
 
