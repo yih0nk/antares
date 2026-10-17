@@ -114,7 +114,7 @@ def _fallback_aggregate(reports: Sequence[Any]) -> _FallbackGapReport:
 #: are continuous during the search and rounded on decode. This is the
 #: shared space: one value of each parameter for all six joints.
 SPACE: dict[str, tuple[float, float, str]] = {
-    "kp": (50.0, 5000.0, "log"),
+    "kp": (10.0, 5000.0, "log"),  # SO-101 fits sat on the old 50 floor
     "kv": (0.1, 50.0, "log"),
     "damping": (0.01, 10.0, "log"),
     "armature": (1e-4, 0.5, "log"),
