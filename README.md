@@ -253,8 +253,9 @@ per-joint parameters are unconstrained and should not be read as physical.
 
 A lock is only worth having per robot if it beats another arm's lock on
 this arm, by more than refitting the same arm moves the score. `antares
-specificity` runs that test on the shared (one value for all joints)
-locks of each dataset and writes `results/robot_specificity.{md,json}`:
+specificity` runs that test on the newest shared (one value for all
+joints) lock of each dataset, scoring the held-out episodes of the split
+that lock was fitted with, and writes `results/robot_specificity.{md,json}`:
 
 ```sh
 .venv/bin/antares specificity                # the two demo arms

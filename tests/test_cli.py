@@ -574,6 +574,139 @@ def test_events_all_summary(monkeypatch, capsys):
     assert "23%" in out and "18% of frames" in out and "lift 1.29x" in out
 
 
+def test_cross_prints_specificity_and_writes_json(monkeypatch, tmp_path, capsys):
+    from antares import server
+
+    m = {"rows": ["lab/a", "lab/b"], "cols": ["lock-a", "lock-b", "default"],
+         "scores": [[1.0, 2.0, 5.0], [3.0, 0.5, 4.0]], "per_joint": [[{}] * 3] * 2}
+    monkeypatch.setattr(server, "cross_matrix", lambda *a, **k: m)
+    monkeypatch.setattr(server, "load_lock_dict",
+                        lambda name: {"dataset": {"lock-a": "lab/a", "lock-b": "lab/b"}[name]})
+    out_path = tmp_path / "out" / "cross.json"
+    assert cli.main(["cross", "--datasets", "lab/a,lab/b", "--locks", "lock-a,lock-b",
+                     "--json", str(out_path)]) == 0
+    out = capsys.readouterr().out
+    assert "robot specificity" in out
+    assert "2.00x" in out and "6.00x" in out
+    saved = json.loads(out_path.read_text())
+    assert saved["specificity"]["all_specific"] is True
+    assert saved["matrix"]["cols"] == m["cols"]
+
+
+def test_identify_prints_tolerances(monkeypatch, tmp_path, capsys):
+    import antares.calibrate
+    from antares import server
+
+    T = 40
+    t = np.arange(T) / 30.0
+    eps = []
+    for i in range(4):
+        a = np.stack([np.sin(2 * np.pi * (0.5 + 0.1 * j) * t + i) for j in range(6)], axis=1)
+        eps.append(Episode(index=i, fps=30.0, joint_names=JOINTS, state=a, action=a))
+    ds = Dataset(repo_id="fake/robot", robot_type="so101_follower", fps=30.0,
+                 joint_names=JOINTS, episodes=tuple(eps))
+
+    def simulate(params, ep):  # lag shrinks with kp; kv, damping etc. do nothing
+        shift = np.radians(100.0 / params.kp)
+        return ep.state, ep.state + shift
+
+    monkeypatch.setattr(server, "_DATASETS", {"fake/robot": ds})
+    monkeypatch.setattr(server, "load_lock_dict", lambda name: {"params": {"kp": 500.0}})
+    monkeypatch.setattr(antares.calibrate, "default_simulate", lambda: simulate)
+    out_path = tmp_path / "id.json"
+    assert cli.main(["identify", "fake/robot", "--lock", "x", "--n-train", "2", "--n-eval", "2",
+                     "--json", str(out_path)]) == 0
+    out = capsys.readouterr().out
+    assert "train split, 2 episodes" in out
+    assert "kp" in out and "unbounded" in out  # kv etc. have no effect at all
+    assert "nan" not in out  # an unconstrained parameter has no trade-off ratio, shown as "-"
+    assert "latency (frames): 0:" in out
+    saved = json.loads(out_path.read_text())
+    assert saved["identifiability"]["names"][0] == "kp"
+    assert saved["identifiability"]["tradeoff"]["kv"] is None
+    # asking for a split the dataset cannot provide is an error, not a NaN report
+    with pytest.raises(SystemExit, match="leaves no eval split"):
+        cli.main(["identify", "fake/robot", "--lock", "x", "--split", "eval", "--n-train", "4"])
+
+
+def test_specificity_writes_report(monkeypatch, tmp_path, capsys):
+    import antares.calibrate
+    import antares.specificity
+    from antares import server
+
+    seen = {}
+
+    def fake_study(episodes, locks, simulate, **kw):
+        seen.update(episodes=episodes, locks=locks, kw=kw)
+        return {"matrix": {}, "datasets": {}}
+
+    monkeypatch.setattr(server, "_DATASETS", {"lab/a": _dataset("lab/a"), "lab/b": _dataset("lab/b")})
+    monkeypatch.setattr(server, "list_lock_dicts", lambda: list(SPEC_LOCKS.values()))
+    monkeypatch.setattr(server, "load_lock_dict", lambda n: SPEC_LOCKS[n])
+    monkeypatch.setattr(antares.calibrate, "default_simulate", lambda: None)
+    monkeypatch.setattr(antares.specificity, "study", fake_study)
+    monkeypatch.setattr(antares.specificity, "render_markdown", lambda r, title: f"## {title}\n")
+    assert cli.main(["specificity", "--datasets", "lab/a,lab/b", "--restart-seeds", "3",
+                     "--out", str(tmp_path)]) == 0
+    # the newest *shared* lock per dataset: a-perjoint is newer than a-new but per-joint
+    assert set(seen["locks"]) == {"a-new", "b"}
+    assert seen["locks"]["b"][0] == "lab/b"
+    assert seen["kw"]["restart_seeds"] == [3]
+    # each dataset is split the way its own lock was fitted
+    assert seen["kw"]["splits"] == {"lab/a": ([0, 2], [1]), "lab/b": ([1], [0, 2])}
+    assert (tmp_path / "robot_specificity.md").read_text() == "## Robot specificity\n"
+    assert json.loads((tmp_path / "robot_specificity.json").read_text()) == {"matrix": {}, "datasets": {}}
+
+
+def _spec_lock(name, dataset, created, space="shared", train=(0, 2), eval=(1,)):
+    return {"name": name, "dataset": dataset, "created_at": created, "params": {"kp": 100.0},
+            "result": {"space": space, "train_episodes": list(train), "eval_episodes": list(eval)}}
+
+
+SPEC_LOCKS = {
+    "a-old": _spec_lock("a-old", "lab/a", "2026-01-01"),
+    "a-new": _spec_lock("a-new", "lab/a", "2026-02-01"),
+    "a-perjoint": _spec_lock("a-perjoint", "lab/a", "2026-03-01", space="per_joint"),
+    "b": _spec_lock("b", "lab/b", "2026-01-01", train=(1,), eval=(0, 2)),
+}
+
+
+def test_specificity_needs_a_lock_per_dataset(monkeypatch):
+    from antares import server
+
+    monkeypatch.setattr(server, "list_lock_dicts", lambda: [])
+    with pytest.raises(SystemExit, match="no saved shared lock for lab/a"):
+        cli.main(["specificity", "--datasets", "lab/a"])
+    # a per-joint lock does not count
+    monkeypatch.setattr(server, "list_lock_dicts", lambda: [SPEC_LOCKS["a-perjoint"]])
+    with pytest.raises(SystemExit, match="no saved shared lock for lab/a"):
+        cli.main(["specificity", "--datasets", "lab/a"])
+
+
+def test_specificity_refuses_a_named_per_joint_lock(monkeypatch):
+    from antares import server
+
+    monkeypatch.setattr(server, "load_lock_dict", lambda n: SPEC_LOCKS[n])
+    with pytest.raises(SystemExit, match="a-perjoint is a per_joint lock"):
+        cli.main(["specificity", "--datasets", "lab/a", "--locks", "a-perjoint"])
+
+
+def test_specificity_synthetic_needs_one_lock_per_dataset(monkeypatch):
+    import antares.calibrate
+    from antares import server
+
+    monkeypatch.setattr(server, "load_lock_dict", lambda n: SPEC_LOCKS[n])
+    monkeypatch.setattr(antares.calibrate, "default_simulate", lambda: None)
+    with pytest.raises(SystemExit, match="one lock per dataset: got 2 datasets and 1 locks"):
+        cli.main(["specificity", "--synthetic", "--datasets", "lab/a,lab/b", "--locks", "a-new"])
+
+
+def test_write_json_turns_nan_and_inf_into_null(tmp_path):
+    path = tmp_path / "out.json"
+    cli._write_json(str(path), {"margin": float("inf"), "rows": [float("nan"), 1.0], "ok": "x"})
+    assert json.loads(path.read_text()) == {"margin": None, "rows": [None, 1.0], "ok": "x"}
+
+
 FLEET_REPORT = {
     "summary": {"n_robots": 2, "n_failed": 1, "n_skipped": 0, "n_rejected": 5, "median_improvement": 0.6},
     "robots": [
@@ -648,90 +781,3 @@ def test_fleet_scan_wires_discover_and_scan(monkeypatch, capsys, tmp_path):
     assert "2 robots calibrated" in out  # final tables
 
 
-def test_cross_prints_specificity_and_writes_json(monkeypatch, tmp_path, capsys):
-    from antares import server
-
-    m = {"rows": ["lab/a", "lab/b"], "cols": ["lock-a", "lock-b", "default"],
-         "scores": [[1.0, 2.0, 5.0], [3.0, 0.5, 4.0]], "per_joint": [[{}] * 3] * 2}
-    monkeypatch.setattr(server, "cross_matrix", lambda *a, **k: m)
-    monkeypatch.setattr(server, "load_lock_dict",
-                        lambda name: {"dataset": {"lock-a": "lab/a", "lock-b": "lab/b"}[name]})
-    out_path = tmp_path / "out" / "cross.json"
-    assert cli.main(["cross", "--datasets", "lab/a,lab/b", "--locks", "lock-a,lock-b",
-                     "--json", str(out_path)]) == 0
-    out = capsys.readouterr().out
-    assert "robot specificity" in out
-    assert "2.00x" in out and "6.00x" in out
-    saved = json.loads(out_path.read_text())
-    assert saved["specificity"]["all_specific"] is True
-    assert saved["matrix"]["cols"] == m["cols"]
-
-
-def test_identify_prints_tolerances(monkeypatch, tmp_path, capsys):
-    import antares.calibrate
-    from antares import server
-
-    T = 40
-    t = np.arange(T) / 30.0
-    eps = []
-    for i in range(4):
-        a = np.stack([np.sin(2 * np.pi * (0.5 + 0.1 * j) * t + i) for j in range(6)], axis=1)
-        eps.append(Episode(index=i, fps=30.0, joint_names=JOINTS, state=a, action=a))
-    ds = Dataset(repo_id="fake/robot", robot_type="so101_follower", fps=30.0,
-                 joint_names=JOINTS, episodes=tuple(eps))
-
-    def simulate(params, ep):  # lag shrinks with kp; kv, damping etc. do nothing
-        shift = np.radians(100.0 / params.kp)
-        return ep.state, ep.state + shift
-
-    monkeypatch.setattr(server, "_DATASETS", {"fake/robot": ds})
-    monkeypatch.setattr(server, "load_lock_dict", lambda name: {"params": {"kp": 500.0}})
-    monkeypatch.setattr(antares.calibrate, "default_simulate", lambda: simulate)
-    out_path = tmp_path / "id.json"
-    assert cli.main(["identify", "fake/robot", "--lock", "x", "--n-train", "2", "--n-eval", "2",
-                     "--json", str(out_path)]) == 0
-    out = capsys.readouterr().out
-    assert "train split, 2 episodes" in out
-    assert "kp" in out and "unbounded" in out  # kv etc. have no effect at all
-    assert "latency (frames): 0:" in out
-    assert json.loads(out_path.read_text())["identifiability"]["names"][0] == "kp"
-
-
-def test_specificity_writes_report(monkeypatch, tmp_path, capsys):
-    import antares.calibrate
-    import antares.specificity
-    from antares import server
-
-    seen = {}
-
-    def fake_study(episodes, locks, simulate, **kw):
-        seen.update(episodes=episodes, locks=locks, kw=kw)
-        return {"matrix": {}, "datasets": {}}
-
-    monkeypatch.setattr(server, "_DATASETS", {"lab/a": _dataset("lab/a"), "lab/b": _dataset("lab/b")})
-    monkeypatch.setattr(server, "list_lock_dicts", lambda: [
-        {"name": "a-old", "dataset": "lab/a", "created_at": "2026-01-01"},
-        {"name": "a-new", "dataset": "lab/a", "created_at": "2026-02-01"},
-        {"name": "a-perjoint", "dataset": "lab/a", "created_at": "2026-03-01", "params": {"kp": [1.0] * 6}},
-        {"name": "b", "dataset": "lab/b", "created_at": "2026-01-01"},
-    ])
-    monkeypatch.setattr(server, "load_lock_dict", lambda n: {
-        "name": n, "dataset": "lab/b" if n == "b" else "lab/a", "params": {"kp": 100.0}})
-    monkeypatch.setattr(antares.calibrate, "default_simulate", lambda: None)
-    monkeypatch.setattr(antares.specificity, "study", fake_study)
-    monkeypatch.setattr(antares.specificity, "render_markdown", lambda r, title: f"## {title}\n")
-    assert cli.main(["specificity", "--datasets", "lab/a,lab/b", "--restart-seeds", "3",
-                     "--out", str(tmp_path)]) == 0
-    assert set(seen["locks"]) == {"a-new", "b"}
-    assert seen["locks"]["b"][0] == "lab/b"
-    assert seen["kw"]["restart_seeds"] == [3]
-    assert (tmp_path / "robot_specificity.md").read_text() == "## Robot specificity\n"
-    assert json.loads((tmp_path / "robot_specificity.json").read_text()) == {"matrix": {}, "datasets": {}}
-
-
-def test_specificity_needs_a_lock_per_dataset(monkeypatch):
-    from antares import server
-
-    monkeypatch.setattr(server, "list_lock_dicts", lambda: [])
-    with pytest.raises(SystemExit, match="no saved shared lock for lab/a"):
-        cli.main(["specificity", "--datasets", "lab/a"])

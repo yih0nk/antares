@@ -156,6 +156,21 @@ def test_identifiability_flags_perfect_tradeoff():
     assert abs(slop["kp"]) == pytest.approx(1 / np.sqrt(2), abs=1e-6)
 
 
+def test_residuals_reject_an_empty_split():
+    with pytest.raises(ValueError, match="no episodes"):
+        residuals(TRUE, [], separable_simulate([1.0] * 5))
+
+
+def test_identifiability_has_no_tradeoff_for_an_unconstrained_param():
+    # kv does nothing to the residuals: unbounded alone *and* with the others free,
+    # so the ratio is undefined rather than inf/inf = nan by accident
+    rep = identifiability(TRUE, flat_episodes(), separable_simulate([3.0, 0.0, 0.5, 2.0, 0.1]))
+    assert math.isinf(rep.tolerance_fixed["kv"]) and math.isinf(rep.tolerance_free["kv"])
+    assert math.isnan(rep.tradeoff["kv"])
+    assert rep.to_dict()["tradeoff"]["kv"] is None
+    assert rep.tradeoff["kp"] == pytest.approx(1.0, rel=1e-6)
+
+
 def test_residuals_raise_on_divergence():
     def bad(params, ep):
         return ep.state, np.full_like(ep.state, np.nan)
@@ -285,6 +300,52 @@ def test_study_end_to_end_on_two_toy_arms():
     assert any("swap" in m for m in logs)
     import json
     json.dumps(out)  # serializable as-is
+
+
+def test_study_scores_the_split_its_lock_was_fitted_on():
+    data = {"toy/slow": toy_episodes(TRUE, n=8, seed=1), "toy/fast": toy_episodes(FAST, n=8, seed=2)}
+    locks = {"slow": ("toy/slow", TRUE), "fast": ("toy/fast", FAST)}
+    logs = []
+    out = study(data, locks, toy_simulate, n_train=3, n_eval=3, restart_seeds=(), max_evaluations=10,
+                splits={"toy/slow": ([5, 6, 7], [0, 1]), "toy/fast": ([0, 1], [9, 10])}, log=logs.append)
+    assert out["splits"]["toy/slow"] == {"train": [5, 6, 7], "eval": [0, 1]}
+    # the fresh same-arm control never touches the lock's own episodes
+    assert out["datasets"]["toy/slow"]["same_arm_control"]["n_train"] == 3  # 8 - 3 - 2
+    # a split that names episodes the dataset lacks falls back to the seeded one
+    assert any("toy/fast: lock split does not match" in m for m in logs)
+    assert out["splits"]["toy/fast"]["train"] != [0, 1]
+    assert len(out["splits"]["toy/fast"]["eval"]) == 3
+
+
+def test_study_refuses_a_per_joint_lock_up_front():
+    data = {"toy/slow": toy_episodes(TRUE, n=4, seed=1), "toy/fast": toy_episodes(FAST, n=4, seed=2)}
+    locks = {"slow": ("toy/slow", TRUE), "fast": ("toy/fast", FAST.replace(kp=(1500.0,) * 6))}
+    calls = []
+    with pytest.raises(ValueError, match="lock fast: .*shared"):
+        study(data, locks, lambda p, ep: calls.append(1) or toy_simulate(p, ep), n_train=1, n_eval=1)
+    assert not calls  # before any simulation
+
+
+def test_study_refuses_an_empty_eval_split():
+    data = {"toy/slow": toy_episodes(TRUE, n=2, seed=1)}
+    with pytest.raises(ValueError, match="no held-out episodes"):
+        study(data, {"slow": ("toy/slow", TRUE)}, toy_simulate, n_train=2, n_eval=1)
+
+
+def test_study_survives_a_diverging_lock():
+    from antares.calibrate import PENALTY
+
+    data = {"toy/slow": toy_episodes(TRUE, n=4, seed=1)}
+
+    def simulate(params, ep):
+        if params.kp == FAST.kp:
+            raise FloatingPointError("boom")
+        return toy_simulate(params, ep)
+
+    out = study(data, {"slow": ("toy/slow", TRUE), "fast": ("toy/other", FAST)}, simulate,
+                n_train=2, n_eval=2, restart_seeds=(), max_evaluations=10)
+    assert out["matrix"]["scores"][0][1] == PENALTY
+    assert out["specificity"]["rows"][0]["specific"] is True
 
 
 def test_render_markdown_has_every_section():

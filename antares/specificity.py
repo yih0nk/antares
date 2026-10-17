@@ -107,6 +107,8 @@ def residuals(params, episodes: Sequence[Episode], simulate: SimulateFn, exclude
     ``sqrt(mean(r**2))`` equals the ``overall_deg`` the calibrator minimizes
     (frame-weighted RMS over the scored joints).
     """
+    if not episodes:
+        raise ValueError("no episodes to score")
     parts = []
     for ep in episodes:
         real_q, sim_q = simulate(params, ep)
@@ -154,6 +156,14 @@ def _require_shared(params) -> None:
     be silently averaged by ``encode``, so refuse it instead."""
     if getattr(params, "has_per_joint", False):
         raise ValueError("specificity checks need a shared (scalar) lock, not a per-joint one")
+
+
+def _tradeoff(fixed: float, free: float) -> float:
+    """``free / fixed``; NaN (``null`` in JSON, ``-`` in the reports) when the
+    data does not constrain the parameter at all, so the ratio is undefined."""
+    if not math.isfinite(fixed) or fixed <= 0:
+        return math.nan
+    return free / fixed
 
 
 def _factor(name: str, delta_unit: float) -> float:
@@ -269,7 +279,7 @@ def identifiability(
         tolerance_free=tol_free,
         factor_fixed={k: _factor(k, t) for k, t in tol_fixed.items()},
         factor_free={k: _factor(k, t) for k, t in tol_free.items()},
-        tradeoff={k: tol_free[k] / tol_fixed[k] if tol_fixed[k] > 0 else math.inf for k in names},
+        tradeoff={k: _tradeoff(tol_fixed[k], tol_free[k]) for k in names},
         correlation=corr.tolist(),
         eigenvalues=w.tolist(),
         condition_number=cond,
@@ -321,6 +331,8 @@ def seed_restarts(
 
 
 def _spread(param_dicts: Sequence[dict]) -> dict[str, float]:
+    if not param_dicts:
+        return {}
     out = {}
     for name in DIMS:
         v = np.array([d[name] for d in param_dicts], dtype=np.float64)
@@ -390,6 +402,31 @@ def interpolate(a, b, episodes: Sequence[Episode], simulate: SimulateFn, n: int 
 # --------------------------------------------------------------------------
 
 
+def _resolve_splits(
+    datasets: Mapping[str, Sequence[Episode]],
+    given: Mapping[str, tuple[Sequence[int], Sequence[int]]],
+    n_train: int,
+    n_eval: int,
+    seed: int,
+    log,
+) -> dict[str, tuple[list[Episode], list[Episode]]]:
+    """The lock's own split where one is given (and still matches the
+    dataset), the calibrator's seeded split otherwise."""
+    out = {}
+    for d, eps in datasets.items():
+        by_index = {ep.index: ep for ep in eps}
+        if d in given:
+            train_i, eval_i = (list(given[d][0]), list(given[d][1]))
+            missing = sorted((set(train_i) | set(eval_i)) - set(by_index))
+            if train_i and eval_i and not missing:
+                out[d] = ([by_index[i] for i in sorted(train_i)], [by_index[i] for i in sorted(eval_i)])
+                continue
+            log(f"{d}: lock split does not match the dataset (missing episodes {missing}); "
+                f"splitting with seed {seed}")
+        out[d] = split_episodes(eps, n_train, n_eval, seed=seed)
+    return out
+
+
 def study(
     datasets: Mapping[str, Sequence[Episode]],
     locks: Mapping[str, tuple[str, Any]],
@@ -402,14 +439,19 @@ def study(
     max_evaluations: int = 150,
     delta_deg: float = 0.1,
     truth: Mapping[str, Any] | None = None,
+    splits: Mapping[str, tuple[Sequence[int], Sequence[int]]] | None = None,
     log=lambda msg: None,
 ) -> dict:
     """Run every check for a set of arms and their locks.
 
     ``datasets`` maps a dataset id to its episodes; ``locks`` maps a lock
-    name to ``(dataset id it was fitted on, params)``. Each dataset is
-    split exactly like ``antares calibrate`` splits it, so the cross matrix
-    scores held-out episodes. For every dataset that has both its own lock
+    name to ``(dataset id it was fitted on, params)``. ``splits`` maps a
+    dataset id to the ``(train, eval)`` episode indices its own lock was
+    fitted with (a saved lock records them), so the cross matrix scores
+    episodes the lock really never saw; a dataset without one is split
+    like ``antares calibrate`` would with ``split_seed``, which only
+    matches a lock fitted with the same seed and counts. Every lock must
+    be a shared (scalar) one. For every dataset that has both its own lock
     and a foreign one, the study also runs: identifiability and the latency
     profile at its own lock (train split), seed restarts, a same-arm
     control fitted on different training episodes, a swap test that pins
@@ -417,16 +459,25 @@ def study(
     foreign one. ``truth`` (synthetic arms) maps dataset ids to the
     parameters that generated them.
     """
-    from antares.calibrate import SimParams, score
+    from antares.calibrate import SimParams
 
-    splits = {d: split_episodes(eps, n_train, n_eval, seed=split_seed) for d, eps in datasets.items()}
+    for name, (_, p) in locks.items():
+        try:
+            _require_shared(p)
+        except ValueError as e:
+            raise ValueError(f"lock {name}: {e}") from e
     lock_datasets = {name: ds for name, (ds, _) in locks.items()}
     lock_params = {name: p for name, (_, p) in locks.items()}
+
+    splits = _resolve_splits(datasets, splits or {}, n_train, n_eval, split_seed, log)
+    for d, (_, eval_) in splits.items():
+        if not eval_:
+            raise ValueError(f"{d}: no held-out episodes to score (n_train={n_train}, n_eval={n_eval})")
 
     cols = list(locks) + ["default"]
     col_params = [lock_params[c] for c in locks] + [SimParams()]
     log("cross matrix")
-    scores = [[float(score(p, splits[d][1], simulate).overall_deg) for p in col_params] for d in datasets]
+    scores = [[_safe_score(p, splits[d][1], simulate)[1] for p in col_params] for d in datasets]
     matrix = {"rows": list(datasets), "cols": cols, "scores": scores}
     summary = summarize_cross(matrix, lock_datasets)
 
@@ -441,7 +492,8 @@ def study(
         out: dict[str, Any] = {"own_lock": row["own_lock"], "other_lock": row["best_other_lock"]}
 
         log(f"{d}: identifiability")
-        out["identifiability"] = identifiability(own, train, simulate, delta_deg=delta_deg).to_dict()
+        rep = identifiability(own, train, simulate, delta_deg=delta_deg)
+        out["identifiability"] = rep.to_dict()
         out["latency_profile"] = latency_profile(own, train, simulate)
 
         log(f"{d}: seed restarts {list(restart_seeds)}")
@@ -451,7 +503,7 @@ def study(
             {
                 "seed": None,
                 "params": own.to_dict(),
-                "train_score": float(score(own, train, simulate).overall_deg),
+                "train_score": rep.rms_deg,  # the residual RMS *is* the train score
                 "eval_score": row["own_score"],
             },
         )
@@ -477,7 +529,7 @@ def study(
         out["path_to_other"] = interpolate(own, other, eval_, simulate)
         if truth and d in truth:
             out["truth"] = truth[d].to_dict()
-            out["truth_eval_score"] = float(score(truth[d], eval_, simulate).overall_deg)
+            out["truth_eval_score"] = _safe_score(truth[d], eval_, simulate)[1]
         per_dataset[d] = out
 
     return {
@@ -490,6 +542,9 @@ def study(
             "delta_deg": delta_deg,
         },
         "locks": {n: {"dataset": ds, "params": p.to_dict()} for n, (ds, p) in locks.items()},
+        "splits": {
+            d: {"train": [ep.index for ep in tr], "eval": [ep.index for ep in ev]} for d, (tr, ev) in splits.items()
+        },
         "matrix": matrix,
         "specificity": summary,
         "datasets": per_dataset,
