@@ -6,8 +6,8 @@ Heavy modules (``antares.sim``, ``antares.gap``, ``antares.calibrate``,
 so the app imports quickly and tests can stub them through ``sys.modules``.
 
 The pure helpers (``replay_episode``, ``run_calibration``, ``run_drift``,
-``run_dr``, ``cross_matrix``, lock / drift-scan / DR-range file I/O) are
-shared with the CLI.
+``run_dr``, ``run_check``, ``cross_matrix``, lock / drift-scan / DR-range
+file I/O) are shared with the CLI.
 """
 
 from __future__ import annotations
@@ -73,15 +73,22 @@ _DATASETS_LOCK = threading.Lock()
 
 
 def get_dataset(repo_id: str) -> Dataset:
-    """Return a cached Dataset, loading it (slow first time) if needed."""
+    """Return a cached Dataset, loading it (slow first time) if needed.
+
+    ``repo_id`` is a Hub dataset id, or the path of a LeRobot dataset
+    directory on disk (a fresh local recording), which is read in place.
+    """
     with _DATASETS_LOCK:
         ds = _DATASETS.get(repo_id)
         if ds is not None:
             return ds
-    from antares.data import load_dataset
+    from antares.data import load_dataset, read_local
 
     try:
-        ds = load_dataset(repo_id)
+        if os.path.isdir(repo_id):
+            ds = read_local(repo_id, repo_id=repo_id)
+        else:
+            ds = load_dataset(repo_id)
     except Exception as e:  # noqa: BLE001 - surface loader errors to the client
         raise HTTPException(status_code=502, detail=f"could not load {repo_id}: {e}")
     with _DATASETS_LOCK:
@@ -753,6 +760,47 @@ def cross_matrix(
 
 
 # --------------------------------------------------------------------------
+# Drift check (pre-deploy gate)
+# --------------------------------------------------------------------------
+
+
+def run_check(
+    ds: Dataset,
+    lock: str | dict,
+    *,
+    threshold_deg: float | None = None,
+    ratio: float = 1.5,
+    last: int | None = None,
+    min_episodes: int = 5,
+):
+    """Score ``lock`` (a name in LOCK_DIR, or a lock dict) on ``ds`` with the
+    shared Arm and return an :class:`antares.check.CheckResult`."""
+    from antares.check import check
+
+    lock_d = lock if isinstance(lock, dict) else load_lock_dict(lock)
+    arm = get_arm()
+
+    def simulate(params, ep):
+        arm.apply(params)
+        return np.asarray(arm.real_q(ep)), np.asarray(arm.replay(ep))
+
+    try:
+        with _ARM_LOCK:
+            return check(
+                ds.episodes,
+                lock_d,
+                threshold_deg=threshold_deg,
+                ratio=ratio,
+                min_episodes=min_episodes,
+                last=last,
+                simulate=simulate,
+                dataset=ds.repo_id,
+            )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# --------------------------------------------------------------------------
 # App
 # --------------------------------------------------------------------------
 
@@ -1027,6 +1075,31 @@ def cross(
     if not ds_ids:
         raise HTTPException(status_code=400, detail="datasets is required")
     return cross_matrix(ds_ids, _csv(locks), n_train=n_train, n_eval=n_eval, seed=seed)
+
+
+class CheckRequest(BaseModel):
+    dataset: str
+    lock: str
+    threshold_deg: float | None = Field(None, ge=0)
+    ratio: float = Field(1.5, gt=0)
+    last: int | None = Field(None, ge=1)
+    min_episodes: int = Field(5, ge=1)
+
+
+@app.post("/api/check")
+def check_drift(req: CheckRequest) -> dict:
+    """Has the robot drifted from its lock? Always 200; read ``verdict``."""
+    _lock_path(req.lock)  # validate the name before loading a dataset
+    ds = get_dataset(req.dataset)
+    result = run_check(
+        ds,
+        req.lock,
+        threshold_deg=req.threshold_deg,
+        ratio=req.ratio,
+        last=req.last,
+        min_episodes=req.min_episodes,
+    )
+    return result.to_dict()
 
 
 # Built frontend, mounted after the API routes so `antares serve` alone demos.

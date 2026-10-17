@@ -881,3 +881,99 @@ def test_generic_job_routes_alias_calibrate(client, fakes):
     assert st == client.get(f"/api/calibrate/{job_id}").json()
     assert client.post(f"/api/jobs/{job_id}/cancel").json()["cancelled"] is True
     assert client.get("/api/jobs/nope").status_code == 404
+
+
+def test_check_passes_on_matching_robot(client, fakes):
+    write_lock(fakes, "unit-a", kp=50.0)  # FakeResult: eval_score 1.2, per joint 1.0
+    r = client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a"})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["passed"] is True and out["verdict"] == "ok"
+    assert out["lock"] == "unit-a" and out["dataset"] == FAKE_DS
+    assert out["reference"] == pytest.approx(1.2)
+    assert out["limit"] == pytest.approx(1.8)
+    assert out["score"] < out["limit"]
+    assert out["n_episodes"] == 6 and out["episodes"] == [0, 1, 2, 3, 4, 5]
+    assert set(out["per_joint"]) == set(JOINTS)
+    pj = out["per_joint"]["elbow_flex"]
+    assert set(pj) == {"score", "reference", "limit", "passed"}
+    assert pj["reference"] == 1.0 and pj["limit"] == pytest.approx(1.5) and pj["passed"] is True
+    assert out["worst_joint"] in JOINTS and out["worst_joint"] != "gripper"
+    assert out["ratio"] == 1.5 and out["threshold_deg"] is None
+    json.dumps(out)
+
+
+def test_check_detects_drift_and_threshold_overrides(client, fakes):
+    write_lock(fakes, "unit-a", kp=50.0)
+    # FAKE_DS2 is recorded 2 units off the command: a different (drifted) arm
+    r = client.post("/api/check", json={"dataset": FAKE_DS2, "lock": "unit-a"})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["passed"] is False and out["verdict"] == "drifted"
+    assert out["score"] > out["limit"]
+    assert all(not j["passed"] for j in out["per_joint"].values())
+    loose = client.post("/api/check", json={"dataset": FAKE_DS2, "lock": "unit-a",
+                                            "threshold_deg": 10.0}).json()
+    assert loose["passed"] is True and loose["limit"] == 10.0
+    tight = client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a", "ratio": 0.1}).json()
+    assert tight["passed"] is False and tight["limit"] == pytest.approx(0.12)
+
+
+def test_check_last_and_insufficient_data(client, fakes):
+    write_lock(fakes, "unit-a", kp=50.0)
+    out = client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a", "last": 2}).json()
+    assert out["verdict"] == "insufficient_data" and out["passed"] is False
+    assert out["score"] is None and out["per_joint"] == {}
+    assert out["n_episodes"] == 2 and out["episodes"] == [4, 5]
+    out = client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a",
+                                          "last": 2, "min_episodes": 2}).json()
+    assert out["verdict"] == "ok" and out["episodes"] == [4, 5]
+
+
+def test_check_rejects_bad_input(client, fakes):
+    write_lock(fakes, "unit-a", kp=50.0)
+    assert client.post("/api/check", json={"dataset": FAKE_DS, "lock": "ghost"}).status_code == 404
+    assert client.post("/api/check", json={"dataset": FAKE_DS, "lock": "../x"}).status_code == 400
+    assert client.post("/api/check", json={"dataset": "nope/none", "lock": "unit-a"}).status_code == 502
+    assert client.post("/api/check", json={"dataset": FAKE_DS}).status_code == 422
+    assert client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a", "ratio": 0}).status_code == 422
+    assert client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a", "last": 0}).status_code == 422
+    assert client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a",
+                                           "threshold_deg": -1}).status_code == 422
+
+
+def test_check_holds_arm_lock(client, fakes):
+    write_lock(fakes, "unit-a", kp=50.0)
+    arm = server._arm
+    orig = arm.replay
+
+    def replay(ep):
+        assert server._ARM_LOCK.locked()
+        return orig(ep)
+
+    arm.replay = replay
+    assert client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a"}).status_code == 200
+
+
+def test_get_dataset_reads_local_directory(fakes, tmp_path):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    root = tmp_path / "recording"
+    names = [f"{j}.pos" for j in JOINTS]
+    (root / "meta").mkdir(parents=True)
+    (root / "meta" / "info.json").write_text(json.dumps({
+        "robot_type": "so101_follower", "fps": 30,
+        "features": {"action": {"names": names}, "observation.state": {"names": names}},
+    }))
+    (root / "data" / "chunk-000").mkdir(parents=True)
+    pq.write_table(pa.table({
+        "episode_index": [0, 0, 1, 1], "frame_index": [0, 1, 0, 1],
+        "observation.state": [[0.0] * 6] * 4, "action": [[1.0] * 6] * 4,
+    }), root / "data" / "chunk-000" / "file-000.parquet")
+
+    ds = server.get_dataset(str(root))
+    assert ds.repo_id == str(root)
+    assert ds.joint_names == JOINTS and len(ds.episodes) == 2
+    assert server.get_dataset(str(root)) is ds  # cached
+    assert server.dataset_summary(str(root))["loaded"] is True
