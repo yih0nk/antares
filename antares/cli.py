@@ -138,6 +138,68 @@ def cmd_cross(args: argparse.Namespace) -> int:
     return 0
 
 
+EXIT_PASS = 0
+EXIT_DRIFT = 1
+EXIT_USAGE = 2  # bad arguments, missing lock/dataset, or too few episodes
+
+
+def _fmt(v, nd: int = 3) -> str:
+    return "-" if v is None else f"{v:.{nd}f}"
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    import json
+    import os
+
+    from antares import server
+
+    lock: str | dict = args.lock
+    if os.path.isfile(args.lock):
+        with open(args.lock) as f:
+            lock = json.load(f)
+    try:
+        ds = server.get_dataset(args.dataset)
+        res = server.run_check(
+            ds,
+            lock,
+            threshold_deg=args.threshold,
+            ratio=args.ratio,
+            last=args.last,
+            min_episodes=args.min_episodes,
+        )
+    except Exception as e:  # noqa: BLE001 - HTTPException or loader error
+        detail = getattr(e, "detail", None) or f"{type(e).__name__}: {e}"
+        print(f"error: {detail}", file=sys.stderr)
+        return EXIT_USAGE
+
+    if args.json:
+        print(json.dumps(res.to_dict(), indent=2))
+    else:
+        print(f"{res.dataset} vs lock {res.lock}: {res.n_episodes} episodes, {res.n_frames} frames")
+        if res.per_joint:
+            rows = []
+            for j, jc in res.per_joint.items():
+                scored = j in res.scored_joints
+                status = ("PASS" if jc.passed else "FAIL") if jc.limit is not None else "n/a"
+                if not scored:
+                    status += " (not scored)"
+                if j == res.worst_joint:
+                    status += "  <- worst"
+                rows.append([j, _fmt(jc.score), _fmt(jc.reference), _fmt(jc.limit), status])
+            rows.append(
+                ["overall", _fmt(res.score), _fmt(res.reference), _fmt(res.limit),
+                 "PASS" if res.passed else "FAIL"]
+            )
+            print(_table(["joint", "rmse (deg)", "reference", "limit", "status"], rows))
+        print(res.summary())
+
+    if res.verdict == "ok":
+        return EXIT_PASS
+    if res.verdict == "drifted":
+        return EXIT_DRIFT
+    return EXIT_USAGE
+
+
 def cmd_locks(args: argparse.Namespace) -> int:
     from antares import server
 
@@ -209,6 +271,28 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--n-eval", type=int, default=10)
     p.add_argument("--seed", type=int, default=0)
     p.set_defaults(func=cmd_cross)
+
+    p = sub.add_parser(
+        "check",
+        help="pre-deploy gate: has this robot drifted from its lock?",
+        description=(
+            "Replay fresh episodes through a lock's calibrated sim and fail if the "
+            "tracking error exceeds max(--threshold, --ratio * the lock's held-out score). "
+            "Exit 0 on pass, 1 on drift, 2 on usage errors or too few episodes."
+        ),
+    )
+    p.add_argument("dataset", help="Hub dataset id or a LeRobot dataset directory on disk")
+    p.add_argument("--lock", required=True, help="lock name in the lock dir, or a .lock.json path")
+    p.add_argument("--threshold", type=float, default=None, metavar="DEG",
+                   help="absolute error allowed in degrees (default: none)")
+    p.add_argument("--ratio", type=float, default=1.5,
+                   help="allowed multiple of the lock's held-out score (default 1.5)")
+    p.add_argument("--last", type=int, default=None, metavar="N",
+                   help="only check the newest N episodes (default: all)")
+    p.add_argument("--min-episodes", type=int, default=5,
+                   help="fewer episodes than this is insufficient data, exit 2 (default 5)")
+    p.add_argument("--json", action="store_true", help="print the CheckResult as JSON")
+    p.set_defaults(func=cmd_check)
 
     p = sub.add_parser("locks", help="list saved locks")
     p.set_defaults(func=cmd_locks)
