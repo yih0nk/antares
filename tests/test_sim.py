@@ -1,3 +1,4 @@
+import json
 import time
 
 import mujoco
@@ -63,6 +64,61 @@ def test_simparams_dict_roundtrip():
 def test_simparams_negative_latency_rejected():
     with pytest.raises(ValueError):
         SimParams(latency_frames=-1)
+    with pytest.raises(ValueError):
+        SimParams(latency_frames=(0, 0, -1, 0, 0, 0))
+
+
+def test_simparams_forcerange_default_matches_mjcf(arm):
+    p = SimParams()
+    assert p.forcerange == pytest.approx(arm.model.actuator_forcerange[0, 1])
+    # old locks have no forcerange key: the MJCF value fills in
+    assert SimParams.from_dict({"kp": 100.0}).forcerange == 2.94
+    assert "forcerange" in p.to_dict()
+
+
+def test_simparams_per_joint_round_trip():
+    p = SimParams(
+        kp=(100.0, 200.0, 300.0, 400.0, 500.0, 600.0),
+        latency_frames=[0, 1, 2, 3, 4, 5],
+        forcerange=np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+    )
+    assert p.kp == (100.0, 200.0, 300.0, 400.0, 500.0, 600.0)
+    assert p.latency_frames == (0, 1, 2, 3, 4, 5)
+    assert all(isinstance(v, int) for v in p.latency_frames)
+    assert p.forcerange == (1.0, 2.0, 3.0, 4.0, 5.0, 6.0)
+    assert p.kv == SimParams().kv  # untouched fields stay scalar
+    assert p.is_per_joint("kp") and not p.is_per_joint("kv") and p.has_per_joint
+    assert not SimParams().has_per_joint
+
+    d = p.to_dict()
+    assert d["kp"] == [100.0, 200.0, 300.0, 400.0, 500.0, 600.0]  # lists, JSON-friendly
+    assert d["latency_frames"] == [0, 1, 2, 3, 4, 5]
+    assert isinstance(d["kv"], float)
+    assert SimParams.from_dict(json.loads(json.dumps(d))) == p
+    # a 6-list of latencies rounds like the scalar form does
+    q = SimParams.from_dict({"latency_frames": [0.4, 1.6, 2, 3, 4, 5]})
+    assert q.latency_frames == (0, 2, 2, 3, 4, 5)
+
+
+def test_simparams_per_joint_wrong_length_rejected():
+    with pytest.raises(ValueError):
+        SimParams(kp=(1.0, 2.0))
+    with pytest.raises(ValueError):
+        SimParams.from_dict({"damping": [0.1] * 7})
+
+
+def test_simparams_per_joint_and_broadcast():
+    p = SimParams(kp=50.0, latency_frames=2)
+    np.testing.assert_array_equal(p.per_joint("kp"), np.full(6, 50.0))
+    lat = p.per_joint("latency_frames")
+    assert lat.dtype.kind == "i" and lat.tolist() == [2] * 6
+    b = p.broadcast()
+    assert b.has_per_joint and all(b.is_per_joint(n) for n in SimParams.field_names())
+    assert b.kp == (50.0,) * 6 and b.latency_frames == (2,) * 6
+    assert b != p  # distinct forms...
+    for name in SimParams.field_names():
+        np.testing.assert_array_equal(b.per_joint(name), p.per_joint(name))  # ...same values
+    assert b.broadcast() == b
 
 
 # -- UnitMap -----------------------------------------------------------------
@@ -225,6 +281,82 @@ def test_apply_changes_model_arrays(arm):
     arm.apply(SimParams())
     np.testing.assert_allclose(m.actuator_gainprm[:, 0], 998.22)
     np.testing.assert_allclose(m.dof_damping, 0.6)
+
+
+def test_apply_broadcasts_per_joint(arm):
+    kp = (100.0, 200.0, 300.0, 400.0, 500.0, 600.0)
+    fr = (1.0, 2.0, 3.0, 4.0, 5.0, 6.0)
+    p = SimParams(kp=kp, kv=1.5, damping=(0.1, 0.2, 0.3, 0.4, 0.5, 0.6), forcerange=fr)
+    arm.apply(p)
+    m = arm.model
+    np.testing.assert_allclose(m.actuator_gainprm[:, 0], kp)
+    np.testing.assert_allclose(m.actuator_biasprm[:, 1], -np.asarray(kp))
+    np.testing.assert_allclose(m.actuator_biasprm[:, 2], -1.5)
+    np.testing.assert_allclose(m.dof_damping, [0.1, 0.2, 0.3, 0.4, 0.5, 0.6])
+    np.testing.assert_allclose(m.actuator_forcerange[:, 0], -np.asarray(fr))
+    np.testing.assert_allclose(m.actuator_forcerange[:, 1], fr)
+    assert arm.params == p
+    arm.apply(SimParams())
+    np.testing.assert_allclose(m.actuator_forcerange[:, 1], 2.94)
+    np.testing.assert_allclose(m.actuator_gainprm[:, 0], 998.22)
+
+
+def test_broadcast_params_replay_identically(arm):
+    rng = np.random.default_rng(3)
+    n = 90
+    state = np.cumsum(rng.normal(0, 0.5, size=(n, 6)), axis=0)
+    state[:, 5] = np.abs(state[:, 5])
+    ep = make_episode(state, state + 2.0)
+    p = SimParams(kp=300.0, kv=1.5, damping=0.2, armature=0.01, frictionloss=0.01, latency_frames=2)
+    arm.apply(p)
+    scalar = arm.replay(ep)
+    arm.apply(p.broadcast())
+    per_joint = arm.replay(ep)
+    arm.apply(SimParams())
+    np.testing.assert_array_equal(scalar, per_joint)
+
+
+def test_per_joint_latency_delays_only_that_joint(arm):
+    n, t_step = 60, 10
+    start = np.array([0.0, -50.0, 40.0, 20.0, 0.0, 5.0])
+    target = start.copy()
+    target[0] = 40.0  # step on shoulder_pan
+    target[4] = 30.0  # and on wrist_roll
+    action = np.tile(start, (n, 1))
+    action[t_step:] = target
+    ep = make_episode(np.tile(start, (n, 1)), action)
+
+    arm.apply(SimParams(latency_frames=0))
+    s0 = arm.replay(ep)
+    arm.apply(SimParams(latency_frames=(5, 0, 0, 0, 0, 0)))
+    s_pan = arm.replay(ep)
+    arm.apply(SimParams())
+
+    q_start = arm.unit_map.to_rad(start)
+    q_tgt = arm.unit_map.to_rad(target)
+    half = (q_start + q_tgt) / 2
+
+    def crossing(s, j):
+        return int(np.argmax(s[:, j] > half[j]))
+
+    assert crossing(s_pan, 0) >= crossing(s0, 0) + 4  # pan is delayed...
+    assert crossing(s_pan, 4) == crossing(s0, 4)  # ...wrist_roll is not
+    assert abs(s_pan[t_step + 4, 0] - q_start[0]) < 1e-3
+    assert abs(s_pan[t_step + 4, 4] - q_start[4]) > 1e-2
+
+
+def test_per_joint_forcerange_limits_that_joint(arm):
+    start = np.array([0.0, -50.0, 40.0, 20.0, 0.0, 5.0])
+    target = np.array([40.0, -20.0, 60.0, 0.0, 30.0, 40.0])
+    ep = constant_episode(start, target, 15)
+    tgt = arm.unit_map.to_rad(target)
+    arm.apply(SimParams())
+    full = np.abs(arm.replay(ep)[5] - tgt)
+    arm.apply(SimParams(forcerange=(0.05, 2.94, 2.94, 2.94, 2.94, 2.94)))
+    weak_pan = np.abs(arm.replay(ep)[5] - tgt)
+    arm.apply(SimParams())
+    assert weak_pan[0] > 2 * full[0]  # a starved shoulder_pan lags far behind
+    assert weak_pan[4] < 2 * full[4] + 1e-3  # wrist_roll is barely affected
 
 
 def test_softer_gain_tracks_worse(arm):

@@ -79,7 +79,9 @@ def fake_simulate(params: SimParams, ep: Episode) -> tuple[np.ndarray, np.ndarra
 
 
 def test_space_matches_simparams_fields():
-    assert set(DIMS) == set(SimParams().to_dict())
+    # the shared space fits every original scalar; forcerange keeps its MJCF
+    # value there and is only searched per joint
+    assert set(DIMS) == set(SimParams().to_dict()) - {"forcerange"}
     assert all(scale in ("log", "linear", "int") for _, _, scale in SPACE.values())
 
 

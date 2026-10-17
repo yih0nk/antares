@@ -13,7 +13,8 @@ at the dataset's frame rate.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, fields, replace
+from collections.abc import Sequence
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,7 @@ JOINTS = (
     "wrist_roll",
     "gripper",
 )
+N_JOINTS = len(JOINTS)
 GRIPPER_INDEX = JOINTS.index("gripper")
 
 MODEL_PATH: Path = Path(__file__).resolve().parent / "assets" / "so101" / "so101.xml"
@@ -38,40 +40,103 @@ MODEL_PATH: Path = Path(__file__).resolve().parent / "assets" / "so101" / "so101
 # effective timestep stays close to this.
 BASE_TIMESTEP = 0.005
 
+#: A parameter is either one value shared by all joints or one value per joint.
+Scalar = float | int
+PerJoint = tuple[float, ...] | tuple[int, ...]
+ParamValue = Scalar | PerJoint
+
+#: Fields that are integers (dataset frames) rather than physical quantities.
+INT_FIELDS = frozenset({"latency_frames"})
+
+
+def _coerce(name: str, value: Any) -> ParamValue:
+    """Normalize a field value to ``float``/``int`` or a 6-tuple of them."""
+    as_int = name in INT_FIELDS
+    if isinstance(value, (list, tuple, np.ndarray)) and np.ndim(value) > 0:
+        arr = np.asarray(value, dtype=np.float64).reshape(-1)
+        if arr.shape[0] != N_JOINTS:
+            raise ValueError(f"{name}: per-joint value needs {N_JOINTS} entries, got {arr.shape[0]}")
+        if as_int:
+            return tuple(int(round(float(v))) for v in arr)
+        return tuple(float(v) for v in arr)
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{name}: expected a number, got bool")
+    return int(round(float(value))) if as_int else float(value)
+
 
 @dataclass(frozen=True)
 class SimParams:
-    """Calibratable simulator parameters. Defaults are the MJCF values."""
+    """Calibratable simulator parameters. Defaults are the MJCF values.
 
-    kp: float = 998.22
-    kv: float = 2.731
-    damping: float = 0.6
-    armature: float = 0.028
-    frictionloss: float = 0.052
-    latency_frames: int = 0  # command delay in dataset frames (>= 0)
+    Every field is either a scalar shared by all six joints or a tuple of six
+    per-joint values (one per entry of :data:`JOINTS`). Scalars are how the
+    original locks were written and stay the default; :meth:`per_joint`
+    broadcasts either form to a ``(6,)`` array when writing into the model.
+    """
+
+    kp: ParamValue = 998.22
+    kv: ParamValue = 2.731
+    damping: ParamValue = 0.6
+    armature: ParamValue = 0.028
+    frictionloss: ParamValue = 0.052
+    latency_frames: ParamValue = 0  # command delay in dataset frames (>= 0)
+    forcerange: ParamValue = 2.94  # actuator force limit, symmetric (N*m)
 
     def __post_init__(self) -> None:
-        if self.latency_frames < 0:
+        for f in fields(self):
+            object.__setattr__(self, f.name, _coerce(f.name, getattr(self, f.name)))
+        if np.any(self.per_joint("latency_frames") < 0):
             raise ValueError("latency_frames must be >= 0")
-        object.__setattr__(self, "latency_frames", int(self.latency_frames))
 
     @classmethod
     def default(cls) -> SimParams:
         return cls()
 
+    @classmethod
+    def field_names(cls) -> tuple[str, ...]:
+        return tuple(f.name for f in fields(cls))
+
+    # -- shape helpers ------------------------------------------------------
+
+    def is_per_joint(self, name: str) -> bool:
+        return isinstance(getattr(self, name), tuple)
+
+    @property
+    def has_per_joint(self) -> bool:
+        """True if any field carries per-joint values."""
+        return any(self.is_per_joint(n) for n in self.field_names())
+
+    def per_joint(self, name: str) -> np.ndarray:
+        """Value of ``name`` broadcast to a ``(6,)`` array (int for frame counts)."""
+        v = getattr(self, name)
+        dtype = np.int64 if name in INT_FIELDS else np.float64
+        if isinstance(v, tuple):
+            return np.asarray(v, dtype=dtype)
+        return np.full(N_JOINTS, v, dtype=dtype)
+
+    def broadcast(self) -> SimParams:
+        """Copy with every field in per-joint (6-tuple) form; replays identically."""
+        return SimParams(**{n: tuple(self.per_joint(n).tolist()) for n in self.field_names()})
+
+    # -- serialization ------------------------------------------------------
+
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        """Scalars stay scalars; per-joint values become 6-element lists."""
+        out: dict[str, Any] = {}
+        for n in self.field_names():
+            v = getattr(self, n)
+            out[n] = list(v) if isinstance(v, tuple) else v
+        return out
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> SimParams:
-        """Build from a dict; unknown keys are ignored, missing keys default."""
-        known = {f.name for f in fields(cls)}
-        kwargs: dict[str, Any] = {}
-        for k, v in d.items():
-            if k not in known:
-                continue
-            kwargs[k] = int(round(float(v))) if k == "latency_frames" else float(v)
-        return cls(**kwargs)
+        """Build from a dict; unknown keys are ignored, missing keys default.
+
+        Scalars (possibly as strings) and 6-element sequences are accepted for
+        every field, so old locks (all scalars, no ``forcerange``) still load.
+        """
+        known = set(cls.field_names())
+        return cls(**{k: v for k, v in d.items() if k in known})
 
     def replace(self, **changes: Any) -> SimParams:
         return replace(self, **changes)
@@ -189,14 +254,22 @@ class Arm:
     # -- parameters ---------------------------------------------------------
 
     def apply(self, params: SimParams) -> None:
-        """Write ``params`` into the compiled model in place (cheap, idempotent)."""
+        """Write ``params`` into the compiled model in place (cheap, idempotent).
+
+        Scalar fields are broadcast to all six joints; per-joint tuples are
+        written joint by joint (actuator ``i`` drives joint ``i``).
+        """
         m = self.model
-        m.actuator_gainprm[:, 0] = params.kp
-        m.actuator_biasprm[:, 1] = -params.kp
-        m.actuator_biasprm[:, 2] = -params.kv
-        m.dof_damping[:] = params.damping
-        m.dof_armature[:] = params.armature
-        m.dof_frictionloss[:] = params.frictionloss
+        kp = params.per_joint("kp")
+        fr = params.per_joint("forcerange")
+        m.actuator_gainprm[:, 0] = kp
+        m.actuator_biasprm[:, 1] = -kp
+        m.actuator_biasprm[:, 2] = -params.per_joint("kv")
+        m.actuator_forcerange[:, 0] = -fr
+        m.actuator_forcerange[:, 1] = fr
+        m.dof_damping[:] = params.per_joint("damping")
+        m.dof_armature[:] = params.per_joint("armature")
+        m.dof_frictionloss[:] = params.per_joint("frictionloss")
         self.params = params
 
     # -- kinematics ---------------------------------------------------------
@@ -241,7 +314,8 @@ class Arm:
 
         Frame 0 is the real initial state (the sim starts there, at rest).
         For each later frame the command from ``latency_frames`` frames ago
-        is applied and the physics is advanced one dataset frame.
+        is applied (per joint, when latency is per joint) and the physics is
+        advanced one dataset frame.
         """
         fps = float(fps if fps is not None else episode.fps)
         if fps <= 0:
@@ -256,10 +330,11 @@ class Arm:
         n_sub = max(1, int(round(frame_dt / self._base_timestep)))
 
         ctrl = np.clip(self.unit_map.to_rad(episode.action), self._ctrl_lo, self._ctrl_hi)
-        # Command index per frame with latency; frames before the first
-        # command arrives hold the first command.
-        src = np.maximum(np.arange(T) - self.params.latency_frames, 0)
-        ctrl = np.ascontiguousarray(ctrl[src])
+        # Command index per frame and joint with latency; frames before the
+        # first command arrives hold the first command.
+        lat = self.params.per_joint("latency_frames")
+        src = np.maximum(np.arange(T)[:, None] - lat[None, :], 0)
+        ctrl = np.ascontiguousarray(np.take_along_axis(ctrl, src, axis=0))
 
         sim_q = np.empty((T, nq), dtype=np.float64)
         q0 = self.unit_map.to_rad(episode.state[0])
