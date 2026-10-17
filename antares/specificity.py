@@ -29,7 +29,7 @@ from typing import Any
 
 import numpy as np
 
-from antares.calibrate import DIMS, SPACE, SimulateFn, _safe_score, decode, encode
+from antares.calibrate import DIMS, SPACE, SimulateFn, _safe_score, calibrate, decode, encode
 from antares.data import Episode
 
 # --------------------------------------------------------------------------
@@ -275,6 +275,43 @@ def latency_profile(
     return {int(f): _safe_score(params.replace(latency_frames=int(f)), episodes, simulate)[1] for f in frames}
 
 
+def pinned_refit(
+    train: Sequence[Episode],
+    eval: Sequence[Episode],
+    fixed: Mapping[str, float],
+    simulate: SimulateFn,
+    max_evaluations: int = 150,
+    seed: int = 0,
+    start=None,
+) -> dict:
+    """Calibrate with some parameters pinned to given values.
+
+    The usual use is a swap test: pin arm A's fit to arm B's ``kp``/``kv``
+    and let the rest re-fit. If the pinned fit tracks A about as well as
+    A's own lock, the data does not distinguish the two arms' values of the
+    pinned parameters. The pinned dimensions stay in the CMA-ES search but
+    have no effect on the objective.
+    """
+    from antares.calibrate import SimParams
+
+    unknown = set(fixed) - set(DIMS)
+    if unknown:
+        raise ValueError(f"unknown parameters {sorted(unknown)}")
+    pins = {k: (int(round(v)) if SPACE[k][2] == "int" else float(v)) for k, v in fixed.items()}
+
+    def pinned(params, ep):
+        return simulate(params.replace(**pins), ep)
+
+    start = (start or SimParams()).replace(**pins)
+    res = calibrate(train, eval, simulate=pinned, start=start, max_evaluations=max_evaluations, seed=seed)
+    return {
+        "fixed": dict(pins),
+        "params": res.params.replace(**pins).to_dict(),
+        "train_score": float(res.train_score),
+        "eval_score": float(res.eval_score),
+    }
+
+
 def interpolate(a, b, episodes: Sequence[Episode], simulate: SimulateFn, n: int = 11) -> list[tuple[float, float]]:
     """Overall error along the straight line from lock ``a`` to lock ``b``.
 
@@ -294,6 +331,7 @@ __all__ = [
     "CONTINUOUS",
     "interpolate",
     "latency_profile",
+    "pinned_refit",
     "Identifiability",
     "identifiability",
     "jacobian",

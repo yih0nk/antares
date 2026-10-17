@@ -168,7 +168,7 @@ def test_residuals_raise_on_divergence():
 # direct checks, on a toy first-order servo
 # --------------------------------------------------------------------------
 
-from antares.specificity import interpolate, latency_profile  # noqa: E402
+from antares.specificity import interpolate, latency_profile, pinned_refit  # noqa: E402
 
 
 def toy_response(p, action, fps):
@@ -215,3 +215,14 @@ def test_interpolate_endpoints_and_ridge():
     assert [t for t, _ in path] == [0.0, 0.25, 0.5, 0.75, 1.0]
     assert path[0][1] == pytest.approx(0.0, abs=1e-9)
     assert path[-1][1] > path[0][1]
+
+
+def test_pinned_refit_compensates_along_a_tradeoff():
+    """Only kv/kp matters in the toy, so pinning kp lets kv absorb it."""
+    eps = toy_episodes(TRUE)
+    out = pinned_refit(eps[:3], eps[3:], {"kp": 1600.0}, toy_simulate, max_evaluations=300)
+    assert out["params"]["kp"] == 1600.0
+    assert out["fixed"] == {"kp": 1600.0}
+    assert out["eval_score"] < 0.5  # the default start is several degrees off
+    with pytest.raises(ValueError):
+        pinned_refit(eps[:3], eps[3:], {"stiffness": 1.0}, toy_simulate)
