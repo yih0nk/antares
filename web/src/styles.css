@@ -7,6 +7,10 @@
   --real: #e8eaf0;
   --sim: #5b8cff;
   --accent: #7c5cff;
+  /* where the sim disagrees with the arm */
+  --warm: #ff8a5b;
+  --contact: #ff8a5b;
+  --anomaly: #e2b35a;
 }
 
 * {
@@ -29,7 +33,7 @@ body {
 .shell {
   display: grid;
   grid-template-columns: 1fr 320px;
-  grid-template-rows: 56px 1fr 140px;
+  grid-template-rows: 56px 1fr 190px;
   grid-template-areas:
     "top top"
     "viewer panel"
@@ -111,6 +115,29 @@ body {
 
 .swatch.sim {
   background: var(--sim);
+}
+
+.swatch.warm {
+  background: var(--warm);
+}
+
+.swatch.contact {
+  background: var(--contact);
+  opacity: 0.6;
+}
+
+.swatch.anomaly {
+  background: var(--anomaly);
+  opacity: 0.6;
+}
+
+.swatch.grasp {
+  background: var(--real);
+  opacity: 0.18;
+}
+
+.legend .warm {
+  color: var(--warm);
 }
 
 .dot {
@@ -288,6 +315,37 @@ body {
 .trace-head {
   stroke: var(--accent);
   stroke-width: 1;
+}
+
+.residual {
+  width: 100%;
+  height: 36px;
+  flex: none;
+  cursor: ew-resize;
+  touch-action: none;
+  border-top: 1px solid var(--border);
+}
+
+.res-area {
+  fill: var(--sim);
+  opacity: 0.45;
+}
+
+.res-grasp {
+  fill: var(--real);
+  opacity: 0.08;
+}
+
+.res-event {
+  opacity: 0.28;
+}
+
+.res-event.contact {
+  fill: var(--contact);
+}
+
+.res-event.anomaly {
+  fill: var(--anomaly);
 }
 
 .muted {
@@ -479,7 +537,7 @@ body {
 @media (max-width: 800px) {
   .shell {
     grid-template-columns: 1fr;
-    grid-template-rows: 56px 50vh 160px auto;
+    grid-template-rows: 56px 50vh 210px auto;
     grid-template-areas: "top" "viewer" "timeline" "panel";
     height: auto;
     min-height: 100%;

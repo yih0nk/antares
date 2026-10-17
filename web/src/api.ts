@@ -89,6 +89,35 @@ export type CalibrationResult = {
   elapsed_s: number;
 };
 
+export type ResidualEvent = {
+  start: number; // half-open [start, end) frame range
+  end: number;
+  joints: string[];
+  peak_z: number;
+  peak_deg: number;
+  kind: "contact" | "anomaly";
+};
+
+// GET /api/residual: real - sim per frame for one episode, with the events
+// where the sim disagrees with the arm and the gripper's grasp windows.
+export type Residual = {
+  dataset: string;
+  episode: number;
+  fps: number;
+  lock: string | null;
+  joints: string[];
+  scored_joints: string[];
+  z_threshold: number;
+  warmup_frames: number;
+  residual: number[][]; // (T, 6) deg
+  z: number[][]; // (T, 6)
+  events: ResidualEvent[];
+  gripper_cmd: number[];
+  grasps: number[];
+  releases: number[];
+  grasp_windows: number[][]; // [[start, end], ...]
+};
+
 export type JobEvent =
   | ProgressEvent
   | { type: "done"; lock: { name: string; params: Params }; result: CalibrationResult }
@@ -137,6 +166,10 @@ export const api = {
     }).then((r) => json<{ job_id: string }>(r)),
   cancel: (jobId: string) => fetch(`/api/calibrate/${jobId}/cancel`, { method: "POST" }).then((r) => json(r)),
   events: (jobId: string) => new EventSource(`/api/calibrate/${jobId}/events`),
+  residual: (dataset: string, episode: number, lock: string | null) =>
+    fetch(`/api/residual?${q(lock ? { dataset, episode, lock } : { dataset, episode })}`).then((r) =>
+      json<Residual>(r),
+    ),
 };
 
 // antares.lock.slug(dataset) plus a timestamp, so a run from the UI never

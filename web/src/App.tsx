@@ -14,9 +14,10 @@ import {
   type ParamValue,
   type ProgressEvent,
   type Replay,
+  type Residual,
 } from "./api";
 import { Arm, ghostMaterial, realMaterial, type Playhead } from "./Arm";
-import { JointTrace, Sparkline } from "./Charts";
+import { JointTrace, ResidualStrip, Sparkline } from "./Charts";
 
 // Layout: 3D viewer (real arm + ghost sim arm) on the left, gap panel on
 // the right, episode timeline along the bottom. The ghost is the simulator
@@ -118,6 +119,7 @@ export default function App() {
   const [frame, setFrame] = useState(0);
   const [joint, setJoint] = useState("shoulder_pan");
   const [calib, setCalib] = useState<Calibration | null>(null);
+  const [residual, setResidual] = useState<Residual | null>(null);
 
   const playhead = useMemo<Playhead>(() => ({ frame: 0 }), []);
 
@@ -212,6 +214,22 @@ export default function App() {
       live = false;
     };
   }, [dataset, episode, ghost, baseline]);
+
+  // ---- residual (real - sim) for the ghost's parameters ---------------------
+  // The strip follows whatever lock the ghost is showing; the live fit has no
+  // saved baseline to z-score against, so it keeps the last strip.
+  useEffect(() => {
+    if (!dataset || episode == null || ghost === LIVE) return;
+    let live = true;
+    setResidual(null);
+    api.residual(dataset, episode, ghost === DEFAULT ? null : ghost).then(
+      (r) => live && setResidual(r),
+      () => {}, // the strip is a bonus; replay errors are already reported
+    );
+    return () => {
+      live = false;
+    };
+  }, [dataset, episode, ghost]);
 
   // ---- live ghost while calibrating: replay the best params so far ----------
   // One request in flight at a time; when it lands, the newest best (if it
@@ -337,6 +355,14 @@ export default function App() {
   // The trace arrays only change with the replay or the joint, not per frame.
   const traceReal = useMemo(() => baseline?.real_q.map((r) => r[jIndex]) ?? [], [baseline, jIndex]);
   const traceSim = useMemo(() => (replay ?? baseline)?.sim_q.map((r) => r[jIndex]) ?? [], [replay, baseline, jIndex]);
+  // Summed |residual| over the scored joints (the gripper is not simulated).
+  const residualSum = useMemo(() => {
+    if (!residual) return [];
+    const cols = residual.scored_joints.map((j) => residual.joints.indexOf(j)).filter((i) => i >= 0);
+    return residual.residual.map((row) => cols.reduce((s, i) => s + Math.abs(row[i]), 0));
+  }, [residual]);
+  const hotSpans = useMemo(() => residual?.events.map((e) => [e.start, e.end]) ?? null, [residual]);
+  const inEvent = residual?.events.find((e) => frame >= e.start && frame < e.end);
 
   const ghostLabel =
     ghost === DEFAULT ? "default sim" : ghost === LIVE ? "best fit so far" : `lock ${ghost}`;
@@ -387,7 +413,14 @@ export default function App() {
               {/* MuJoCo is z-up; three.js is y-up. */}
               <group rotation={[-Math.PI / 2, 0, 0]}>
                 <Arm geometry={geometry} poses={baseline?.real_poses ?? null} clip={clip} playhead={playhead} material={realMaterial} />
-                <Arm geometry={geometry} poses={replay?.sim_poses ?? null} clip={clip} playhead={playhead} material={ghostMaterial} />
+                <Arm
+                  geometry={geometry}
+                  poses={replay?.sim_poses ?? null}
+                  clip={clip}
+                  playhead={playhead}
+                  material={ghostMaterial}
+                  hotSpans={hotSpans}
+                />
               </group>
             </Suspense>
           )}
@@ -403,6 +436,12 @@ export default function App() {
             <i className="swatch sim" /> sim ghost, {ghostLabel}
             {replayBusy && <span className="dot" />}
           </span>
+          {inEvent && (
+            <span className="warm">
+              <i className="swatch warm" /> sim disagrees here: {inEvent.kind} on {inEvent.joints.join(", ")} (peak{" "}
+              {inEvent.peak_deg.toFixed(1)}°)
+            </span>
+          )}
         </div>
 
         {(dsState === "loading" || (!baseline && !error)) && (
@@ -590,6 +629,10 @@ export default function App() {
           <span className="muted small trace-label">
             {joint}: <i className="swatch real" /> real <i className="swatch sim" /> sim
           </span>
+          <span className="muted small trace-label">
+            |real − sim| <i className="swatch contact" /> contact <i className="swatch anomaly" /> anomaly{" "}
+            <i className="swatch grasp" /> gripper closed
+          </span>
           <div className="speeds">
             {SPEEDS.map((s) => (
               <button key={s} className={s === speed ? "on" : ""} onClick={() => setSpeed(s)}>
@@ -599,7 +642,17 @@ export default function App() {
           </div>
         </div>
         {baseline && (
-          <JointTrace real={traceReal} sim={traceSim} frame={frame} onSeek={seek} />
+          <>
+            <JointTrace real={traceReal} sim={traceSim} frame={frame} onSeek={seek} />
+            <ResidualStrip
+              sum={residualSum}
+              events={residual?.events ?? []}
+              grasps={residual?.grasp_windows ?? []}
+              frames={frames}
+              frame={frame}
+              onSeek={seek}
+            />
+          </>
         )}
       </footer>
     </div>

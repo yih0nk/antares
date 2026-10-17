@@ -62,6 +62,70 @@ export function JointTrace({ real, sim, frame, onSeek }: TraceProps) {
   );
 }
 
+type ResidualProps = {
+  // Summed |real - sim| over the scored joints, one value per frame.
+  sum: number[];
+  // Half-open [start, end) frame spans.
+  events: { start: number; end: number; kind: "contact" | "anomaly"; joints: string[]; peak_deg: number }[];
+  grasps: number[][];
+  frames: number;
+  frame: number;
+  onSeek?: (frame: number) => void;
+};
+
+const RH = 40;
+
+// Where the sim disagrees with the arm: the residual as an area, detected
+// events shaded by kind, grasp windows as faint bands. Shares the trace's x
+// axis so the two strips line up.
+export function ResidualStrip({ sum, events, grasps, frames, frame, onSeek }: ResidualProps) {
+  const n = Math.max(frames, sum.length);
+  const x = (f: number) => (f / Math.max(1, n - 1)) * W;
+  const area = useMemo(() => {
+    if (!sum.length) return "";
+    const hi = Math.max(1e-6, ...sum);
+    const lastX = ((sum.length - 1) / Math.max(1, n - 1)) * W;
+    return `${path(sum, n, 0, hi * 1.05, W, RH)}L${lastX.toFixed(2)},${RH}L0,${RH}Z`;
+  }, [sum, n]);
+
+  const seek = (e: React.PointerEvent<SVGSVGElement>) => {
+    if (!onSeek || (e.type === "pointermove" && e.buttons !== 1)) return;
+    const r = e.currentTarget.getBoundingClientRect();
+    const t = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+    onSeek(t * (n - 1));
+  };
+
+  return (
+    <svg
+      className="residual"
+      viewBox={`0 0 ${W} ${RH}`}
+      preserveAspectRatio="none"
+      onPointerDown={seek}
+      onPointerMove={seek}
+    >
+      {grasps.map(([s, e], i) => (
+        <rect key={`g${i}`} x={x(s)} width={Math.max(1, x(e) - x(s))} y={0} height={RH} className="res-grasp" />
+      ))}
+      {events.map((ev, i) => (
+        <rect
+          key={`e${i}`}
+          x={x(ev.start)}
+          width={Math.max(1, x(ev.end) - x(ev.start))}
+          y={0}
+          height={RH}
+          className={`res-event ${ev.kind}`}
+        >
+          <title>
+            {ev.kind}: {ev.joints.join(", ")} · peak {ev.peak_deg.toFixed(1)}°
+          </title>
+        </rect>
+      ))}
+      <path d={area} className="res-area" />
+      <line x1={x(frame)} x2={x(frame)} y1={0} y2={RH} className="trace-head" vectorEffect="non-scaling-stroke" />
+    </svg>
+  );
+}
+
 type SparkProps = { values: number[]; total: number; baseline?: number | null };
 
 // Best-so-far error over evaluations, on a fixed x range so the line grows.
