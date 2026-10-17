@@ -195,6 +195,143 @@ def score_episodes(params, episodes) -> Any:
 
 
 # --------------------------------------------------------------------------
+# Residual / contact events
+# --------------------------------------------------------------------------
+
+# Frames at the start of a replay that the detector ignores: the sim starts
+# at rest at the real pose and needs a few frames to catch up with the
+# command stream.
+WARMUP_FRAMES = 6
+
+_BASELINES: dict[tuple[str, str], Any] = {}
+_BASELINES_LOCK = threading.Lock()
+
+
+def baseline_episodes(ds: Dataset, lock: dict | None) -> list[Episode]:
+    """Held-out episodes for the residual baseline: the lock's eval split,
+    else the default eval split, else (tiny datasets) every episode."""
+    from antares.calibrate import split_episodes
+
+    wanted: list[int] = []
+    if lock is not None:
+        wanted = [int(i) for i in (lock.get("result") or {}).get("eval_episodes", [])]
+    by_index = {ep.index: ep for ep in ds.episodes}
+    eps = [by_index[i] for i in wanted if i in by_index]
+    if not eps:
+        _, eps = split_episodes(ds.episodes, 20, 10, seed=0)
+    return eps or list(ds.episodes)
+
+
+def get_baseline(ds: Dataset, lock_name: str | None):
+    """Cached ``(ResidualBaseline, GripperThresholds, params)`` for a dataset + lock."""
+    from antares.events import gripper_thresholds, residual_baseline
+
+    key = (ds.repo_id, lock_name or "")
+    with _BASELINES_LOCK:
+        hit = _BASELINES.get(key)
+    if hit is not None:
+        return hit
+    lock = load_lock_dict(lock_name) if lock_name else None
+    params = params_from_dict(lock["params"]) if lock else default_params()
+    g = ds.joint_names.index("gripper") if "gripper" in ds.joint_names else -1
+    thr = gripper_thresholds(np.concatenate([ep.action[:, g] for ep in ds.episodes]))
+    eps = baseline_episodes(ds, lock)
+    arm = get_arm()
+    with _ARM_LOCK:
+        arm.apply(params)
+        bl = residual_baseline(eps, arm, thr)
+    out = (bl, thr, params)
+    with _BASELINES_LOCK:
+        _BASELINES.setdefault(key, out)
+        return _BASELINES[key]
+
+
+def _episode_residual(ds: Dataset, ep: Episode, lock_name: str | None, z: float, min_frames: int):
+    from antares.events import detect_events, residuals, validate_episode
+
+    bl, thr, params = get_baseline(ds, lock_name)
+    arm = get_arm()
+    with _ARM_LOCK:
+        arm.apply(params)
+        real_q = np.asarray(arm.real_q(ep))
+        sim_q = np.asarray(arm.replay(ep))
+    res = residuals(real_q, sim_q)
+    events = detect_events(res, bl, z=z, min_frames=min_frames, warmup=WARMUP_FRAMES)
+    g = ds.joint_names.index("gripper")
+    cmd = ep.action[:, g]
+    val = validate_episode(res, events, cmd, thr, episode=ep.index)
+    return bl, thr, params, res, events, cmd, val
+
+
+def residual_episode(
+    ds: Dataset, episode: int, lock_name: str | None = None, z: float = 4.0, min_frames: int = 5
+) -> dict:
+    """Residual, robust z, detected events and the gripper proxy label for one episode."""
+    from antares.events import SCORED_JOINTS, gripper_transitions
+    from antares.sim import JOINTS
+
+    ep = find_episode(ds, episode)
+    bl, thr, params, res, events, cmd, val = _episode_residual(ds, ep, lock_name, z, min_frames)
+    grasps, releases = gripper_transitions(cmd, thr)
+    return {
+        "dataset": ds.repo_id,
+        "episode": ep.index,
+        "fps": ep.fps,
+        "lock": lock_name,
+        "params": params.to_dict(),
+        "joints": list(JOINTS),
+        "scored_joints": list(SCORED_JOINTS),
+        "z_threshold": float(z),
+        "min_frames": int(min_frames),
+        "warmup_frames": WARMUP_FRAMES,
+        "residual": _rounded(res),
+        "z": _rounded(bl.z(res)),
+        "events": [ev.to_dict() for ev in events],
+        "gripper_cmd": _rounded(cmd),
+        "gripper_thresholds": thr.to_dict(),
+        "grasps": [int(i) for i in grasps],
+        "releases": [int(i) for i in releases],
+        "grasp_windows": [[int(s), int(e)] for s, e in val.grasp_windows],
+        "baseline": bl.to_dict(),
+        "validation": val.to_dict(),
+    }
+
+
+def events_summary(ds: Dataset, lock_name: str | None = None, z: float = 4.0, min_frames: int = 5) -> dict:
+    """Detect events in every episode and score them against the gripper proxy label."""
+    from antares.events import summarize_validation
+
+    bl, thr, params = get_baseline(ds, lock_name)
+    held = set(bl.episodes)
+    rows, vals = [], []
+    for ep in ds.episodes:
+        _, _, _, _, events, _, val = _episode_residual(ds, ep, lock_name, z, min_frames)
+        vals.append(val)
+        rows.append(
+            {
+                "episode": ep.index,
+                "held_out": ep.index in held,
+                "n_frames": len(ep),
+                "events": [ev.to_dict() for ev in events],
+                **{k: v for k, v in val.to_dict().items() if k not in ("episode", "n_frames", "grasp_windows")},
+            }
+        )
+    return {
+        "dataset": ds.repo_id,
+        "lock": lock_name,
+        "params": params.to_dict(),
+        "z_threshold": float(z),
+        "min_frames": int(min_frames),
+        "warmup_frames": WARMUP_FRAMES,
+        "gripper_thresholds": thr.to_dict(),
+        "baseline": bl.to_dict(),
+        "episodes": rows,
+        "summary": summarize_validation(vals),
+        "summary_held_out": summarize_validation([v for v in vals if v.episode in held]),
+    }
+
+
+# --------------------------------------------------------------------------
 # Locks (JSON files in LOCK_DIR, one per name)
 # --------------------------------------------------------------------------
 
@@ -500,6 +637,29 @@ def replay(
     out = replay_episode(ds, episode, params)
     out["lock"] = lock if (lock and not baseline) else None
     return out
+
+
+@app.get("/api/residual")
+def residual(
+    dataset: str = Query(...),
+    episode: int = Query(...),
+    lock: str | None = None,
+    z: float = Query(4.0, gt=0),
+    min_frames: int = Query(5, ge=1),
+) -> dict:
+    ds = get_dataset(dataset)
+    return residual_episode(ds, episode, lock or None, z=z, min_frames=min_frames)
+
+
+@app.get("/api/events")
+def events(
+    dataset: str = Query(...),
+    lock: str | None = None,
+    z: float = Query(4.0, gt=0),
+    min_frames: int = Query(5, ge=1),
+) -> dict:
+    ds = get_dataset(dataset)
+    return events_summary(ds, lock or None, z=z, min_frames=min_frames)
 
 
 class CalibrateRequest(BaseModel):

@@ -31,8 +31,9 @@ from typing import Any
 
 import numpy as np
 
-from antares.sim import GRIPPER_INDEX, JOINTS
+from antares.sim import JOINTS
 
+GRIPPER_INDEX = JOINTS.index("gripper")
 SCORED_JOINTS: tuple[str, ...] = tuple(j for j in JOINTS if j != "gripper")
 
 # Frames around a gripper transition that count as "the grasp".

@@ -239,6 +239,7 @@ def fakes(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_DATASETS", {FAKE_DS: make_dataset(FAKE_DS),
                                               FAKE_DS2: make_dataset(FAKE_DS2, offset=-2.0)})
     monkeypatch.setattr(server, "_JOBS", {})
+    monkeypatch.setattr(server, "_BASELINES", {})
 
     def no_network(repo_id, cache_dir=None):
         raise RuntimeError("network disabled in tests")
@@ -586,3 +587,116 @@ def test_arm_lock_serialises_sim_access(client, fakes):
     for t in ths:
         t.join()
     assert len(seen) == 4
+
+
+# --------------------------------------------------------------------------
+# residual / contact events
+# --------------------------------------------------------------------------
+
+PICK_DS = "fake/so101_pick"
+
+
+def make_pick_dataset(repo_id: str = PICK_DS, n_episodes: int = 4, T: int = 300) -> Dataset:
+    """Pick-and-place-like episodes: the gripper opens at 100, closes at 150
+    (the grasp) and opens again at 220; the real arm deviates from the
+    commanded motion for 30 frames around the grasp."""
+    rng = np.random.default_rng(7)
+    eps = []
+    for i in range(n_episodes):
+        action = np.zeros((T, 6))
+        action[:, :5] = np.cumsum(rng.normal(0, 0.2, size=(T, 5)), axis=0)
+        g = np.full(T, 1.5)
+        g[100:150] = 22.0
+        g[220:240] = 22.0
+        action[:, 5] = g
+        state = action + rng.normal(0, 0.3, size=(T, 6))
+        state[145:175, 2] += 6.0  # elbow held back while grasping
+        eps.append(Episode(index=i, fps=30.0, joint_names=JOINTS, state=state, action=action))
+    return Dataset(repo_id=repo_id, robot_type="so101_follower", fps=30.0, joint_names=JOINTS, episodes=tuple(eps))
+
+
+@pytest.fixture
+def pick(fakes):
+    server._DATASETS[PICK_DS] = make_pick_dataset()
+    return fakes
+
+
+def test_residual_endpoint_shape_and_events(client, pick):
+    r = client.get("/api/residual", params={"dataset": PICK_DS, "episode": 1})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    T = 300
+    assert out["dataset"] == PICK_DS and out["episode"] == 1 and out["fps"] == 30.0
+    assert out["lock"] is None and out["params"] == FakeParams().to_dict()
+    assert out["joints"] == list(JOINTS) and out["scored_joints"] == list(JOINTS[:5])
+    assert np.asarray(out["residual"]).shape == (T, 6)
+    assert np.asarray(out["z"]).shape == (T, 6)
+    assert np.asarray(out["gripper_cmd"]).shape == (T,)
+    assert out["grasps"] == [150, 240] and out["releases"] == [100, 220]
+    assert out["grasp_windows"] == [[135, 166], [225, 256]]
+    thr = out["gripper_thresholds"]
+    assert 1.5 < thr["closed_below"] < thr["open_above"] < 22.0
+    # residual is real - sim in degrees: the planted elbow bump shows up
+    res = np.asarray(out["residual"])
+    assert res[160, 2] > 4.0
+    # the baseline came from the fallback (all episodes), on free-motion frames
+    bl = out["baseline"]
+    assert bl["joints"] == list(JOINTS) and bl["n_episodes"] == 4 and bl["free_frames_only"]
+    assert sorted(bl["episodes"]) == [0, 1, 2, 3]
+    assert len(bl["scale_deg"]) == 6 and all(s > 0 for s in bl["scale_deg"])
+    # exactly one event, on the elbow, around the grasp
+    evs = out["events"]
+    assert len(evs) == 1, evs
+    ev = evs[0]
+    assert ev["joints"] == ["elbow_flex"] and ev["kind"] == "contact"
+    assert 140 <= ev["start"] <= 146 and 174 <= ev["end"] <= 180
+    assert ev["peak_z"] > 4.0 and ev["peak_deg"] > 4.0
+    v = out["validation"]
+    assert v["n_grasps"] == 2 and v["n_grasps_hit"] == 1
+    assert v["n_events"] == 1 and v["n_events_in_grasp"] == 1 and v["n_events_far"] == 0
+    assert v["energy_in_grasp"] > 0.5 * v["energy_total"]
+    assert out["z_threshold"] == 4.0 and out["min_frames"] == 5 and out["warmup_frames"] == server.WARMUP_FRAMES
+
+
+def test_residual_endpoint_params_and_errors(client, pick):
+    assert client.get("/api/residual", params={"dataset": PICK_DS, "episode": 99}).status_code == 404
+    assert client.get("/api/residual", params={"dataset": PICK_DS, "episode": 0, "lock": "ghost"}).status_code == 404
+    assert client.get("/api/residual", params={"dataset": PICK_DS, "episode": 0, "z": 0}).status_code == 422
+    assert client.get("/api/residual", params={"dataset": PICK_DS, "episode": 0, "min_frames": 0}).status_code == 422
+    # a huge threshold finds nothing
+    out = client.get("/api/residual", params={"dataset": PICK_DS, "episode": 0, "z": 1000}).json()
+    assert out["events"] == [] and out["z_threshold"] == 1000.0
+
+
+def test_residual_with_lock_uses_lock_params_and_eval_split(client, pick):
+    write_lock(pick, "unit-a", kp=50.0, dataset=PICK_DS)
+    path = pick / "locks" / f"unit-a{LOCK_SUFFIX}"
+    d = json.loads(path.read_text())
+    d["result"]["eval_episodes"] = [2, 3]
+    path.write_text(json.dumps(d))
+    out = client.get("/api/residual", params={"dataset": PICK_DS, "episode": 0, "lock": "unit-a"}).json()
+    assert out["lock"] == "unit-a" and out["params"]["kp"] == 50.0
+    assert sorted(out["baseline"]["episodes"]) == [2, 3]
+    # the baseline is cached per (dataset, lock)
+    assert set(server._BASELINES) == {(PICK_DS, "unit-a")}
+    client.get("/api/residual", params={"dataset": PICK_DS, "episode": 1, "lock": "unit-a"})
+    assert len(server._BASELINES) == 1
+    client.get("/api/residual", params={"dataset": PICK_DS, "episode": 1})
+    assert set(server._BASELINES) == {(PICK_DS, "unit-a"), (PICK_DS, "")}
+
+
+def test_events_summary_endpoint(client, pick):
+    r = client.get("/api/events", params={"dataset": PICK_DS})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["dataset"] == PICK_DS and out["lock"] is None
+    assert len(out["episodes"]) == 4
+    row = out["episodes"][0]
+    assert row["episode"] == 0 and row["n_frames"] == 300 and row["held_out"] is True
+    assert row["n_grasps"] == 2 and len(row["events"]) == 1
+    s = out["summary"]
+    assert s["n_episodes"] == 4 and s["n_grasps"] == 8 and s["n_grasps_hit"] == 4
+    assert s["n_events"] == 4 and s["precision"] == 1.0 and s["recall"] == 0.5 and s["far_fraction"] == 0.0
+    assert s["energy_in_grasp_fraction"] > s["chance"] and s["lift"] > 1.0
+    assert out["summary_held_out"]["n_episodes"] == 4
+    assert client.get("/api/events", params={"dataset": PICK_DS, "lock": "ghost"}).status_code == 404
