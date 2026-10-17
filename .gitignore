@@ -16,3 +16,6 @@ data/
 web/node_modules/
 web/dist/
 *.tsbuildinfo
+
+# harness worktrees for parallel agents
+.claude/worktrees/
