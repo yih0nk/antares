@@ -14,6 +14,9 @@ export type Playhead = { frame: number };
 type Props = {
   geometry: Geometry;
   poses: number[][][] | null;
+  // Identifies the episode; new poses for the same clip ease in (the snap),
+  // a different clip just appears.
+  clip: string;
   playhead: Playhead;
   material: THREE.Material;
   snapSeconds?: number;
@@ -24,7 +27,7 @@ const toQuat = (q: number[]) => new THREE.Quaternion(q[1], q[2], q[3], q[0]);
 
 const easeOut = (t: number) => 1 - Math.pow(1 - t, 3);
 
-export function Arm({ geometry, poses, playhead, material, snapSeconds = 0.6 }: Props) {
+export function Arm({ geometry, poses, clip, playhead, material, snapSeconds = 0.6 }: Props) {
   const files = useMemo(() => [...new Set(geometry.geoms.map((g) => g.mesh))], [geometry]);
   const loaded = useLoader(STLLoader, files.map(api.meshUrl));
   const meshes = useMemo(() => new Map(files.map((f, i) => [f, loaded[i]])), [files, loaded]);
@@ -33,14 +36,18 @@ export function Arm({ geometry, poses, playhead, material, snapSeconds = 0.6 }: 
   const prev = useRef<number[][][] | null>(null);
   const shown = useRef<number[][][] | null>(null);
   const tween = useRef({ start: 0, active: false });
+  const shownClip = useRef<string | null>(null);
 
   useEffect(() => {
     if (!poses) return;
-    // Snap from whatever was on screen; the very first trajectory just appears.
+    // Snap from whatever was on screen, but only within the same episode; a
+    // new episode (or the very first trajectory) just appears.
+    const sameClip = shownClip.current === clip;
+    shownClip.current = clip;
     prev.current = shown.current;
     shown.current = poses;
-    tween.current = { start: performance.now(), active: prev.current !== null };
-  }, [poses]);
+    tween.current = { start: performance.now(), active: sameClip && prev.current !== null };
+  }, [poses, clip]);
 
   const tmp = useMemo(
     () => ({ p0: new THREE.Vector3(), p1: new THREE.Vector3(), q0: new THREE.Quaternion(), q1: new THREE.Quaternion() }),
