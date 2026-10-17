@@ -80,6 +80,9 @@ def test_check_info_size_rules():
     big = check_info("a/b", info(), data_bytes=fleet.MAX_DATA_BYTES + 1)
     assert "MB" in big.reason and not big.accepted
     assert check_info("a/b", info(), data_bytes=None).accepted  # unknown size: decided later
+    many = check_info("a/b", info(), data_bytes=1, data_files=fleet.MAX_DATA_FILES + 1)
+    assert "parquet files" in many.reason and not many.accepted
+    assert check_info("a/b", info(), data_bytes=1, data_files=fleet.MAX_DATA_FILES).accepted
 
 
 def test_candidate_round_trip():
@@ -110,7 +113,7 @@ def fake_hub(infos: dict, sizes: dict | None = None):
         v = sizes.get(rid, 1_000_000)
         if isinstance(v, Exception):
             raise v
-        return v
+        return v if isinstance(v, tuple) else (v, 3)
 
     return search, get_info, get_size
 
@@ -125,20 +128,22 @@ def test_discover_filters_and_records_reasons():
         "alice/so101_again": info(),
         "frank/so101_f": info(),
     }
-    sizes = {"erin/huge": fleet.MAX_DATA_BYTES * 3}
+    sizes = {"erin/huge": fleet.MAX_DATA_BYTES * 3, "frank/so101_f": (5_000_000, 1801)}
     seen = []
     cands = discover(limit=10, pinned=(), search=fake_hub(infos, sizes)[0], fetch_info=fake_hub(infos, sizes)[1],
                      fetch_size=fake_hub(infos, sizes)[2], on_progress=seen.append)
     assert [c.repo_id for c in cands] == list(infos)
     assert seen == cands
     ok = [c.repo_id for c in fleet.accepted(cands)]
-    assert ok == ["alice/so101_a", "carol/so100_c", "frank/so101_f"]
+    assert ok == ["alice/so101_a", "carol/so100_c"]
     by = {c.repo_id: c for c in cands}
     assert "robot_type" in by["bob/koch_b"].reason
     assert "FileNotFoundError" in by["dave/nope"].reason
     assert "MB" in by["erin/huge"].reason
+    assert "1801 parquet files" in by["frank/so101_f"].reason
     assert "same owner as alice/so101_a" in by["alice/so101_again"].reason
     assert by["alice/so101_a"].downloads == 1000 and by["alice/so101_a"].data_bytes == 1_000_000
+    assert by["alice/so101_a"].data_files == 3
 
 
 def test_discover_stops_at_limit_and_max_inspect():
@@ -159,7 +164,7 @@ def test_discover_size_lookup_failure_is_a_rejection():
     def get_size(rid):
         if rid == "a/x":
             raise ConnectionError("boom")
-        return 10
+        return 10, 1
 
     cands = discover(limit=5, pinned=(), search=search, fetch_info=get_info, fetch_size=get_size)
     assert [c.accepted for c in cands] == [False, True]

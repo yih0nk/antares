@@ -54,6 +54,7 @@ PINNED: tuple[str, ...] = ("lerobot/svla_so101_pickplace", "lerobot/svla_so100_p
 MIN_EPISODES = 15
 ALLOWED_FPS: tuple[float, ...] = (30.0, 50.0)
 MAX_DATA_BYTES = 200 * 2**20  # tabular part only; videos are never downloaded
+MAX_DATA_FILES = 200  # v2 datasets store one parquet per episode; thousands of tiny downloads are too slow
 
 # ``so100``/``so101`` in any spelling, plus LeRobot's newer unified
 # ``so_follower`` name for the same arm.
@@ -84,6 +85,7 @@ class Candidate:
     n_episodes: int = 0
     n_frames: int = 0
     data_bytes: int = 0
+    data_files: int = 0
     downloads: int = 0
     codebase_version: str = ""
 
@@ -123,11 +125,13 @@ def check_info(
     info: dict[str, Any],
     data_bytes: int | None = None,
     downloads: int = 0,
+    data_files: int | None = None,
 ) -> Candidate:
     """Decide from ``meta/info.json`` whether a dataset can join the fleet.
 
-    ``data_bytes`` is the size of the ``data/**/*.parquet`` files when known;
-    ``None`` skips the size check (the caller may fill it in afterwards).
+    ``data_bytes``/``data_files`` are the total size and count of the
+    ``data/**/*.parquet`` files when known; ``None`` skips those checks (the
+    caller fills them in afterwards).
     """
     robot_type = str(info.get("robot_type") or "")
     fps = float(info.get("fps") or 0)
@@ -145,6 +149,7 @@ def check_info(
             n_episodes=n_episodes,
             n_frames=n_frames,
             data_bytes=int(data_bytes or 0),
+            data_files=int(data_files or 0),
             downloads=downloads,
             codebase_version=version,
         )
@@ -178,6 +183,8 @@ def check_info(
             return reject("no data/*.parquet files")
         if data_bytes > MAX_DATA_BYTES:
             return reject(f"tabular data {data_bytes / 2**20:.0f} MB > {MAX_DATA_BYTES // 2**20} MB")
+    if data_files is not None and data_files > MAX_DATA_FILES:
+        return reject(f"{data_files} parquet files > {MAX_DATA_FILES} (one file per episode; too slow to fetch)")
     return Candidate(
         repo_id=repo_id,
         accepted=True,
@@ -186,6 +193,7 @@ def check_info(
         n_episodes=n_episodes,
         n_frames=n_frames,
         data_bytes=int(data_bytes or 0),
+        data_files=int(data_files or 0),
         downloads=downloads,
         codebase_version=version,
     )
@@ -230,19 +238,20 @@ def fetch_info(repo_id: str) -> dict[str, Any]:
     return json.loads(Path(path).read_text())
 
 
-def fetch_data_bytes(repo_id: str, api: Any = None) -> int:
-    """Total size of ``data/**/*.parquet`` from the repo's file metadata."""
+def fetch_data_files(repo_id: str, api: Any = None) -> tuple[int, int]:
+    """``(total bytes, file count)`` of ``data/**/*.parquet`` from the repo's file metadata."""
     if api is None:
         from huggingface_hub import HfApi
 
         api = HfApi()
     info = api.dataset_info(repo_id, files_metadata=True)
-    total = 0
+    total, count = 0, 0
     for s in info.siblings or []:
         name = s.rfilename
         if name.startswith("data/") and name.endswith(".parquet"):
             total += int(s.size or 0)
-    return total
+            count += 1
+    return total, count
 
 
 # --------------------------------------------------------------------------
@@ -259,7 +268,7 @@ def discover(
     api: Any = None,
     search: Callable[..., list[tuple[str, int]]] | None = None,
     fetch_info: Callable[[str], dict[str, Any]] | None = None,
-    fetch_size: Callable[[str], int] | None = None,
+    fetch_size: Callable[[str], tuple[int, int]] | None = None,
     on_progress: Callable[[Candidate], None] | None = None,
 ) -> list[Candidate]:
     """Inspect Hub hits most-downloaded first until ``limit`` are accepted.
@@ -277,7 +286,7 @@ def discover(
         max_inspect = 5 * limit
     search = search or (lambda: hub_search(api))
     get_info = fetch_info or globals()["fetch_info"]
-    get_size = fetch_size or (lambda rid: fetch_data_bytes(rid, api))
+    get_size = fetch_size or (lambda rid: fetch_data_files(rid, api))
 
     hits = search()
     downloads_of = dict(hits)
@@ -302,11 +311,11 @@ def discover(
                 cand = check_info(repo_id, info, None, downloads)
                 if cand.accepted:
                     try:
-                        size = get_size(repo_id)
+                        size, n_files = get_size(repo_id)
                     except Exception as e:  # noqa: BLE001
                         cand = Candidate(repo_id, False, f"could not list files ({type(e).__name__})", downloads=downloads)
                     else:
-                        cand = check_info(repo_id, info, size, downloads)
+                        cand = check_info(repo_id, info, size, downloads, n_files)
         if cand.accepted:
             n_accepted += 1
             owners.setdefault(owner, repo_id)
@@ -892,6 +901,7 @@ __all__ = [
     "FLEET_REPORT_NAME",
     "JOINTS",
     "MAX_DATA_BYTES",
+    "MAX_DATA_FILES",
     "MIN_EPISODES",
     "PINNED",
     "Candidate",
@@ -900,7 +910,7 @@ __all__ = [
     "accepted",
     "check_info",
     "discover",
-    "fetch_data_bytes",
+    "fetch_data_files",
     "fetch_info",
     "hub_search",
     "load_with_retries",
