@@ -1,0 +1,134 @@
+name: "Antares robot check"
+description: >-
+  Fail the job when a robot has drifted from its calibrated sim: replays fresh
+  LeRobot episodes through the lock's simulator and compares the tracking
+  error with the score recorded at calibration time.
+author: antares
+
+branding:
+  icon: check-circle
+  color: orange
+
+inputs:
+  dataset:
+    description: >-
+      Hub dataset id (e.g. lerobot/svla_so101_pickplace) or the path of a
+      LeRobot dataset directory in the workspace with the fresh recordings.
+    required: true
+  lock:
+    description: >-
+      Lock name under the lock dir (locks/<name>.lock.json) or a path to a
+      .lock.json file.
+    required: true
+  threshold:
+    description: Absolute tracking error allowed, in degrees. Empty means none.
+    required: false
+    default: ""
+  ratio:
+    description: Allowed multiple of the lock's held-out score.
+    required: false
+    default: "1.5"
+  last:
+    description: Only check the newest N episodes. Empty means all.
+    required: false
+    default: ""
+  min-episodes:
+    description: Fewer episodes than this fails the job as insufficient data.
+    required: false
+    default: "5"
+  python-version:
+    description: Python version to set up.
+    required: false
+    default: "3.11"
+  package:
+    description: >-
+      What to pip install. Defaults to the action's own checkout; set it to a
+      PyPI spec or a git URL to pin a release.
+    required: false
+    default: ""
+
+outputs:
+  verdict:
+    description: ok, drifted or insufficient_data.
+    value: ${{ steps.check.outputs.verdict }}
+  score:
+    description: Overall tracking RMSE on the fresh episodes, in degrees.
+    value: ${{ steps.check.outputs.score }}
+  limit:
+    description: The limit the score was held to, in degrees.
+    value: ${{ steps.check.outputs.limit }}
+  report:
+    description: Path of the JSON CheckResult.
+    value: ${{ steps.check.outputs.report }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install antares
+      shell: bash
+      env:
+        PACKAGE: ${{ inputs.package }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        python -m pip install --quiet --upgrade pip
+        if [ -n "$PACKAGE" ]; then
+          python -m pip install --quiet "$PACKAGE"
+        else
+          python -m pip install --quiet "$ACTION_PATH"
+        fi
+
+    - name: Check the robot against its lock
+      id: check
+      shell: bash
+      env:
+        DATASET: ${{ inputs.dataset }}
+        LOCK: ${{ inputs.lock }}
+        THRESHOLD: ${{ inputs.threshold }}
+        RATIO: ${{ inputs.ratio }}
+        LAST: ${{ inputs.last }}
+        MIN_EPISODES: ${{ inputs.min-episodes }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -o pipefail
+        # A bare lock name resolves against locks/ in the workspace first,
+        # then against the locks shipped with the action.
+        if [ ! -f "$LOCK" ] && [ ! -f "locks/$LOCK.lock.json" ] && [ -f "$ACTION_PATH/locks/$LOCK.lock.json" ]; then
+          LOCK="$ACTION_PATH/locks/$LOCK.lock.json"
+        fi
+        args=("$DATASET" --lock "$LOCK" --ratio "$RATIO" --min-episodes "$MIN_EPISODES")
+        [ -n "$THRESHOLD" ] && args+=(--threshold "$THRESHOLD")
+        [ -n "$LAST" ] && args+=(--last "$LAST")
+
+        report="$RUNNER_TEMP/antares-check.json"
+        set +e
+        antares check "${args[@]}" --json > "$report"
+        code=$?
+        set -e
+        echo "report=$report" >> "$GITHUB_OUTPUT"
+
+        if [ -s "$report" ]; then
+          python - "$report" >> "$GITHUB_OUTPUT" <<'PY'
+        import json, sys
+        d = json.load(open(sys.argv[1]))
+        print("verdict=" + str(d.get("verdict")))
+        print("score=" + ("" if d.get("score") is None else f"{d['score']:.4f}"))
+        print("limit=" + ("" if d.get("limit") is None else f"{d['limit']:.4f}"))
+        PY
+          # Human-readable table in the job log and the step summary.
+          {
+            echo '```'
+            antares check "${args[@]}" || true
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+        fi
+
+        case "$code" in
+          0) echo "::notice::robot matches lock $LOCK" ;;
+          1) echo "::error::robot has drifted from lock $LOCK (see table above)" ;;
+          *) echo "::error::antares check could not run (exit $code): bad arguments, missing lock or too few episodes" ;;
+        esac
+        exit "$code"

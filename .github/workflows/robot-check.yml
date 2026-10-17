@@ -1,0 +1,54 @@
+# Example: gate deploys on a robot's drift.
+#
+# Runs the pre-deploy check against the public SO-101 demo dataset with the
+# lock committed under locks/, so it passes as-is. Point `dataset` at your
+# own Hub repo (or a directory of fresh recordings checked into the run) and
+# `lock` at your robot's lock to make it real.
+name: robot-check
+
+on:
+  workflow_dispatch:
+    inputs:
+      dataset:
+        description: Hub dataset id or local LeRobot directory
+        default: lerobot/svla_so101_pickplace
+      lock:
+        description: Lock name under locks/
+        default: svla_so101_pickplace
+      threshold:
+        description: Absolute error allowed (degrees), empty for none
+        default: ""
+      last:
+        description: Only check the newest N episodes, empty for all
+        default: ""
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Hugging Face datasets
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-${{ runner.os }}-${{ inputs.dataset || 'lerobot/svla_so101_pickplace' }}
+
+      - name: Antares robot check
+        id: robot
+        uses: ./
+        with:
+          dataset: ${{ inputs.dataset || 'lerobot/svla_so101_pickplace' }}
+          lock: ${{ inputs.lock || 'svla_so101_pickplace' }}
+          threshold: ${{ inputs.threshold }}
+          last: ${{ inputs.last }}
+
+      - name: Report
+        if: always()
+        run: |
+          echo "verdict=${{ steps.robot.outputs.verdict }} score=${{ steps.robot.outputs.score }} limit=${{ steps.robot.outputs.limit }}"
