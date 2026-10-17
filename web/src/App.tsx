@@ -5,6 +5,7 @@ import {
   api,
   lockNameFor,
   type CalibrationResult,
+  type Compensation,
   type CrossMatrix,
   type DatasetInfo,
   type EpisodeInfo,
@@ -17,7 +18,7 @@ import {
   type Replay,
   type Residual,
 } from "./api";
-import { Arm, ghostMaterial, realMaterial, type Playhead } from "./Arm";
+import { Arm, compMaterial, ghostMaterial, realMaterial, type Playhead } from "./Arm";
 import { CrossHeatmap, JointTrace, ResidualStrip, Sparkline } from "./Charts";
 
 // Layout: 3D viewer (real arm + ghost sim arm) on the left, gap panel on
@@ -134,6 +135,9 @@ export default function App() {
   const [cross, setCross] = useState<{ key: string; data: CrossMatrix } | null>(null);
   const [crossBusy, setCrossBusy] = useState(false);
   const [crossError, setCrossError] = useState<string | null>(null);
+  const [showComp, setShowComp] = useState(false);
+  const [comp, setComp] = useState<Compensation | null>(null);
+  const [compBusy, setCompBusy] = useState(false);
 
   const playhead = useMemo<Playhead>(() => ({ frame: 0 }), []);
 
@@ -244,6 +248,26 @@ export default function App() {
       live = false;
     };
   }, [dataset, episode, ghost]);
+
+  // ---- lag-compensated ghost (sim-validated only) ---------------------------
+  // ILC runs in the calibrated sim for the ghost's parameters; a few hundred
+  // ms per episode, so it is fetched only while the toggle is on.
+  useEffect(() => {
+    if (!showComp || !dataset || episode == null || ghost === LIVE) return;
+    let live = true;
+    setComp(null);
+    setCompBusy(true);
+    api
+      .compensate(dataset, episode, ghost === DEFAULT ? null : ghost)
+      .then(
+        (c) => live && setComp(c),
+        (e) => live && setError(`Lag compensation failed: ${e.message}`),
+      )
+      .finally(() => live && setCompBusy(false));
+    return () => {
+      live = false;
+    };
+  }, [showComp, dataset, episode, ghost]);
 
   // ---- live ghost while calibrating: replay the best params so far ----------
   // One request in flight at a time; when it lands, the newest best (if it
@@ -409,6 +433,7 @@ export default function App() {
   }, [residual]);
   const hotSpans = useMemo(() => residual?.events.map((e) => [e.start, e.end]) ?? null, [residual]);
   const inEvent = residual?.events.find((e) => frame >= e.start && frame < e.end);
+  const compPoses = showComp && ghost !== LIVE && comp ? comp.sim_comp_poses : null;
 
   const ghostLabel =
     ghost === DEFAULT ? "default sim" : ghost === LIVE ? "best fit so far" : `lock ${ghost}`;
@@ -467,6 +492,7 @@ export default function App() {
                   material={ghostMaterial}
                   hotSpans={hotSpans}
                 />
+                <Arm geometry={geometry} poses={compPoses} clip={clip} playhead={playhead} material={compMaterial} />
               </group>
             </Suspense>
           )}
@@ -482,6 +508,12 @@ export default function App() {
             <i className="swatch sim" /> sim ghost, {ghostLabel}
             {replayBusy && <span className="dot" />}
           </span>
+          {showComp && ghost !== LIVE && (
+            <span>
+              <i className="swatch comp" /> sim with lag-compensated commands (sim-validated only)
+              {compBusy && <span className="dot" />}
+            </span>
+          )}
           {inEvent && (
             <span className="warm">
               <i className="swatch warm" /> sim disagrees here: {inEvent.kind} on {inEvent.joints.join(", ")} (peak{" "}
@@ -640,6 +672,29 @@ export default function App() {
                   </div>
                 </div>
               )}
+            </div>
+          )}
+        </section>
+
+        <section>
+          <div className="label">Lag compensation</div>
+          <label className={`toggle ${running ? "locked" : ""}`} title="ILC in the calibrated sim: commands that make the model follow the real trajectory despite servo latency">
+            <input type="checkbox" checked={showComp} disabled={running} onChange={(e) => setShowComp(e.target.checked)} />
+            show lag-compensated commands
+          </label>
+          {showComp && (
+            <div className="rms">
+              {(["raw", "shift", "ilc"] as const).map((k) => (
+                <div key={k}>
+                  <span className="muted small">{k === "raw" ? "raw" : k === "shift" ? "shifted" : "ILC"}</span>
+                  <div className={`mono ${k === "ilc" && comp ? "good" : ""}`}>{compBusy ? "…" : deg(comp?.rms[k])}</div>
+                </div>
+              ))}
+              <div className="muted small rms-note">
+                RMS tracking error of the sim on the real trajectory: raw commands, commands shifted by the lock's latency,
+                and iterative learning control{comp && ` (${comp.ilc_iterations} iterations)`}. Sim-validated only: judged
+                in the calibrated MuJoCo model, no hardware driven.
+              </div>
             </div>
           )}
         </section>

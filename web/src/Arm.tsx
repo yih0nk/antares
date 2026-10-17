@@ -146,6 +146,18 @@ export const realMaterial = new THREE.MeshStandardMaterial({
   metalness: 0.1,
 });
 
+// The sim driven by lag-compensated commands: where the arm would go if it
+// were sent what the calibrated model says it needs.
+export const compMaterial = new THREE.MeshStandardMaterial({
+  color: "#3fd6b8",
+  emissive: "#1c8f78",
+  emissiveIntensity: 0.3,
+  roughness: 0.4,
+  transparent: true,
+  opacity: 0.3,
+  depthWrite: false,
+});
+
 export const ghostMaterial = new THREE.MeshStandardMaterial({
   color: "#5b8cff",
   emissive: "#2b4dbf",

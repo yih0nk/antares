@@ -11,6 +11,8 @@
   --warm: #ff8a5b;
   --contact: #ff8a5b;
   --anomaly: #e2b35a;
+  /* the sim driven by lag-compensated commands */
+  --comp: #3fd6b8;
 }
 
 * {
@@ -119,6 +121,10 @@ body {
 
 .swatch.warm {
   background: var(--warm);
+}
+
+.swatch.comp {
+  background: var(--comp);
 }
 
 .swatch.contact {
@@ -501,6 +507,20 @@ body {
 .result b {
   color: #9fd8a8;
   font-weight: 500;
+}
+
+.rms {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 8px;
+}
+
+.rms .good {
+  color: var(--comp);
+}
+
+.rms-note {
+  grid-column: 1 / -1;
 }
 
 .params {

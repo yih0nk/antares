@@ -123,6 +123,21 @@ export type Residual = {
   grasp_windows: number[][]; // [[start, end], ...]
 };
 
+// GET /api/compensate: commands that make the calibrated sim follow the real
+// trajectory, judged in the sim only (no hardware was driven).
+export type Compensation = {
+  dataset: string;
+  episode: number;
+  fps: number;
+  lock: string | null;
+  method: "shift" | "ilc";
+  validation: "sim-only";
+  note: string;
+  sim_comp_poses: number[][][]; // (T, nbody, 7)
+  rms: { raw: number; shift: number; ilc: number }; // deg, gripper excluded
+  ilc_iterations: number;
+};
+
 // GET /api/cross: every lock (plus the default sim) scored on every dataset's
 // held-out split, RMS degrees.
 export type CrossMatrix = {
@@ -189,6 +204,10 @@ export const api = {
   residual: (dataset: string, episode: number, lock: string | null) =>
     fetch(`/api/residual?${q(lock ? { dataset, episode, lock } : { dataset, episode })}`).then((r) =>
       json<Residual>(r),
+    ),
+  compensate: (dataset: string, episode: number, lock: string | null, method: "shift" | "ilc" = "ilc") =>
+    fetch(`/api/compensate?${q(lock ? { dataset, episode, lock, method } : { dataset, episode, method })}`).then(
+      (r) => json<Compensation>(r),
     ),
   cross: (datasets: string[], locks: string[], nTrain = 20, nEval = 10) =>
     fetch(
