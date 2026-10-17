@@ -695,3 +695,42 @@ def test_identify_prints_tolerances(monkeypatch, tmp_path, capsys):
     assert "kp" in out and "unbounded" in out  # kv etc. have no effect at all
     assert "latency (frames): 0:" in out
     assert json.loads(out_path.read_text())["identifiability"]["names"][0] == "kp"
+
+
+def test_specificity_writes_report(monkeypatch, tmp_path, capsys):
+    import antares.calibrate
+    import antares.specificity
+    from antares import server
+
+    seen = {}
+
+    def fake_study(episodes, locks, simulate, **kw):
+        seen.update(episodes=episodes, locks=locks, kw=kw)
+        return {"matrix": {}, "datasets": {}}
+
+    monkeypatch.setattr(server, "_DATASETS", {"lab/a": _dataset("lab/a"), "lab/b": _dataset("lab/b")})
+    monkeypatch.setattr(server, "list_lock_dicts", lambda: [
+        {"name": "a-old", "dataset": "lab/a", "created_at": "2026-01-01"},
+        {"name": "a-new", "dataset": "lab/a", "created_at": "2026-02-01"},
+        {"name": "b", "dataset": "lab/b", "created_at": "2026-01-01"},
+    ])
+    monkeypatch.setattr(server, "load_lock_dict", lambda n: {
+        "name": n, "dataset": "lab/b" if n == "b" else "lab/a", "params": {"kp": 100.0}})
+    monkeypatch.setattr(antares.calibrate, "default_simulate", lambda: None)
+    monkeypatch.setattr(antares.specificity, "study", fake_study)
+    monkeypatch.setattr(antares.specificity, "render_markdown", lambda r, title: f"## {title}\n")
+    assert cli.main(["specificity", "--datasets", "lab/a,lab/b", "--restart-seeds", "3",
+                     "--out", str(tmp_path)]) == 0
+    assert set(seen["locks"]) == {"a-new", "b"}
+    assert seen["locks"]["b"][0] == "lab/b"
+    assert seen["kw"]["restart_seeds"] == [3]
+    assert (tmp_path / "robot_specificity.md").read_text() == "## Robot specificity\n"
+    assert json.loads((tmp_path / "robot_specificity.json").read_text()) == {"matrix": {}, "datasets": {}}
+
+
+def test_specificity_needs_a_lock_per_dataset(monkeypatch):
+    from antares import server
+
+    monkeypatch.setattr(server, "list_lock_dicts", lambda: [])
+    with pytest.raises(SystemExit, match="no saved lock for lab/a"):
+        cli.main(["specificity", "--datasets", "lab/a"])

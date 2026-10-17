@@ -595,6 +595,89 @@ def _identifiability_text(rep, lat: dict[int, float]) -> str:
     return "\n".join(lines)
 
 
+def cmd_specificity(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from antares import server
+    from antares.calibrate import default_simulate
+    from antares.specificity import render_markdown, study
+
+    datasets = [d.strip() for d in args.datasets.split(",") if d.strip()]
+    lock_names = [l.strip() for l in (args.locks or "").split(",") if l.strip()]
+    if not lock_names:
+        lock_names = [server.load_lock_dict(n)["name"] for n in _default_locks(server, datasets)]
+    simulate = default_simulate()
+    truth = None
+    if args.synthetic:
+        episodes, locks, truth = _synthetic_arms(datasets, lock_names, args, simulate)
+    else:
+        episodes = {d: server.get_dataset(d).episodes for d in datasets}
+        locks = {}
+        for n in lock_names:
+            d = server.load_lock_dict(n)
+            locks[n] = (d["dataset"], server.params_from_dict(d["params"]))
+
+    results = study(
+        episodes,
+        locks,
+        simulate,
+        n_train=args.n_train,
+        n_eval=args.n_eval,
+        split_seed=args.seed,
+        restart_seeds=[int(s) for s in args.restart_seeds.split(",") if s.strip()],
+        max_evaluations=args.max_evaluations,
+        truth=truth,
+        log=lambda msg: print(f"  {msg}", flush=True),
+    )
+    title = "Robot specificity (synthetic arms)" if args.synthetic else "Robot specificity"
+    md = render_markdown(results, title=title)
+    print()
+    print(md)
+    out = Path(args.out)
+    _write_json(str(out / "robot_specificity.json"), results)
+    (out / "robot_specificity.md").write_text(md)
+    print(f"wrote {out / 'robot_specificity.md'}")
+    return 0
+
+
+def _default_locks(server, datasets: list[str]) -> list[str]:
+    """The newest saved lock for each dataset."""
+    by_ds: dict[str, dict] = {}
+    for l in server.list_lock_dicts():
+        ds = l.get("dataset")
+        if ds in datasets and str(l.get("created_at", "")) >= str(by_ds.get(ds, {}).get("created_at", "")):
+            by_ds[ds] = l
+    missing = [d for d in datasets if d not in by_ds]
+    if missing:
+        raise SystemExit(f"no saved lock for {', '.join(missing)}; run antares calibrate first")
+    return [by_ds[d]["name"] for d in datasets]
+
+
+def _synthetic_arms(datasets: list[str], lock_names: list[str], args, simulate):
+    """Stand-in arms whose true parameters are the given locks' parameters.
+
+    Each lock becomes a synthetic dataset driven by random commands, and a
+    fresh lock is fitted to it exactly like ``antares calibrate`` would.
+    """
+    from antares import server
+    from antares.calibrate import calibrate, split_episodes
+    from antares.synthetic import make_dataset
+
+    episodes, locks, truth = {}, {}, {}
+    for i, (d, n) in enumerate(zip(datasets, lock_names)):
+        p = server.params_from_dict(server.load_lock_dict(n)["params"])
+        sid = f"synthetic/{n}"
+        print(f"  {sid}: simulating an arm with {n}'s parameters", flush=True)
+        ds = make_dataset(sid, p, n_episodes=args.n_train + args.n_eval + args.n_train, seed=i + 1)
+        train, eval_ = split_episodes(ds.episodes, args.n_train, args.n_eval, seed=args.seed)
+        print(f"  {sid}: calibrating", flush=True)
+        res = calibrate(train, eval_, simulate=simulate, max_evaluations=args.max_evaluations, seed=args.seed)
+        episodes[sid] = ds.episodes
+        locks[f"{sid.split('/')[1]}-fit"] = (sid, res.params)
+        truth[sid] = p
+    return episodes, locks, truth
+
+
 def cmd_locks(args: argparse.Namespace) -> int:
     from antares import server
 
@@ -934,6 +1017,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--json", default=None, help="also write the report here")
     p.set_defaults(func=cmd_identify)
+
+    p = sub.add_parser("specificity", help="test whether each arm's lock is specific to that arm")
+    p.add_argument("--datasets", default="lerobot/svla_so101_pickplace,lerobot/svla_so100_pickplace",
+                   help="comma-separated dataset ids (default: the two demo arms)")
+    p.add_argument("--locks", default="", help="comma-separated lock names (default: newest per dataset)")
+    p.add_argument("--synthetic", action="store_true",
+                   help="replace each dataset with a simulated arm that has its lock's parameters")
+    p.add_argument("--n-train", type=int, default=20)
+    p.add_argument("--n-eval", type=int, default=10)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--restart-seeds", default="1,2", help="extra CMA-ES seeds to refit with")
+    p.add_argument("--max-evaluations", type=int, default=150)
+    p.add_argument("--out", default="results", help="directory for the .md and .json report")
+    p.set_defaults(func=cmd_specificity)
 
     p = sub.add_parser("locks", help="list saved locks")
     p.set_defaults(func=cmd_locks)
