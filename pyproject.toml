@@ -27,3 +27,4 @@ antares = "antares.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["slow: runs real MuJoCo replays; slower than unit tests"]
