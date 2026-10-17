@@ -87,6 +87,7 @@ def bootstrap_fits(
     sigma0: float = 0.1,
     simulate: SimulateFn | None = None,
     should_stop: Callable[[], bool] | None = None,
+    on_fit: Callable[[int, CalibrationResult], None] | None = None,
 ) -> list[CalibrationResult]:
     """Refit the simulator on ``n_fits`` random subsets of ``episodes``.
 
@@ -96,9 +97,11 @@ def bootstrap_fits(
     cannot pin down. No held-out split is scored (the training report stands
     in), which keeps each fit at ``max_evaluations * n_train`` replays.
 
-    ``should_stop`` is polled between fits and inside each fit; fits that
-    finished before it fired are returned. The draw order is fixed by
-    ``seed``, so the same inputs give the same subsets and the same fits.
+    ``on_progress`` fires per objective evaluation, ``on_fit(i, result)``
+    once per finished fit. ``should_stop`` is polled between fits and inside
+    each fit; fits that finished before it fired are returned. The draw
+    order is fixed by ``seed``, so the same inputs give the same subsets and
+    the same fits.
     """
     episodes = list(episodes)
     if not episodes:
@@ -127,19 +130,20 @@ def bootstrap_fits(
             def cb(ev: ProgressEvent, _i: int = i) -> None:
                 on_progress(FitProgress(_i, n_fits, ev))
 
-        fits.append(
-            calibrate(
-                train,
-                [],
-                simulate=simulate,
-                start=start,
-                max_evaluations=max_evaluations,
-                sigma0=sigma0,
-                seed=fit_seed,
-                on_progress=cb,
-                should_stop=should_stop,
-            )
+        result = calibrate(
+            train,
+            [],
+            simulate=simulate,
+            start=start,
+            max_evaluations=max_evaluations,
+            sigma0=sigma0,
+            seed=fit_seed,
+            on_progress=cb,
+            should_stop=should_stop,
         )
+        fits.append(result)
+        if on_fit is not None:
+            on_fit(i, result)
     return fits
 
 

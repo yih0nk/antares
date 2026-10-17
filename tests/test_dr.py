@@ -82,14 +82,19 @@ def test_bootstrap_fits_deterministic_and_seed_sensitive(episodes):
 
 def test_bootstrap_fits_progress_and_stop(episodes):
     seen: list[FitProgress] = []
-    bootstrap_fits(
+    finished: list[tuple] = []  # (fit index, progress events seen so far, result)
+    out = bootstrap_fits(
         episodes, START, n_fits=2, n_train=2, max_evaluations=3, simulate=fake_simulate,
-        on_progress=seen.append,
+        on_progress=seen.append, on_fit=lambda i, r: finished.append((i, len(seen), r)),
     )
     assert {p.fit for p in seen} == {0, 1}
     assert all(p.n_fits == 2 for p in seen)
     d = seen[-1].to_dict()
     assert d["fit"] == 1 and d["n_fits"] == 2 and "best_params" in d and "evaluation" in d
+    # on_fit fires once per fit, after that fit's progress and with its result
+    assert [f[0] for f in finished] == [0, 1]
+    assert finished[0][1] == len([p for p in seen if p.fit == 0])
+    assert [f[2] for f in finished] == out
 
     calls = {"n": 0}
 
