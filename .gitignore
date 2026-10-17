@@ -10,7 +10,7 @@ build/
 # downloaded datasets, models, and fitted locks
 .cache/
 data/
-*.lock.json
+# calibrated locks for the demo datasets are committed under locks/
 
 # web
 web/node_modules/
