@@ -168,7 +168,7 @@ def test_residuals_raise_on_divergence():
 # direct checks, on a toy first-order servo
 # --------------------------------------------------------------------------
 
-from antares.specificity import latency_profile  # noqa: E402
+from antares.specificity import interpolate, latency_profile  # noqa: E402
 
 
 def toy_response(p, action, fps):
@@ -206,3 +206,12 @@ def test_latency_profile_minimum_at_truth():
     assert list(prof) == [0, 1, 2, 3, 4, 5]
     assert min(prof, key=prof.get) == 2
     assert prof[2] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_interpolate_endpoints_and_ridge():
+    eps = toy_episodes(TRUE)
+    far = TRUE.replace(kp=4000.0, latency_frames=0)
+    path = interpolate(TRUE, far, eps, toy_simulate, n=5)
+    assert [t for t, _ in path] == [0.0, 0.25, 0.5, 0.75, 1.0]
+    assert path[0][1] == pytest.approx(0.0, abs=1e-9)
+    assert path[-1][1] > path[0][1]

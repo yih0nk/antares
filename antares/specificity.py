@@ -275,8 +275,24 @@ def latency_profile(
     return {int(f): _safe_score(params.replace(latency_frames=int(f)), episodes, simulate)[1] for f in frames}
 
 
+def interpolate(a, b, episodes: Sequence[Episode], simulate: SimulateFn, n: int = 11) -> list[tuple[float, float]]:
+    """Overall error along the straight line from lock ``a`` to lock ``b``.
+
+    The line is in the calibrator's unit space (log scale for the gains),
+    and latency rounds to whole frames along the way. A low, flat profile
+    means the two fits sit in one connected valley of near-equal error;
+    a ridge between them means they are genuinely different optima.
+    """
+    xa, xb = encode(a), encode(b)
+    out = []
+    for t in np.linspace(0.0, 1.0, n):
+        out.append((float(t), _safe_score(decode((1 - t) * xa + t * xb), episodes, simulate)[1]))
+    return out
+
+
 __all__ = [
     "CONTINUOUS",
+    "interpolate",
     "latency_profile",
     "Identifiability",
     "identifiability",
