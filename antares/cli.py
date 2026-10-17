@@ -165,6 +165,36 @@ def cmd_locks(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_export(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from fastapi import HTTPException
+
+    from antares import server
+    from antares.export import SCENE_FILENAME, export_scene, sidecar_path
+    from antares.lock import RobotLock
+
+    try:
+        lock = RobotLock.from_dict(server.load_lock_dict(args.name))
+    except HTTPException as e:
+        print(f"error: {e.detail}", file=sys.stderr)
+        return 1
+    out_dir = Path(args.output) if args.output else Path("export") / lock.name
+    scene = export_scene(lock, out_dir, bundle_assets=not args.no_bundle)
+    arm = out_dir / f"{lock.name}.xml"
+    p = lock.params
+    print(f"exported lock {lock.name} ({lock.dataset}) -> {out_dir}/")
+    print(f"  {arm.name:<40} calibrated arm MJCF")
+    print(f"  {sidecar_path(arm).name:<40} params incl. latency_frames={p.latency_frames}, unit map")
+    print(f"  {SCENE_FILENAME:<40} arm + floor/light")
+    if args.no_bundle:
+        print("  meshdir points at the antares package assets (absolute path)")
+    else:
+        print(f"  {'assets/':<40} STL meshes")
+    print(f"view: python -m mujoco.viewer --mjcf {scene}")
+    return 0
+
+
 # --------------------------------------------------------------------------
 # parser
 # --------------------------------------------------------------------------
@@ -212,6 +242,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("locks", help="list saved locks")
     p.set_defaults(func=cmd_locks)
+
+    p = sub.add_parser("export", help="write a lock as a standalone MJCF (+ scene, sidecar, meshes)")
+    p.add_argument("name", help="lock name (see `antares locks`)")
+    p.add_argument("-o", "--output", default=None, help="output directory (default: export/<name>)")
+    p.add_argument(
+        "--no-bundle",
+        action="store_true",
+        help="do not copy the STL meshes; point meshdir at the package assets instead",
+    )
+    p.set_defaults(func=cmd_export)
 
     return parser
 

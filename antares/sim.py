@@ -59,6 +59,23 @@ class SimParams:
     def default(cls) -> SimParams:
         return cls()
 
+    @classmethod
+    def from_model(cls, model: mujoco.MjModel, latency_frames: int = 0) -> SimParams:
+        """Read the actuator/joint values back out of a compiled model.
+
+        Uses the first actuator and dof (the SO-101 shares one ``sts3215``
+        class across all six). The model cannot carry command latency, so
+        it is passed in (default 0).
+        """
+        return cls(
+            kp=float(model.actuator_gainprm[0, 0]),
+            kv=float(-model.actuator_biasprm[0, 2]),
+            damping=float(model.dof_damping[0]),
+            armature=float(model.dof_armature[0]),
+            frictionloss=float(model.dof_frictionloss[0]),
+            latency_frames=latency_frames,
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -160,15 +177,23 @@ class Arm:
 
     Not thread-safe: ``replay`` and ``fk`` share state. Use one ``Arm`` per
     thread, or serialize calls.
+
+    ``model_path`` loads another MJCF with the same six joints (for example
+    one written by :mod:`antares.export`). With ``params=None`` the values
+    already compiled into that model are kept (see
+    :meth:`SimParams.from_model`); for the stock model that is the default
+    ``SimParams()``.
     """
 
     def __init__(
         self,
-        params: SimParams = SimParams(),
+        params: SimParams | None = None,
         unit_map: UnitMap | None = None,
         contacts: bool = False,
+        model_path: str | Path | None = None,
     ):
-        self.model = load_model()
+        self.model_path = Path(model_path) if model_path is not None else MODEL_PATH
+        self.model = load_model(self.model_path)
         if not contacts:
             self.model.opt.disableflags |= int(mujoco.mjtDisableBit.mjDSBL_CONTACT)
         self.data = mujoco.MjData(self.model)
@@ -183,13 +208,21 @@ class Arm:
         self._ctrl_lo = self.model.actuator_ctrlrange[:, 0].copy()
         self._ctrl_hi = self.model.actuator_ctrlrange[:, 1].copy()
         self._base_timestep = float(self.model.opt.timestep)
+        if params is None:
+            params = SimParams.from_model(self.model)
         self.params = params
         self.apply(params)
 
     # -- parameters ---------------------------------------------------------
 
     def apply(self, params: SimParams) -> None:
-        """Write ``params`` into the compiled model in place (cheap, idempotent)."""
+        """Write ``params`` into the compiled model in place (cheap, idempotent).
+
+        Armature feeds the qpos0-derived constants the compiler precomputes
+        (``dof_M0``, ``dof_invweight0``, which scale the frictionloss and
+        limit constraints), so they are recomputed with ``mj_setConst``; the
+        result is then identical to a model compiled with these values.
+        """
         m = self.model
         m.actuator_gainprm[:, 0] = params.kp
         m.actuator_biasprm[:, 1] = -params.kp
@@ -197,6 +230,7 @@ class Arm:
         m.dof_damping[:] = params.damping
         m.dof_armature[:] = params.armature
         m.dof_frictionloss[:] = params.frictionloss
+        mujoco.mj_setConst(m, self.data)  # ~20 us; uses self.data as scratch
         self.params = params
 
     # -- kinematics ---------------------------------------------------------

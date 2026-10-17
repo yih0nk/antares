@@ -609,3 +609,58 @@ def test_arm_lock_serialises_sim_access(client, fakes):
     for t in ths:
         t.join()
     assert len(seen) == 4
+
+
+def test_lock_export_endpoints(monkeypatch, tmp_path):
+    """Real lock module + real exporter (MuJoCo), no network."""
+    import io
+    import zipfile
+
+    import mujoco
+
+    from antares.calibrate import CalibrationResult
+    from antares.lock import RobotLock
+    from antares.sim import SimParams
+
+    monkeypatch.setattr(server, "LOCK_DIR", tmp_path)
+    monkeypatch.setattr(server, "LOCK_SUFFIX", LOCK_SUFFIX)
+    p = SimParams(kp=120.0, kv=1.2, damping=0.1, armature=0.02, frictionloss=0.01, latency_frames=3)
+    res = CalibrationResult(
+        params=p, baseline=SimParams(), train_score=1.0, eval_score=1.1,
+        baseline_train_score=5.0, baseline_eval_score=5.5,
+        per_joint_before={j: 5.0 for j in JOINTS}, per_joint_after={j: 1.0 for j in JOINTS},
+        history=[(0, 5.0)], n_evaluations=1, elapsed_s=0.1, train_episodes=[1], eval_episodes=[0],
+    )
+    RobotLock(name="unit-a", dataset=FAKE_DS, robot_type="so101_follower", data_sha256="0" * 64,
+              params=p, result=res, created_at="2026-10-17T00:00:00Z", antares_version="0.0.1").save(
+        tmp_path / f"unit-a{LOCK_SUFFIX}")
+    client = TestClient(server.app)
+
+    r = client.get("/api/locks/unit-a/export")
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"].startswith("application/xml")
+    assert r.headers["content-disposition"] == 'attachment; filename="unit-a.xml"'
+    xml = r.content.decode()
+    assert xml.startswith('<mujoco model="so101">') and "unit-a" in xml and FAKE_DS in xml
+    assert 'kp="120.0" kv="1.2"' in xml
+    (tmp_path / "dl.xml").write_text(xml)
+    m = mujoco.MjModel.from_xml_path(str(tmp_path / "dl.xml"))  # absolute meshdir resolves
+    assert m.actuator_gainprm[0, 0] == 120.0
+
+    r = client.get("/api/locks/unit-a/export.zip")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "application/zip"
+    assert r.headers["content-disposition"] == 'attachment; filename="unit-a.zip"'
+    zf = zipfile.ZipFile(io.BytesIO(r.content))
+    names = set(zf.namelist())
+    assert {"unit-a/unit-a.xml", "unit-a/unit-a.antares.json", "unit-a/scene.xml"} <= names
+    assert sum(n.endswith(".stl") for n in names) == 18
+    assert json.loads(zf.read("unit-a/unit-a.antares.json"))["latency_frames"] == 3
+    zf.extractall(tmp_path / "z")
+    mujoco.MjModel.from_xml_path(str(tmp_path / "z" / "unit-a" / "scene.xml"))
+
+    assert client.get("/api/locks/ghost/export").status_code == 404
+    assert client.get("/api/locks/ghost/export.zip").status_code == 404
+    assert client.get("/api/locks/..%2Fx/export").status_code in (400, 404)
+    (tmp_path / f"broken{LOCK_SUFFIX}").write_text(json.dumps({"name": "broken"}))
+    assert client.get("/api/locks/broken/export").status_code == 500
