@@ -194,6 +194,8 @@ export const api = {
     fetch(
       `/api/cross?${q({ datasets: datasets.join(","), locks: locks.join(","), n_train: nTrain, n_eval: nEval })}`,
     ).then((r) => json<CrossMatrix>(r)),
+  // Zip of the lock as a standalone MJCF (model, sidecar, scene, meshes).
+  exportZipUrl: (lock: string) => `/api/locks/${encodeURIComponent(lock)}/export.zip`,
 };
 
 // antares.lock.slug(dataset) plus a timestamp, so a run from the UI never

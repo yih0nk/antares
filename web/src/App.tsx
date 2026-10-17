@@ -556,6 +556,14 @@ export default function App() {
               </button>
             ))}
           </div>
+          {ghost !== DEFAULT && ghost !== LIVE && (
+            <div className="export">
+              <a className="cta secondary" href={api.exportZipUrl(ghost)} download={`${ghost}.zip`}>
+                Download MJCF
+              </a>
+              <span className="muted small">standalone MuJoCo model with the fitted physics</span>
+            </div>
+          )}
         </section>
 
         <section>
