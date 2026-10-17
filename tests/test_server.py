@@ -567,6 +567,112 @@ def test_cross_matrix(client, fakes):
     assert client.get("/api/cross", params={"datasets": FAKE_DS, "locks": "ghost"}).status_code == 404
 
 
+@pytest.fixture
+def dr_env(monkeypatch, tmp_path):
+    """Real sim + real CMA-ES on a tiny synthetic dataset, with a lock on disk."""
+    pytest.importorskip("antares.sim")
+    from test_calibrate import make_episodes
+
+    eps = make_episodes(6, T=40)
+    ds = Dataset(repo_id="synthetic/arm", robot_type="so101_follower", fps=30.0,
+                 joint_names=JOINTS, episodes=tuple(eps))
+    monkeypatch.setattr(server, "_DATASETS", {ds.repo_id: ds})
+    monkeypatch.setattr(server, "LOCK_DIR", tmp_path)
+    monkeypatch.setattr(server, "_JOBS", {})
+    lock = {
+        "name": "arm", "dataset": ds.repo_id, "robot_type": ds.robot_type, "data_sha256": "x",
+        "params": {"kp": 300.0, "kv": 3.0, "damping": 0.5, "armature": 0.02,
+                   "frictionloss": 0.05, "latency_frames": 1},
+        "result": {"eval_episodes": [4, 5]},
+        "created_at": "2026-10-17T00:00:00Z", "antares_version": "0.0.1",
+    }
+    (tmp_path / "arm.lock.json").write_text(json.dumps(lock))
+    return tmp_path
+
+
+def test_dr_job_lifecycle(dr_env):
+    client = TestClient(server.app)
+    r = client.post("/api/dr", json={"dataset": "synthetic/arm", "n_fits": 2, "n_train": 2,
+                                     "max_evaluations": 3})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    job_id = body["job_id"]
+    assert body["events_url"] == f"/api/jobs/{job_id}/events"
+
+    with client.stream("GET", body["events_url"]) as resp:
+        assert resp.headers["content-type"].startswith("text/event-stream")
+        events = sse_events(resp)
+    types_ = [e["type"] for e in events]
+    assert types_[-1] == "done"
+    assert types_.count("fit") == 2
+    assert "progress" in types_
+    prog = next(e for e in events if e["type"] == "progress")
+    assert prog["fit"] == 0 and prog["n_fits"] == 2 and "best_params" in prog
+    fit = next(e for e in events if e["type"] == "fit")
+    assert set(fit) >= {"fit", "n_fits", "params", "train_score", "train_episodes"}
+    # fit events arrive after their fit's progress and before the next fit starts
+    assert types_.index("fit") < types_.index("done")
+    assert types_[types_.index("fit") - 1] == "progress"
+
+    ranges = events[-1]["ranges"]
+    assert ranges["lock"] == "arm" and ranges["name"] == "arm"  # lock defaults to the dataset slug
+    assert ranges["dataset"] == "synthetic/arm" and ranges["n_fits"] == 2 and ranges["n_train"] == 2
+    assert ranges["nominal"]["kp"] == 300.0
+    for subset in ranges["fit_episodes"]:
+        assert len(subset) == 2 and not ({4, 5} & set(subset))  # held-out split untouched
+    for name, rng_ in ranges["ranges"].items():
+        assert rng_["lo"] <= rng_["nominal"] <= rng_["hi"], name
+        assert len(rng_["samples"]) == 2
+    assert ranges["ranges"]["latency_frames"]["scale"] == "int"
+
+    assert (dr_env / "arm.dr.json").is_file()
+    assert client.get("/api/dr/arm").json() == ranges
+    listing = client.get("/api/dr").json()
+    assert [l["name"] for l in listing] == ["arm"]
+    assert listing[0]["ranges"]["kp"]["lo"] == ranges["ranges"]["kp"]["lo"]
+    assert "samples" not in listing[0]["ranges"]["kp"]
+
+    st = client.get(f"/api/jobs/{job_id}").json()
+    assert st["status"] == "done" and st["kind"] == "dr" and st["result"] == ranges
+    assert client.get(f"/api/calibrate/{job_id}").json()["kind"] == "dr"  # same registry
+    assert client.get("/api/jobs/nope").status_code == 404
+    assert client.get("/api/jobs/nope/events").status_code == 404
+
+
+def test_dr_named_ranges_and_cancel(dr_env):
+    client = TestClient(server.app)
+    r = client.post("/api/dr", json={"dataset": "synthetic/arm", "lock": "arm", "name": "arm-dr",
+                                     "n_fits": 1, "n_train": 1, "max_evaluations": 1})
+    job_id = r.json()["job_id"]
+    with client.stream("GET", f"/api/jobs/{job_id}/events") as resp:
+        events = sse_events(resp)
+    assert events[-1]["type"] == "done" and events[-1]["ranges"]["name"] == "arm-dr"
+    assert events[-1]["ranges"]["lock"] == "arm"
+    assert (dr_env / "arm-dr.dr.json").is_file()
+    assert client.get("/api/dr/arm-dr").status_code == 200
+
+    # cancelling a dr job goes through the shared job registry
+    r = client.post("/api/dr", json={"dataset": "synthetic/arm", "n_fits": 50, "n_train": 1})
+    job_id = r.json()["job_id"]
+    assert client.post(f"/api/jobs/{job_id}/cancel").json()["cancelled"] is True
+    with client.stream("GET", f"/api/jobs/{job_id}/events") as resp:
+        events = sse_events(resp)
+    assert events[-1]["type"] in ("done", "error")
+    if events[-1]["type"] == "done":
+        assert events[-1]["ranges"]["n_fits"] < 50
+
+
+def test_dr_rejects_bad_input(client, fakes):
+    assert client.get("/api/dr").json() == []
+    assert client.get("/api/dr/ghost").status_code == 404
+    assert client.get("/api/dr/..").status_code in (400, 404)
+    assert client.post("/api/dr", json={"dataset": FAKE_DS, "lock": "ghost"}).status_code == 404
+    write_lock(fakes, "unit-a")
+    assert client.post("/api/dr", json={"dataset": FAKE_DS, "lock": "unit-a", "n_fits": 0}).status_code == 422
+    assert client.post("/api/dr", json={"dataset": FAKE_DS, "lock": "unit-a", "name": "../evil"}).status_code == 400
+    assert client.post("/api/dr", json={}).status_code == 422
+
+
 def test_arm_lock_serialises_sim_access(client, fakes):
     import threading
     arm = server._arm
