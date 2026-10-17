@@ -11,6 +11,7 @@ exists, so CMA-ES must be able to beat the default starting point.
 from __future__ import annotations
 
 import importlib.util
+import json
 import math
 import time
 
@@ -20,9 +21,13 @@ import pytest
 from antares.calibrate import (
     DIMS,
     PENALTY,
+    PER_JOINT,
+    PER_JOINT_SPACE,
+    SHARED,
     SPACE,
     CalibrationResult,
     ProgressEvent,
+    SearchSpace,
     SimParams,
     calibrate,
     decode,
@@ -34,10 +39,17 @@ from antares.data import Episode
 
 JOINTS = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper")
 TRUE = SimParams(kp=400.0, kv=4.0, damping=2.0, armature=0.1, frictionloss=0.05, latency_frames=2)
+# A robot whose elbow is slower and laggier than the rest: no shared fit can match it.
+TRUE_PER_JOINT = TRUE.replace(
+    kp=(400.0, 400.0, 120.0, 400.0, 400.0, 400.0),
+    latency_frames=(2, 2, 4, 2, 2, 2),
+)
 
 
-def make_episodes(n: int, T: int = 120, fps: float = 30.0, seed: int = 0) -> list[Episode]:
-    """Smooth random multi-sine commands; ``state`` is filled from TRUE."""
+def make_episodes(
+    n: int, T: int = 120, fps: float = 30.0, seed: int = 0, true: SimParams = TRUE
+) -> list[Episode]:
+    """Smooth random multi-sine commands; ``state`` is filled from ``true``."""
     rng = np.random.default_rng(seed)
     t = np.arange(T) / fps
     eps = []
@@ -48,21 +60,26 @@ def make_episodes(n: int, T: int = 120, fps: float = 30.0, seed: int = 0) -> lis
                 f = rng.uniform(0.2, 1.2)
                 action[:, j] += rng.uniform(-0.6, 0.6) * np.sin(2 * np.pi * f * t + rng.uniform(0, 2 * np.pi))
         action[:, 5] = np.abs(action[:, 5])  # gripper is one-sided
-        state = toy_response(TRUE, action, fps)
+        state = toy_response(true, action, fps)
         eps.append(Episode(index=i, fps=fps, joint_names=JOINTS, state=state, action=action))
     return eps
 
 
 def toy_response(p: SimParams, action: np.ndarray, fps: float) -> np.ndarray:
+    """First-order lag per joint; scalar and per-joint params both work."""
     dt = 1.0 / fps
-    tau = 20.0 * (p.kv + p.damping) / p.kp + p.armature
-    alpha = 1.0 - math.exp(-dt / tau)
-    deadband = 0.05 * p.frictionloss
-    lag = int(p.latency_frames)
+    kp, kv, damping, armature, frictionloss = (
+        p.per_joint(n) for n in ("kp", "kv", "damping", "armature", "frictionloss")
+    )
+    tau = 20.0 * (kv + damping) / kp + armature  # (6,)
+    alpha = 1.0 - np.exp(-dt / tau)
+    deadband = 0.05 * frictionloss
+    lag = p.per_joint("latency_frames")
+    cols = np.arange(action.shape[1])
     q = np.empty_like(action)
     q[0] = action[0]
     for k in range(1, len(action)):
-        cmd = action[max(k - 1 - lag, 0)]
+        cmd = action[np.maximum(k - 1 - lag, 0), cols]
         err = cmd - q[k - 1]
         err = np.where(np.abs(err) < deadband, 0.0, err)
         q[k] = q[k - 1] + alpha * err
@@ -126,6 +143,43 @@ def test_latency_rounding():
 def test_decode_rejects_wrong_dim():
     with pytest.raises(ValueError):
         decode(np.zeros(5))
+    with pytest.raises(ValueError):
+        PER_JOINT.decode(np.zeros(6))
+
+
+def test_search_spaces():
+    assert SHARED.name == "shared" and SHARED.dims == DIMS and SHARED.n_dims == 6
+    assert PER_JOINT.name == "per_joint"
+    assert set(PER_JOINT_SPACE) == set(SimParams.field_names())  # every field, incl. forcerange
+    assert PER_JOINT.n_dims == 7 * 6 == len(PER_JOINT.dims)
+    assert PER_JOINT.dims[:2] == ("kp.shoulder_pan", "kp.shoulder_lift")
+    assert PER_JOINT.dims[-1] == "forcerange.gripper"
+    # shared decode keeps unsearched fields from the base, e.g. forcerange
+    base = SimParams(forcerange=7.0)
+    assert SHARED.decode(SHARED.encode(base), base=base).forcerange == 7.0
+    assert decode(encode(base)).forcerange == 2.94  # no base: defaults
+
+
+def test_per_joint_encode_decode_round_trip():
+    x = PER_JOINT.encode(TRUE_PER_JOINT)
+    assert x.shape == (42,) and np.all(x >= 0) and np.all(x <= 1)
+    back = PER_JOINT.decode(x)
+    assert back.has_per_joint and all(back.is_per_joint(n) for n in SimParams.field_names())
+    assert back.latency_frames == (2, 2, 4, 2, 2, 2)
+    for name in SimParams.field_names():
+        np.testing.assert_allclose(back.per_joint(name), TRUE_PER_JOINT.per_joint(name), rtol=1e-9)
+    # a scalar start is broadcast, so the per-joint stage starts exactly there
+    x0 = PER_JOINT.encode(TRUE)
+    np.testing.assert_allclose(x0.reshape(7, 6), np.repeat(x0.reshape(7, 6)[:, :1], 6, axis=1))
+    for name in SimParams.field_names():
+        np.testing.assert_allclose(PER_JOINT.decode(x0).per_joint(name), TRUE.per_joint(name), rtol=1e-9)
+    # the shared space summarizes a per-joint field by its mean in unit coords
+    xs = SHARED.encode(TRUE_PER_JOINT)
+    assert xs.shape == (6,)
+    kp_unit = [SHARED.encode(TRUE.replace(kp=k))[0] for k in TRUE_PER_JOINT.kp]
+    assert xs[0] == pytest.approx(np.mean(kp_unit))
+    custom = SearchSpace({"kp": SPACE["kp"]}, per_joint=True)
+    assert custom.n_dims == 6 and custom.decode(np.full(6, 0.5), base=TRUE).kv == TRUE.kv
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +312,81 @@ def test_calibrate_penalizes_nan_sim():
 def test_calibrate_requires_training_episodes():
     with pytest.raises(ValueError):
         calibrate([], [], simulate=fake_simulate)
+
+
+def test_calibrate_default_is_shared_only():
+    eps = make_episodes(2, T=60)
+    res = calibrate(eps[:1], eps[1:], simulate=fake_simulate, max_evaluations=8, popsize=4)
+    assert res.space == "shared" and not res.params.has_per_joint
+    assert [s["name"] for s in res.stages] == ["shared"]
+    assert res.stages[0]["n_evaluations"] == res.n_evaluations == 8
+    assert res.stages[0]["train_score"] == pytest.approx(res.train_score)
+    assert res.stages[0]["params"] == res.params.to_dict()
+    # old result dicts without the new keys still load
+    d = res.to_dict()
+    del d["space"], d["stages"]
+    back = CalibrationResult.from_dict(d)
+    assert back.space == "shared" and back.stages == []
+
+
+def test_calibrate_per_joint_refines_shared_fit():
+    eps = make_episodes(6, T=90, seed=3, true=TRUE_PER_JOINT)
+    train, eval = split_episodes(eps, n_train=4, n_eval=2, seed=0)
+    kw = dict(simulate=fake_simulate, max_evaluations=60, seed=0)
+    shared = calibrate(train, eval, **kw)
+    events: list[ProgressEvent] = []
+    t0 = time.perf_counter()
+    res = calibrate(
+        train, eval, per_joint=True, per_joint_max_evaluations=240, on_progress=events.append, **kw
+    )
+    elapsed = time.perf_counter() - t0
+    print(f"\nper-joint toy: eval shared {shared.eval_score:.4f} -> per-joint {res.eval_score:.4f} deg "
+          f"in {elapsed:.2f}s; elbow {shared.per_joint_after['elbow_flex']:.4f} -> "
+          f"{res.per_joint_after['elbow_flex']:.4f}; latency {res.params.latency_frames}")
+
+    # same shared stage, then a refinement that can only help on train
+    assert res.stages[0] == shared.stages[0]
+    assert [s["name"] for s in res.stages] == ["shared", "per_joint"]
+    assert res.stages[1]["n_evaluations"] == 240
+    assert res.n_evaluations == 60 + 240
+    assert res.space == "per_joint" and res.params.has_per_joint
+    assert res.train_score <= shared.train_score
+    # the elbow is where the shared fit was wrong, and the per-joint fit finds it
+    assert res.eval_score < 0.8 * shared.eval_score
+    assert res.per_joint_after["elbow_flex"] < 0.6 * shared.per_joint_after["elbow_flex"]
+    assert res.params.latency_frames[2] > min(res.params.latency_frames[j] for j in (0, 1, 3, 4))
+    assert res.params.per_joint("kp")[2] < np.median(res.params.per_joint("kp"))
+
+    # progress: one stream over both stages, labelled, monotone
+    assert len(events) == res.n_evaluations + 1
+    assert [e.evaluation for e in events] == list(range(res.n_evaluations + 1))
+    assert [e.stage for e in events[:61]] == ["shared"] * 61
+    assert [e.stage for e in events[61:]] == ["per_joint"] * 240
+    assert events[61].generation > events[60].generation
+    best = [e.best_score for e in events]
+    assert all(b <= a for a, b in zip(best, best[1:]))
+    assert events[-1].best_params == res.params
+    assert events[-1].to_dict()["stage"] == "per_joint"
+    assert res.history == [(e.evaluation, e.best_score) for e in events]
+
+    # JSON round trip keeps the per-joint tuples, the stages and the space
+    d = json.loads(json.dumps(res.to_dict()))
+    assert isinstance(d["params"]["kp"], list) and len(d["params"]["kp"]) == 6
+    assert d["space"] == "per_joint" and len(d["stages"]) == 2
+    back = CalibrationResult.from_dict(d)
+    assert back.params == res.params and back.stages == res.stages and back.space == "per_joint"
+
+
+def test_calibrate_per_joint_skipped_when_cancelled():
+    eps = make_episodes(2, T=60)
+    seen = []
+    res = calibrate(
+        eps[:1], eps[1:], simulate=fake_simulate, max_evaluations=100, popsize=6, per_joint=True,
+        on_progress=seen.append, should_stop=lambda: len(seen) >= 5,
+    )
+    assert res.n_evaluations <= 6 and res.space == "shared"
+    assert [s["name"] for s in res.stages] == ["shared"]
+    assert not res.params.has_per_joint
 
 
 # ---------------------------------------------------------------------------
