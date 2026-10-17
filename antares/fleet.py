@@ -520,6 +520,8 @@ def scan(
     retries: int = 3,
     retry_wait_s: float = 5.0,
     report_path: Path | str | None = None,
+    cross_n: int = 6,
+    cross_fn: Callable[..., dict[str, Any]] | None = None,
 ) -> FleetReport:
     """Calibrate every accepted candidate in turn and build the fleet report.
 
@@ -532,6 +534,9 @@ def scan(
     ``on_progress`` receives dict events (``start``, ``fit``, ``robot``,
     ``failed``, ``skipped``, ``done``). The report is saved to
     ``report_path`` (default ``<lock_dir>/fleet.json``) after every robot.
+
+    Afterwards :func:`finalize` adds the fleet statistics, outliers and a
+    partial cross matrix over up to ``cross_n`` robots (0 disables it).
     """
     from antares.calibrate import calibrate, split_episodes
     from antares.lock import RobotLock
@@ -631,9 +636,253 @@ def scan(
         report.elapsed_s = time.monotonic() - t0
         report.save(report_path)
 
+    try:
+        finalize(report, lock_dir=lock_dir, cross_n=cross_n, load=load, cross_fn=cross_fn, retries=retries)
+    except Exception as e:  # noqa: BLE001 - keep the per-robot results even if the summary fails
+        report.failures.append({"dataset": "<cross matrix>", "error": f"{type(e).__name__}: {e}"})
+        emit({"type": "failed", "dataset": "<cross matrix>", "error": f"{type(e).__name__}: {e}"})
     report.elapsed_s = time.monotonic() - t0
     report.save(report_path)
     emit({"type": "done", "summary": report.summary(), "path": str(report_path)})
+    return report
+
+
+# --------------------------------------------------------------------------
+# Fleet statistics
+# --------------------------------------------------------------------------
+
+#: Parameters searched on a log scale; their spread is measured in log10.
+LOG_PARAMS: tuple[str, ...] = ("kp", "kv", "damping", "armature", "frictionloss")
+STAT_PARAMS: tuple[str, ...] = LOG_PARAMS + ("latency_frames", "latency_ms")
+OUTLIER_Z = 2.5
+
+
+def _param_values(robots: Sequence[RobotEntry], param: str) -> list[tuple[str, float]]:
+    out = []
+    for r in robots:
+        v = r.latency_ms if param == "latency_ms" else r.params.get(param)
+        if v is None:
+            continue
+        v = float(v)
+        if math.isfinite(v) and (param not in LOG_PARAMS or v > 0):
+            out.append((r.dataset, v))
+    return out
+
+
+def robust_z(values: np.ndarray) -> np.ndarray:
+    """``(x - median) / (1.4826 * MAD)``.
+
+    When the MAD is zero (most robots share one value, typical for the
+    integer latency) the scale falls back to the IQR, then to the standard
+    deviation; with no spread at all every z is zero.
+    """
+    x = np.asarray(values, dtype=np.float64)
+    if x.size == 0:
+        return x
+    med = np.median(x)
+    mad = np.median(np.abs(x - med))
+    scale = 1.4826 * mad
+    if scale <= 0:
+        q25, q75 = np.percentile(x, [25, 75])
+        scale = (q75 - q25) / 1.349
+    if scale <= 0:
+        scale = float(x.std())
+    if scale <= 0:
+        return np.zeros_like(x)
+    return (x - med) / scale
+
+
+def fleet_stats(robots: Sequence[RobotEntry], params: Sequence[str] = STAT_PARAMS) -> dict[str, dict[str, Any]]:
+    """Per-parameter median, quartiles, IQR and a robust z-score per robot.
+
+    Log-scale parameters are analysed in log10 (so ``z`` is in decades of
+    MAD) but the quantiles are reported in natural units.
+    """
+    stats: dict[str, dict[str, Any]] = {}
+    for param in params:
+        pairs = _param_values(robots, param)
+        if not pairs:
+            continue
+        names = [n for n, _ in pairs]
+        x = np.array([v for _, v in pairs], dtype=np.float64)
+        log = param in LOG_PARAMS
+        q25, med, q75 = np.percentile(x, [25, 50, 75])
+        z = robust_z(np.log10(x) if log else x)
+        stats[param] = {
+            "scale": "log" if log else "linear",
+            "n": int(x.size),
+            "median": _json_float(med),
+            "q25": _json_float(q25),
+            "q75": _json_float(q75),
+            "iqr": _json_float(q75 - q25),
+            "min": _json_float(x.min()),
+            "max": _json_float(x.max()),
+            "z": {n: _json_float(v) for n, v in zip(names, z)},
+        }
+    return stats
+
+
+def find_outliers(
+    robots: Sequence[RobotEntry],
+    stats: dict[str, dict[str, Any]],
+    threshold: float = OUTLIER_Z,
+    params: Sequence[str] = LOG_PARAMS + ("latency_frames",),
+) -> list[dict[str, Any]]:
+    """Robots whose fitted value sits more than ``threshold`` robust sigmas
+    from the fleet median, most extreme first."""
+    by_name = {r.dataset: r for r in robots}
+    out = []
+    for param in params:
+        st = stats.get(param)
+        if not st:
+            continue
+        med = st["median"]
+        for name, z in st["z"].items():
+            if z is None or abs(z) < threshold:
+                continue
+            r = by_name.get(name)
+            value = r.params.get(param) if r is not None else None
+            if value is None or med is None:
+                continue
+            if param == "latency_frames":
+                fps = r.fps if r is not None else 0.0
+                ms = f" ({1000 * value / fps:.0f} ms)" if fps else ""
+                note = f"latency {int(value)} frames{ms} vs fleet median {med:g}"
+            else:
+                ratio = value / med if med else float("inf")
+                note = f"{param} {value:.3g} is {ratio:.1f}x the fleet median {med:.3g}"
+            out.append({"dataset": name, "param": param, "z": round(float(z), 2), "value": value, "median": med, "note": note})
+    out.sort(key=lambda o: -abs(o["z"]))
+    return out
+
+
+# --------------------------------------------------------------------------
+# Partial cross matrix
+# --------------------------------------------------------------------------
+
+
+def pick_cross_robots(
+    robots: Sequence[RobotEntry],
+    n: int = 6,
+    prefer: Sequence[str] = PINNED,
+    n_train: int = 20,
+    n_eval: int = 10,
+) -> list[RobotEntry]:
+    """Up to ``n`` robots for the cross matrix: the preferred (demo) ones
+    first, then others in scan order. Only robots with enough episodes for
+    the full ``n_train + n_eval`` split qualify, so every row uses the same
+    held-out split the lock was scored on."""
+    ok = [r for r in robots if r.n_episodes >= n_train + n_eval and math.isfinite(r.calibrated_eval)]
+    chosen = [r for p in prefer for r in ok if r.dataset == p]
+    for r in ok:
+        if len(chosen) >= n:
+            break
+        if r not in chosen:
+            chosen.append(r)
+    return chosen[:n]
+
+
+def cross_summary(matrix: dict[str, Any]) -> dict[str, Any]:
+    """Mean of each robot on its own lock (diagonal) vs on the others' locks
+    (off-diagonal) vs the default parameters (last column)."""
+    scores = np.asarray(matrix["scores"], dtype=np.float64)
+    k = len(matrix["rows"])
+    if scores.shape != (k, k + 1) or k == 0:
+        raise ValueError("cross matrix must be k rows by k locks + default")
+    locks = scores[:, :k]
+    default = scores[:, k]
+    off_mask = ~np.eye(k, dtype=bool)
+    diag = np.diag(locks)
+    off = locks[off_mask]
+    ratio = lambda a: _json_float(a / diag.mean()) if diag.mean() > 0 else None  # noqa: E731
+    return {
+        "n": k,
+        "mean_diagonal": _json_float(diag.mean()),
+        "mean_off_diagonal": _json_float(off.mean()) if off.size else None,
+        "mean_default": _json_float(default.mean()),
+        "off_over_diagonal": ratio(off.mean()) if off.size else None,
+        "default_over_diagonal": ratio(default.mean()),
+        # share of (robot, other lock) pairs where the other robot's lock still beats the default
+        "other_lock_beats_default": _json_float(np.mean((locks < default[:, None])[off_mask])) if off.size else None,
+        # robots whose own lock is the best of all locks on their eval split
+        "own_lock_is_best": int(np.sum(np.argmin(locks, axis=1) == np.arange(k))),
+    }
+
+
+def default_cross_fn(
+    datasets: Sequence[Dataset],
+    locks: Sequence[str],
+    n_train: int,
+    n_eval: int,
+    seed: int,
+    lock_dir: Path,
+) -> dict[str, Any]:
+    """Score with :func:`antares.server.cross_matrix` (the shared MuJoCo arm)."""
+    from antares import server
+
+    for ds in datasets:
+        server.put_dataset(ds)
+    return server.cross_matrix(
+        [ds.repo_id for ds in datasets], list(locks), n_train=n_train, n_eval=n_eval, seed=seed, lock_dir=lock_dir
+    )
+
+
+def fleet_cross(
+    robots: Sequence[RobotEntry],
+    *,
+    lock_dir: Path | str = FLEET_LOCK_DIR,
+    n: int = 6,
+    prefer: Sequence[str] = PINNED,
+    n_train: int = 20,
+    n_eval: int = 10,
+    seed: int = 0,
+    load: Callable[[str], Dataset] | None = None,
+    cross_fn: Callable[..., dict[str, Any]] | None = None,
+    retries: int = 3,
+) -> dict[str, Any] | None:
+    """Score each chosen robot's lock on every chosen robot's eval split."""
+    chosen = pick_cross_robots(robots, n=n, prefer=prefer, n_train=n_train, n_eval=n_eval)
+    if len(chosen) < 2:
+        return None
+    if load is None:
+        from antares.data import load_dataset
+
+        load = load_dataset
+    datasets = [load_with_retries(r.dataset, load, retries=retries) for r in chosen]
+    matrix = (cross_fn or default_cross_fn)(datasets, [r.lock for r in chosen], n_train, n_eval, seed, Path(lock_dir))
+    out = dict(matrix)
+    out["locks"] = [r.lock for r in chosen]
+    out["summary"] = cross_summary(matrix)
+    return out
+
+
+def finalize(
+    report: FleetReport,
+    *,
+    lock_dir: Path | str = FLEET_LOCK_DIR,
+    cross_n: int = 6,
+    cross_prefer: Sequence[str] = PINNED,
+    load: Callable[[str], Dataset] | None = None,
+    cross_fn: Callable[..., dict[str, Any]] | None = None,
+    retries: int = 3,
+) -> FleetReport:
+    """Fill ``stats``, ``outliers`` and (``cross_n`` > 1) ``cross`` in place."""
+    report.stats = fleet_stats(report.robots)
+    report.outliers = find_outliers(report.robots, report.stats)
+    if cross_n > 1 and report.robots:
+        s = report.settings
+        report.cross = fleet_cross(
+            report.robots,
+            lock_dir=lock_dir,
+            n=cross_n,
+            prefer=cross_prefer,
+            n_train=int(s.get("n_train", 20)),
+            n_eval=int(s.get("n_eval", 10)),
+            seed=int(s.get("seed", 0)),
+            load=load,
+            cross_fn=cross_fn,
+            retries=retries,
+        )
     return report
 
 
@@ -658,4 +907,14 @@ __all__ = [
     "lock_name",
     "plan_split",
     "scan",
+    "LOG_PARAMS",
+    "STAT_PARAMS",
+    "OUTLIER_Z",
+    "robust_z",
+    "fleet_stats",
+    "find_outliers",
+    "pick_cross_robots",
+    "cross_summary",
+    "fleet_cross",
+    "finalize",
 ]

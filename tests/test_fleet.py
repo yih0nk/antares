@@ -387,6 +387,123 @@ def test_scan_rejects_wrong_joints_and_unusable_episodes(tmp_path):
     assert rep.robots[0].dataset == "b/y" and rep.robots[0].n_episodes == 12  # the two unusable episodes dropped
 
 
+def entry(dataset, n_episodes=50, fps=30.0, **params):
+    p = {"kp": 1000.0, "kv": 3.0, "damping": 0.5, "armature": 0.03, "frictionloss": 0.05, "latency_frames": 2}
+    p.update(params)
+    return RobotEntry(dataset, "so101", n_episodes, fps, 20, 10, 5.0, 2.0, 0.6, p, fleet.lock_name(dataset))
+
+
+def test_robust_z():
+    z = fleet.robust_z(np.array([1.0, 2.0, 3.0, 4.0, 100.0]))
+    assert z[2] == 0 and z[4] > 2.5 and abs(z[0]) < 2.5
+    assert fleet.robust_z(np.array([5.0, 5.0, 5.0])).tolist() == [0.0, 0.0, 0.0]
+    assert fleet.robust_z(np.array([])).size == 0
+    # MAD of zero with some spread falls back to the IQR, then to the std
+    z = fleet.robust_z(np.array([1.0, 1.0, 1.0, 2.0, 9.0]))
+    assert z[-1] > 0 and np.isfinite(z).all()
+    z = fleet.robust_z(np.array([2.0] * 8 + [5.0]))
+    assert z[-1] > 2.5 and z[0] == 0
+
+
+def test_fleet_stats_and_outliers():
+    robots = [entry(f"u{i}/arm", kp=1000.0 * (1 + 0.05 * i), latency_frames=2) for i in range(8)]
+    robots.append(entry("odd/arm", kp=20000.0, latency_frames=5, fps=50.0))
+    stats = fleet.fleet_stats(robots)
+    assert set(stats) == set(fleet.STAT_PARAMS)
+    kp = stats["kp"]
+    assert kp["scale"] == "log" and kp["n"] == 9
+    assert kp["q25"] <= kp["median"] <= kp["q75"] and kp["iqr"] == pytest.approx(kp["q75"] - kp["q25"])
+    assert kp["min"] == 1000.0 and kp["max"] == 20000.0
+    assert kp["z"]["odd/arm"] > 2.5 and abs(kp["z"]["u4/arm"]) < 1
+    assert stats["latency_ms"]["scale"] == "linear"
+    assert stats["latency_ms"]["z"]["odd/arm"] > 2.5  # 100 ms vs 66.7 ms for all the rest (std fallback)
+    assert stats["damping"]["z"]["odd/arm"] == 0.0  # no spread at all
+
+    outliers = fleet.find_outliers(robots, stats)
+    assert {(o["dataset"], o["param"]) for o in outliers} == {("odd/arm", "kp"), ("odd/arm", "latency_frames")}
+    kp_o = next(o for o in outliers if o["param"] == "kp")
+    assert kp_o["value"] == 20000.0 and "x the fleet median" in kp_o["note"]
+    lat_o = next(o for o in outliers if o["param"] == "latency_frames")
+    assert "5 frames (100 ms)" in lat_o["note"]
+    assert abs(outliers[0]["z"]) >= abs(outliers[-1]["z"])
+    assert fleet.find_outliers(robots, stats, threshold=1e9) == []
+    assert fleet.fleet_stats([]) == {}
+
+
+def test_pick_cross_robots_prefers_demo_and_needs_full_split():
+    robots = [entry("a/x"), entry("b/y", n_episodes=29), entry("lerobot/svla_so100_pickplace"), entry("c/z"), entry("d/w")]
+    chosen = fleet.pick_cross_robots(robots, n=3, prefer=fleet.PINNED)
+    assert [r.dataset for r in chosen] == ["lerobot/svla_so100_pickplace", "a/x", "c/z"]
+    assert len(fleet.pick_cross_robots(robots, n=10)) == 4  # b/y cannot take the 20 + 10 split
+
+
+def test_cross_summary():
+    m = {"rows": ["a", "b", "c"], "cols": ["la", "lb", "lc", "default"],
+         "scores": [[1.0, 2.0, 3.0, 4.0], [2.0, 1.0, 5.0, 4.0], [3.0, 3.0, 1.0, 2.0]]}
+    s = fleet.cross_summary(m)
+    assert s["n"] == 3 and s["mean_diagonal"] == 1.0
+    assert s["mean_off_diagonal"] == pytest.approx(18 / 6)
+    assert s["mean_default"] == pytest.approx(10 / 3)
+    assert s["off_over_diagonal"] == pytest.approx(3.0) and s["default_over_diagonal"] == pytest.approx(10 / 3)
+    assert s["other_lock_beats_default"] == pytest.approx(3 / 6)
+    assert s["own_lock_is_best"] == 3
+    with pytest.raises(ValueError):
+        fleet.cross_summary({"rows": ["a"], "scores": [[1.0]]})
+
+
+def test_fleet_cross_uses_injected_scorer_and_summarises(tmp_path):
+    robots = [entry("lerobot/svla_so101_pickplace"), entry("a/x"), entry("b/y"), entry("c/z", n_episodes=12)]
+    datasets = {r.dataset: make_dataset(r.dataset, n=30) for r in robots}
+    calls = []
+
+    def cross_fn(dss, locks, n_train, n_eval, seed, lock_dir):
+        calls.append(([d.repo_id for d in dss], list(locks), n_train, n_eval, seed, lock_dir))
+        k = len(dss)
+        return {"rows": [d.repo_id for d in dss], "cols": list(locks) + ["default"],
+                "scores": [[1.0 if i == j else 2.0 for j in range(k)] + [3.0] for i in range(k)], "per_joint": []}
+
+    out = fleet.fleet_cross(robots, lock_dir=tmp_path, n=6, load=lambda rid: datasets[rid], cross_fn=cross_fn)
+    assert calls[0][0] == ["lerobot/svla_so101_pickplace", "a/x", "b/y"]  # c/z too small
+    assert calls[0][1] == ["lerobot__svla_so101_pickplace", "a__x", "b__y"]
+    assert calls[0][2:] == (20, 10, 0, tmp_path)
+    assert out["locks"] == calls[0][1]
+    assert out["summary"]["mean_diagonal"] == 1.0 and out["summary"]["mean_off_diagonal"] == 2.0
+    assert fleet.fleet_cross(robots[:1], lock_dir=tmp_path, load=lambda rid: datasets[rid], cross_fn=cross_fn) is None
+
+
+def test_scan_finalizes_with_stats_outliers_and_cross(tmp_path):
+    datasets = {f"u{i}/arm": make_dataset(f"u{i}/arm", n=30, seed=i) for i in range(3)}
+
+    def cross_fn(dss, locks, n_train, n_eval, seed, lock_dir):
+        assert all((lock_dir / f"{l}.lock.json").is_file() for l in locks)
+        k = len(dss)
+        return {"rows": [d.repo_id for d in dss], "cols": list(locks) + ["default"],
+                "scores": [[1.0 if i == j else 2.0 for j in range(k)] + [3.0] for i in range(k)], "per_joint": []}
+
+    rep = scan([cand(r) for r in datasets], max_evaluations=3, lock_dir=tmp_path, load=lambda rid: datasets[rid],
+               simulate=toy_simulate, cross_n=2, cross_fn=cross_fn)
+    assert len(rep.robots) == 3
+    assert set(rep.stats) == set(fleet.STAT_PARAMS) and rep.stats["kp"]["n"] == 3
+    assert isinstance(rep.outliers, list)
+    assert rep.cross["summary"]["n"] == 2 and rep.cross["rows"] == ["u0/arm", "u1/arm"]
+    saved = json.loads((tmp_path / "fleet.json").read_text())
+    assert saved["cross"]["summary"]["off_over_diagonal"] == 2.0 and "kp" in saved["stats"]
+
+    # a failing cross matrix is recorded, not raised
+    def bad_cross(*a, **k):
+        raise RuntimeError("no sim")
+
+    rep = scan([cand(r) for r in datasets], max_evaluations=2, lock_dir=tmp_path, load=lambda rid: datasets[rid],
+               simulate=toy_simulate, cross_n=2, cross_fn=bad_cross)
+    assert len(rep.robots) == 3 and rep.cross is None
+    assert rep.failures[-1]["dataset"] == "<cross matrix>" and "no sim" in rep.failures[-1]["error"]
+
+    # cross disabled
+    rep = scan([cand("u0/arm")], max_evaluations=2, lock_dir=tmp_path, load=lambda rid: datasets[rid],
+               simulate=toy_simulate, cross_n=0)
+    assert rep.cross is None and rep.stats["kp"]["n"] == 1
+
+
 def test_robot_entry_nan_round_trip():
     e = RobotEntry("a/x", "so101", 10, 30.0, 6, 4, float("nan"), 1.0, float("nan"), {"latency_frames": 3}, "a__x")
     d = e.to_dict()
