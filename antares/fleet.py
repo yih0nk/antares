@@ -36,11 +36,18 @@ FLEET_REPORT_NAME = "fleet.json"
 SEARCH_TERMS: tuple[str, ...] = ("so100", "so101", "so-100", "so-101", "so_100", "so_101", "so_arm")
 TAG_FILTERS: tuple[str, ...] = ("so100", "so101")
 
+#: Always inspected first and exempt from the one-dataset-per-owner rule.
+PINNED: tuple[str, ...] = ("lerobot/svla_so101_pickplace", "lerobot/svla_so100_pickplace")
+
 MIN_EPISODES = 15
 ALLOWED_FPS: tuple[float, ...] = (30.0, 50.0)
 MAX_DATA_BYTES = 200 * 2**20  # tabular part only; videos are never downloaded
 
-_ROBOT_RE = re.compile(r"so[-_ ]?(?:arm)?[-_ ]?10[01]")
+# ``so100``/``so101`` in any spelling, plus LeRobot's newer unified
+# ``so_follower`` name for the same arm.
+_ROBOT_RE = re.compile(r"so[-_ ]?(?:arm)?[-_ ]?10[01]|^so[-_]?follower$")
+# Datasets recorded in a simulator are not physical robots.
+_SIM_RE = re.compile(r"(?:^|[^a-z])(?:sim|synthetic|synth|pybullet|isaac(?:sim|lab)?|mujoco|genesis|maniskill|gazebo)(?:[^a-z]|$)")
 
 
 # --------------------------------------------------------------------------
@@ -125,6 +132,9 @@ def check_info(
             codebase_version=version,
         )
 
+    sim = _SIM_RE.search(repo_id.lower())
+    if sim:
+        return reject(f"looks like a simulation dataset (name contains {sim.group(0).strip('-_ /.')!r})")
     if not re.match(r"v[23]\.", version):
         return reject(f"codebase_version {version or 'missing'} (need the v2/v3 parquet layout)")
     if not _ROBOT_RE.search(robot_type.lower()):
@@ -225,6 +235,7 @@ def discover(
     *,
     max_inspect: int | None = None,
     one_per_owner: bool = True,
+    pinned: Sequence[str] = PINNED,
     api: Any = None,
     search: Callable[..., list[tuple[str, int]]] | None = None,
     fetch_info: Callable[[str], dict[str, Any]] | None = None,
@@ -237,7 +248,8 @@ def discover(
     in inspection order. ``max_inspect`` (default ``5 * limit``) bounds the
     number of ``meta/info.json`` fetches. With ``one_per_owner`` a second
     dataset from the same account is rejected, since it is most likely the
-    same physical arm recorded twice.
+    same physical arm recorded twice; ``pinned`` datasets come first and are
+    exempt (the two demo datasets are different arms of one organisation).
     """
     if limit < 1:
         raise ValueError("limit must be >= 1")
@@ -247,14 +259,19 @@ def discover(
     get_info = fetch_info or globals()["fetch_info"]
     get_size = fetch_size or (lambda rid: fetch_data_bytes(rid, api))
 
+    hits = search()
+    downloads_of = dict(hits)
+    order = [(rid, downloads_of.get(rid, 0)) for rid in pinned]
+    order += [(rid, dl) for rid, dl in hits if rid not in set(pinned)]
+
     out: list[Candidate] = []
     owners: dict[str, str] = {}
     n_accepted = 0
-    for repo_id, downloads in search():
+    for repo_id, downloads in order:
         if n_accepted >= limit or len(out) >= max_inspect:
             break
         owner = repo_id.split("/", 1)[0] if "/" in repo_id else ""
-        if one_per_owner and owner in owners:
+        if one_per_owner and owner in owners and repo_id not in pinned:
             cand = Candidate(repo_id, False, f"same owner as {owners[owner]} (likely the same arm)", downloads=downloads)
         else:
             try:

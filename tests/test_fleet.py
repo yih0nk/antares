@@ -122,7 +122,7 @@ def test_discover_filters_and_records_reasons():
     }
     sizes = {"erin/huge": fleet.MAX_DATA_BYTES * 3}
     seen = []
-    cands = discover(limit=10, search=fake_hub(infos, sizes)[0], fetch_info=fake_hub(infos, sizes)[1],
+    cands = discover(limit=10, pinned=(), search=fake_hub(infos, sizes)[0], fetch_info=fake_hub(infos, sizes)[1],
                      fetch_size=fake_hub(infos, sizes)[2], on_progress=seen.append)
     assert [c.repo_id for c in cands] == list(infos)
     assert seen == cands
@@ -139,12 +139,12 @@ def test_discover_filters_and_records_reasons():
 def test_discover_stops_at_limit_and_max_inspect():
     infos = {f"u{i}/so101_{i}": info() for i in range(10)}
     search, get_info, get_size = fake_hub(infos)
-    cands = discover(limit=3, search=search, fetch_info=get_info, fetch_size=get_size)
+    cands = discover(limit=3, pinned=(), search=search, fetch_info=get_info, fetch_size=get_size)
     assert len(fleet.accepted(cands)) == 3 and len(cands) == 3
-    cands = discover(limit=10, max_inspect=4, search=search, fetch_info=get_info, fetch_size=get_size)
+    cands = discover(limit=10, max_inspect=4, pinned=(), search=search, fetch_info=get_info, fetch_size=get_size)
     assert len(cands) == 4
     with pytest.raises(ValueError):
-        discover(limit=0, search=search, fetch_info=get_info, fetch_size=get_size)
+        discover(limit=0, pinned=(), search=search, fetch_info=get_info, fetch_size=get_size)
 
 
 def test_discover_size_lookup_failure_is_a_rejection():
@@ -156,7 +156,7 @@ def test_discover_size_lookup_failure_is_a_rejection():
             raise ConnectionError("boom")
         return 10
 
-    cands = discover(limit=5, search=search, fetch_info=get_info, fetch_size=get_size)
+    cands = discover(limit=5, pinned=(), search=search, fetch_info=get_info, fetch_size=get_size)
     assert [c.accepted for c in cands] == [False, True]
     assert "ConnectionError" in cands[0].reason
 
@@ -164,7 +164,7 @@ def test_discover_size_lookup_failure_is_a_rejection():
 def test_discover_allows_several_per_owner_when_asked():
     infos = {"a/x": info(), "a/y": info()}
     search, get_info, get_size = fake_hub(infos)
-    cands = discover(limit=5, one_per_owner=False, search=search, fetch_info=get_info, fetch_size=get_size)
+    cands = discover(limit=5, one_per_owner=False, pinned=(), search=search, fetch_info=get_info, fetch_size=get_size)
     assert all(c.accepted for c in cands)
 
 
@@ -185,3 +185,25 @@ def test_hub_search_merges_sorts_and_skips_gated():
     hits = fleet.hub_search(Api(), search_terms=("so100",), tag_filters=("so100", "so101"))
     assert hits == [("c/z", 9), ("a/x", 5)]
     assert Api.calls == 3
+
+
+def test_check_info_accepts_so_follower_and_rejects_simulated():
+    assert check_info("a/b", info(robot_type="so_follower"), 1).accepted
+    assert not check_info("a/b", info(robot_type="so_sensor_follower"), 1).accepted
+    for rid in ("u/so100_pybullet_pickup", "u/pick-the-block-synthetic-512", "u/0916_isaacsim_so101", "u/so101_bench_sim_v2"):
+        c = check_info(rid, info(), 1)
+        assert not c.accepted and "simulation" in c.reason, rid
+    assert check_info("u/so101_simple_task", info(), 1).accepted  # "simple" is not "sim"
+
+
+def test_discover_pinned_come_first_and_skip_owner_rule():
+    infos = {"org/arm_b": info(), "x/so101": info(), "org/arm_a": info()}
+    search, get_info, get_size = fake_hub(infos)
+    cands = discover(limit=5, pinned=("org/arm_a", "org/arm_b"), search=search,
+                     fetch_info=get_info, fetch_size=get_size)
+    assert [c.repo_id for c in cands] == ["org/arm_a", "org/arm_b", "x/so101"]
+    assert all(c.accepted for c in cands)
+    assert cands[0].downloads == 998  # downloads still come from the Hub listing
+    # a pinned dataset missing from the search is still inspected
+    cands = discover(limit=5, pinned=("ghost/arm",), search=search, fetch_info=get_info, fetch_size=get_size)
+    assert cands[0].repo_id == "ghost/arm" and not cands[0].accepted
