@@ -216,7 +216,13 @@ class Arm:
     # -- parameters ---------------------------------------------------------
 
     def apply(self, params: SimParams) -> None:
-        """Write ``params`` into the compiled model in place (cheap, idempotent)."""
+        """Write ``params`` into the compiled model in place (cheap, idempotent).
+
+        Armature feeds the qpos0-derived constants the compiler precomputes
+        (``dof_M0``, ``dof_invweight0``, which scale the frictionloss and
+        limit constraints), so they are recomputed with ``mj_setConst``; the
+        result is then identical to a model compiled with these values.
+        """
         m = self.model
         m.actuator_gainprm[:, 0] = params.kp
         m.actuator_biasprm[:, 1] = -params.kp
@@ -224,6 +230,7 @@ class Arm:
         m.dof_damping[:] = params.damping
         m.dof_armature[:] = params.armature
         m.dof_frictionloss[:] = params.frictionloss
+        mujoco.mj_setConst(m, self.data)  # ~20 us; uses self.data as scratch
         self.params = params
 
     # -- kinematics ---------------------------------------------------------

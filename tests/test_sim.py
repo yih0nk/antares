@@ -238,6 +238,22 @@ def test_apply_changes_model_arrays(arm):
     np.testing.assert_allclose(m.dof_damping, 0.6)
 
 
+def test_apply_recomputes_derived_constants(arm):
+    """dof_M0 is the diagonal of the qpos0 inertia, which includes armature;
+    apply() must keep it (and dof_invweight0) consistent with the new value."""
+    arm.apply(SimParams())
+    m0 = arm.model.dof_M0.copy()
+    w0 = arm.model.dof_invweight0.copy()
+    try:
+        arm.apply(SimParams(armature=0.028 + 0.01))
+        np.testing.assert_allclose(arm.model.dof_M0, m0 + 0.01, rtol=1e-9)
+        assert np.all(arm.model.dof_invweight0 < w0)  # heavier dofs -> smaller inverse weight
+    finally:
+        arm.apply(SimParams())
+    np.testing.assert_allclose(arm.model.dof_M0, m0)
+    np.testing.assert_allclose(arm.model.dof_invweight0, w0)
+
+
 def test_softer_gain_tracks_worse(arm):
     start = np.array([0.0, -50.0, 40.0, 20.0, 0.0, 5.0])
     target = np.array([40.0, -20.0, 60.0, 0.0, 30.0, 40.0])
