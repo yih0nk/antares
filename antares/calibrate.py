@@ -1,11 +1,16 @@
 """Fit simulator parameters to one robot's logs with CMA-ES.
 
-The search space is six scalars of :class:`antares.sim.SimParams`
+The shared search space is six scalars of :class:`antares.sim.SimParams`
 (actuator gain and velocity gain, joint damping, armature, friction loss,
-action latency). CMA-ES works on a normalized ``[0, 1]^6`` vector; the
-physical parameters live on log scales because they span orders of
-magnitude, and latency is an integer number of frames encoded as a
-continuous dimension and rounded on decode.
+action latency), one value for all joints. CMA-ES works on a normalized
+``[0, 1]^n`` vector; the physical parameters live on log scales because
+they span orders of magnitude, and latency is an integer number of frames
+encoded as a continuous dimension and rounded on decode.
+
+A per-joint fit refines that: every STS3215 carries a different load, so
+after the shared fit a second CMA-ES stage searches one value per joint
+for each parameter (plus the actuator force limit), warm-started from the
+shared optimum with a smaller step size. See :func:`calibrate`.
 
 The objective is the overall tracking error (degrees) of the simulated
 replay against the real trajectory, aggregated over the training episodes.
@@ -21,57 +26,20 @@ from __future__ import annotations
 
 import math
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 
 from antares.data import Episode
+from antares.sim import JOINTS, SimParams
 
 # --------------------------------------------------------------------------
-# Lazy imports of modules written in parallel. The fallbacks only exist so
-# that this module can be imported and tested with a fake simulate function
-# before antares.sim / antares.gap land; they mirror the agreed contract.
+# Lazy import of antares.gap, written in parallel. The fallbacks only exist
+# so that this module can be imported and tested with a fake simulate
+# function before antares.gap lands; they mirror the agreed contract.
 # --------------------------------------------------------------------------
-
-try:  # pragma: no cover - which branch runs depends on sibling modules
-    from antares.sim import SimParams
-except (ImportError, AttributeError):  # pragma: no cover
-
-    @dataclass(frozen=True)
-    class SimParams:  # type: ignore[no-redef]
-        kp: float = 998.22
-        kv: float = 2.731
-        damping: float = 0.6
-        armature: float = 0.028
-        frictionloss: float = 0.052
-        latency_frames: int = 0
-
-        def to_dict(self) -> dict:
-            return {
-                "kp": float(self.kp),
-                "kv": float(self.kv),
-                "damping": float(self.damping),
-                "armature": float(self.armature),
-                "frictionloss": float(self.frictionloss),
-                "latency_frames": int(self.latency_frames),
-            }
-
-        @classmethod
-        def from_dict(cls, d: dict) -> "SimParams":
-            return cls(
-                kp=float(d["kp"]),
-                kv=float(d["kv"]),
-                damping=float(d["damping"]),
-                armature=float(d["armature"]),
-                frictionloss=float(d["frictionloss"]),
-                latency_frames=int(d["latency_frames"]),
-            )
-
-        @classmethod
-        def default(cls) -> "SimParams":
-            return cls()
 
 
 def _gap_functions() -> tuple[Callable[..., Any], Callable[..., Any]]:
@@ -85,14 +53,7 @@ def _gap_functions() -> tuple[Callable[..., Any], Callable[..., Any]]:
         return _fallback_tracking_error, _fallback_aggregate
 
 
-_FALLBACK_JOINTS = (
-    "shoulder_pan",
-    "shoulder_lift",
-    "elbow_flex",
-    "wrist_flex",
-    "wrist_roll",
-    "gripper",
-)
+_FALLBACK_JOINTS = JOINTS
 
 
 @dataclass(frozen=True)
@@ -150,7 +111,8 @@ def _fallback_aggregate(reports: Sequence[Any]) -> _FallbackGapReport:
 # --------------------------------------------------------------------------
 
 #: name -> (lo, hi, scale). ``log`` dims are searched in log10, ``int`` dims
-#: are continuous during the search and rounded on decode.
+#: are continuous during the search and rounded on decode. This is the
+#: shared space: one value of each parameter for all six joints.
 SPACE: dict[str, tuple[float, float, str]] = {
     "kp": (50.0, 5000.0, "log"),
     "kv": (0.1, 50.0, "log"),
@@ -158,6 +120,14 @@ SPACE: dict[str, tuple[float, float, str]] = {
     "armature": (1e-4, 0.5, "log"),
     "frictionloss": (1e-3, 2.0, "log"),
     "latency_frames": (0.0, 5.0, "int"),
+}
+
+#: Bounds for the per-joint refinement: the shared parameters plus the
+#: actuator force limit (N*m; the STS3215 stalls near 3). Each is searched
+#: once per joint, so the space has ``6 * len(PER_JOINT_SPACE)`` dims.
+PER_JOINT_SPACE: dict[str, tuple[float, float, str]] = {
+    **SPACE,
+    "forcerange": (0.5, 30.0, "log"),
 }
 
 DIMS: tuple[str, ...] = tuple(SPACE)
@@ -185,21 +155,84 @@ def _from_unit(x: float, lo: float, hi: float, scale: str) -> float | int:
     return float(v)
 
 
-def encode(params: SimParams) -> np.ndarray:
-    """Map parameters to the normalized ``[0, 1]^6`` search vector (clipped)."""
-    return np.array(
-        [_to_unit(getattr(params, name), *SPACE[name]) for name in DIMS],
-        dtype=np.float64,
-    )
+@dataclass(frozen=True)
+class SearchSpace:
+    """Normalized ``[0, 1]^n`` coordinates over a set of :class:`SimParams` fields.
+
+    ``shared`` searches one value per field; ``per_joint`` searches one value
+    per field *and* joint (field-major: ``kp.shoulder_pan, kp.shoulder_lift,
+    ...``). Fields outside ``bounds`` are not searched and keep whatever the
+    ``base`` parameters passed to :meth:`decode` hold.
+    """
+
+    bounds: Mapping[str, tuple[float, float, str]]
+    per_joint: bool = False
+
+    @property
+    def name(self) -> str:
+        return "per_joint" if self.per_joint else "shared"
+
+    @property
+    def fields(self) -> tuple[str, ...]:
+        return tuple(self.bounds)
+
+    @property
+    def dims(self) -> tuple[str, ...]:
+        if not self.per_joint:
+            return self.fields
+        return tuple(f"{f}.{j}" for f in self.fields for j in JOINTS)
+
+    @property
+    def n_dims(self) -> int:
+        return len(self.fields) * (len(JOINTS) if self.per_joint else 1)
+
+    def encode(self, params: SimParams) -> np.ndarray:
+        """Parameters -> search vector, clipped to the bounds.
+
+        Shared spaces take a per-joint field's mean (in search coordinates)
+        when a per-joint parameter is passed; per-joint spaces broadcast
+        scalars.
+        """
+        out = []
+        for f in self.fields:
+            b = self.bounds[f]
+            if self.per_joint:
+                out.extend(_to_unit(v, *b) for v in params.per_joint(f))
+            elif params.is_per_joint(f):
+                out.append(float(np.mean([_to_unit(v, *b) for v in params.per_joint(f)])))
+            else:
+                out.append(_to_unit(getattr(params, f), *b))
+        return np.asarray(out, dtype=np.float64)
+
+    def decode(self, x: np.ndarray, base: SimParams | None = None) -> SimParams:
+        """Search vector -> parameters; fields not searched come from ``base``."""
+        x = np.asarray(x, dtype=np.float64).reshape(-1)
+        if x.shape[0] != self.n_dims:
+            raise ValueError(f"expected {self.n_dims} dims, got {x.shape[0]}")
+        kwargs: dict[str, Any] = {}
+        if self.per_joint:
+            nj = len(JOINTS)
+            for i, f in enumerate(self.fields):
+                b = self.bounds[f]
+                kwargs[f] = tuple(_from_unit(v, *b) for v in x[i * nj : (i + 1) * nj])
+        else:
+            for i, f in enumerate(self.fields):
+                kwargs[f] = _from_unit(x[i], *self.bounds[f])
+        return (base or SimParams()).replace(**kwargs)
 
 
-def decode(x: np.ndarray) -> SimParams:
+SHARED = SearchSpace(SPACE, per_joint=False)
+PER_JOINT = SearchSpace(PER_JOINT_SPACE, per_joint=True)
+
+
+def encode(params: SimParams, space: SearchSpace = SHARED) -> np.ndarray:
+    """Map parameters to the normalized search vector (clipped); shared by default."""
+    return space.encode(params)
+
+
+def decode(x: np.ndarray, space: SearchSpace = SHARED, base: SimParams | None = None) -> SimParams:
     """Map a search vector back to parameters, clipping to the bounds."""
-    x = np.asarray(x, dtype=np.float64).reshape(-1)
-    if x.shape[0] != N_DIMS:
-        raise ValueError(f"expected {N_DIMS} dims, got {x.shape[0]}")
-    kwargs = {name: _from_unit(x[i], *SPACE[name]) for i, name in enumerate(DIMS)}
-    return SimParams(**kwargs)
+    return space.decode(x, base)
 
 
 # --------------------------------------------------------------------------
@@ -218,6 +251,7 @@ class ProgressEvent:
     best_params: SimParams
     best_per_joint_deg: dict[str, float]
     elapsed_s: float
+    stage: str = "shared"  # which search space produced this evaluation
 
     def to_dict(self) -> dict:
         return {
@@ -228,6 +262,7 @@ class ProgressEvent:
             "best_params": self.best_params.to_dict(),
             "best_per_joint_deg": {k: _json_float(v) for k, v in self.best_per_joint_deg.items()},
             "elapsed_s": float(self.elapsed_s),
+            "stage": self.stage,
         }
 
 
@@ -246,6 +281,11 @@ class CalibrationResult:
     elapsed_s: float
     train_episodes: list[int] = field(default_factory=list)
     eval_episodes: list[int] = field(default_factory=list)
+    #: ``"shared"`` or ``"per_joint"``: the space the final parameters live in.
+    space: str = "shared"
+    #: One entry per CMA-ES stage run, in order: ``{"name", "n_evaluations",
+    #: "train_score", "params"}`` with the stage's best on the training set.
+    stages: list[dict] = field(default_factory=list)
 
     @property
     def improvement(self) -> float:
@@ -270,6 +310,16 @@ class CalibrationResult:
             "train_episodes": [int(i) for i in self.train_episodes],
             "eval_episodes": [int(i) for i in self.eval_episodes],
             "improvement": _json_float(self.improvement),
+            "space": self.space,
+            "stages": [
+                {
+                    "name": str(s["name"]),
+                    "n_evaluations": int(s["n_evaluations"]),
+                    "train_score": _json_float(s["train_score"]),
+                    "params": dict(s["params"]),
+                }
+                for s in self.stages
+            ],
         }
 
     @classmethod
@@ -288,6 +338,16 @@ class CalibrationResult:
             elapsed_s=float(d.get("elapsed_s", 0.0)),
             train_episodes=[int(i) for i in d.get("train_episodes", [])],
             eval_episodes=[int(i) for i in d.get("eval_episodes", [])],
+            space=str(d.get("space", "shared")),
+            stages=[
+                {
+                    "name": str(s["name"]),
+                    "n_evaluations": int(s["n_evaluations"]),
+                    "train_score": _parse_float(s["train_score"]),
+                    "params": dict(s["params"]),
+                }
+                for s in d.get("stages", [])
+            ],
         )
 
 
@@ -373,6 +433,117 @@ def _evaluate_candidates(
 # --------------------------------------------------------------------------
 
 
+#: Default evaluation budget of the per-joint refinement stage. At ~0.12 s
+#: per evaluation (20 episodes) this is about a minute.
+PER_JOINT_MAX_EVALUATIONS = 600
+
+#: Default CMA-ES step size (in unit coordinates) of the per-joint stage. It
+#: starts at the shared optimum, so it only needs to move locally: on both
+#: demo datasets 0.05 beat 0.1 clearly within 600 evaluations, and 0.2
+#: never produced a candidate better than the warm start.
+PER_JOINT_SIGMA0 = 0.05
+
+
+@dataclass
+class _Fit:
+    """Mutable state shared by the CMA-ES stages of one :func:`calibrate` call."""
+
+    train: list[Episode]
+    simulate: SimulateFn
+    on_progress: Callable[[ProgressEvent], None] | None
+    stop: Callable[[], bool]
+    t0: float
+    best_params: SimParams
+    best_score: float
+    best_report: Any
+    evaluations: int = 0
+    generation: int = 0
+    history: list[tuple[int, float]] = field(default_factory=list)
+    stages: list[dict] = field(default_factory=list)
+
+    def record(self, params: SimParams, report: Any, value: float, stage: str) -> None:
+        """Account one evaluated candidate: best-so-far, history, progress."""
+        if value < self.best_score:
+            self.best_params, self.best_score, self.best_report = params, value, report
+        self.history.append((self.evaluations, self.best_score))
+        if self.on_progress is not None:
+            self.on_progress(
+                ProgressEvent(
+                    evaluation=self.evaluations,
+                    generation=self.generation,
+                    candidate_score=value,
+                    best_score=self.best_score,
+                    best_params=self.best_params,
+                    best_per_joint_deg=_per_joint(self.best_report),
+                    elapsed_s=time.perf_counter() - self.t0,
+                    stage=stage,
+                )
+            )
+
+    def run_stage(
+        self,
+        space: SearchSpace,
+        start: SimParams,
+        max_evaluations: int,
+        sigma0: float,
+        popsize: int | None,
+        seed: int,
+    ) -> bool:
+        """One CMA-ES run in ``space`` from ``start``. Returns False if cancelled.
+
+        A partially evaluated last generation is never fed back to CMA-ES,
+        but its candidates still count toward the best.
+        """
+        import cma
+
+        opts: dict[str, Any] = {
+            "bounds": [0.0, 1.0],
+            # cma treats seed 0 as "use the clock"; derive a positive seed instead.
+            "seed": int(np.random.default_rng(seed).integers(1, 2**31 - 1)),
+            "verbose": -9,
+            "verb_log": 0,
+            "maxfevals": max_evaluations,
+        }
+        if popsize is not None:
+            opts["popsize"] = int(popsize)
+
+        x0 = np.clip(space.encode(start), 1e-3, 1 - 1e-3)
+        es = cma.CMAEvolutionStrategy(x0, sigma0, opts)
+        first_eval = self.evaluations
+        cancelled = False
+
+        while self.evaluations - first_eval < max_evaluations and not es.stop() and not self.stop():
+            self.generation += 1
+            solutions = es.ask()
+            budget = max_evaluations - (self.evaluations - first_eval)
+            candidates = [space.decode(x, base=start) for x in solutions[:budget]]
+
+            values: list[float] = []
+            for i, (params, (report, value)) in enumerate(
+                zip(candidates, _evaluate_candidates(candidates, self.train, self.simulate))
+            ):
+                self.evaluations += 1
+                values.append(value)
+                self.record(params, report, value, space.name)
+                if i + 1 < len(candidates) and self.stop():
+                    cancelled = True
+                    break
+
+            if cancelled or len(values) != len(solutions):
+                break  # partial generation: do not update the distribution
+            es.tell(solutions, values)
+
+        self.stages.append(
+            {
+                "name": space.name,
+                "n_evaluations": self.evaluations - first_eval,
+                "train_score": self.best_score,
+                "params": self.best_params.to_dict(),
+            }
+        )
+        return not cancelled and not self.stop()
+
+
 def calibrate(
     train: Sequence[Episode],
     eval: Sequence[Episode],
@@ -384,18 +555,27 @@ def calibrate(
     seed: int = 0,
     on_progress: Callable[[ProgressEvent], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
+    per_joint: bool = False,
+    per_joint_max_evaluations: int = PER_JOINT_MAX_EVALUATIONS,
+    per_joint_sigma0: float = PER_JOINT_SIGMA0,
+    per_joint_popsize: int | None = None,
 ) -> CalibrationResult:
     """Fit :class:`SimParams` to ``train`` episodes; report on ``eval`` episodes.
 
+    The shared stage searches :data:`SPACE` (one value per parameter for all
+    joints) for ``max_evaluations`` evaluations. With ``per_joint=True`` a
+    second stage then searches :data:`PER_JOINT_SPACE` (one value per
+    parameter *and* joint, plus the force limit) for another
+    ``per_joint_max_evaluations`` evaluations, warm-started from the shared
+    optimum with step size ``per_joint_sigma0``; ``per_joint_popsize`` of
+    None takes CMA-ES's default for that dimensionality.
+
     ``on_progress`` fires once per objective evaluation, starting with the
     starting point as evaluation 0, so it is called ``n_evaluations + 1``
-    times. ``should_stop`` is polled between evaluations; when it returns
-    True the fit ends early and the best parameters found so far are
-    returned. A partially evaluated last generation is never fed back to
-    CMA-ES, but its candidates still count toward the best.
+    times; each event names its ``stage``. ``should_stop`` is polled between
+    evaluations; when it returns True the fit ends early (skipping any later
+    stage) and the best parameters found so far are returned.
     """
-    import cma
-
     t0 = time.perf_counter()
     train = list(train)
     eval = list(eval)
@@ -406,78 +586,33 @@ def calibrate(
     if start is None:
         start = SimParams()
 
-    stop = should_stop or (lambda: False)
-    history: list[tuple[int, float]] = []
-    evaluations = 0
-    generation = 0
-
     # Evaluation 0: the starting point.
     start_report, start_score = _safe_score(start, train, simulate)
-    best_params, best_score, best_report = start, start_score, start_report
-    history.append((0, best_score))
-    if on_progress is not None:
-        on_progress(
-            ProgressEvent(
-                evaluation=0,
-                generation=0,
-                candidate_score=start_score,
-                best_score=best_score,
-                best_params=best_params,
-                best_per_joint_deg=_per_joint(best_report),
-                elapsed_s=time.perf_counter() - t0,
-            )
+    fit = _Fit(
+        train=train,
+        simulate=simulate,
+        on_progress=on_progress,
+        stop=should_stop or (lambda: False),
+        t0=t0,
+        best_params=start,
+        best_score=start_score,
+        best_report=start_report,
+    )
+    fit.record(start, start_report, start_score, SHARED.name)
+
+    finished = fit.run_stage(SHARED, start, max_evaluations, sigma0, popsize, seed)
+    if per_joint and finished:
+        # Refine from the shared optimum; a fresh seed so the two stages do
+        # not share a random stream.
+        fit.run_stage(
+            PER_JOINT,
+            fit.best_params,
+            per_joint_max_evaluations,
+            per_joint_sigma0,
+            per_joint_popsize,
+            seed + 1,
         )
-
-    opts: dict[str, Any] = {
-        "bounds": [0.0, 1.0],
-        # cma treats seed 0 as "use the clock"; derive a positive seed instead.
-        "seed": int(np.random.default_rng(seed).integers(1, 2**31 - 1)),
-        "verbose": -9,
-        "verb_log": 0,
-        "maxfevals": max_evaluations,
-    }
-    if popsize is not None:
-        opts["popsize"] = int(popsize)
-
-    x0 = np.clip(encode(start), 1e-3, 1 - 1e-3)
-    es = cma.CMAEvolutionStrategy(x0, sigma0, opts)
-
-    while evaluations < max_evaluations and not es.stop() and not stop():
-        generation += 1
-        solutions = es.ask()
-        budget = max_evaluations - evaluations
-        batch = solutions[:budget]
-        candidates = [decode(x) for x in batch]
-
-        values: list[float] = []
-        cancelled = False
-        for i, (params, (report, value)) in enumerate(
-            zip(candidates, _evaluate_candidates(candidates, train, simulate))
-        ):
-            evaluations += 1
-            values.append(value)
-            if value < best_score:
-                best_params, best_score, best_report = params, value, report
-            history.append((evaluations, best_score))
-            if on_progress is not None:
-                on_progress(
-                    ProgressEvent(
-                        evaluation=evaluations,
-                        generation=generation,
-                        candidate_score=value,
-                        best_score=best_score,
-                        best_params=best_params,
-                        best_per_joint_deg=_per_joint(best_report),
-                        elapsed_s=time.perf_counter() - t0,
-                    )
-                )
-            if i + 1 < len(candidates) and stop():
-                cancelled = True
-                break
-
-        if cancelled or len(values) != len(solutions):
-            break  # partial generation: do not update the distribution
-        es.tell(solutions, values)
+    best_params, best_score, best_report = fit.best_params, fit.best_score, fit.best_report
 
     # Held-out evaluation, before and after. With no eval episodes the
     # training reports stand in so the result stays fully populated.
@@ -497,11 +632,13 @@ def calibrate(
         baseline_eval_score=before_score,
         per_joint_before=_per_joint(before_report),
         per_joint_after=_per_joint(after_report),
-        history=history,
-        n_evaluations=evaluations,
+        history=fit.history,
+        n_evaluations=fit.evaluations,
         elapsed_s=time.perf_counter() - t0,
         train_episodes=[ep.index for ep in train],
         eval_episodes=[ep.index for ep in eval],
+        space=PER_JOINT.name if best_params.has_per_joint else SHARED.name,
+        stages=fit.stages,
     )
 
 
@@ -535,8 +672,14 @@ def split_episodes(
 
 __all__ = [
     "SPACE",
+    "PER_JOINT_SPACE",
     "DIMS",
     "PENALTY",
+    "PER_JOINT_MAX_EVALUATIONS",
+    "PER_JOINT_SIGMA0",
+    "SearchSpace",
+    "SHARED",
+    "PER_JOINT",
     "SimulateFn",
     "ProgressEvent",
     "CalibrationResult",

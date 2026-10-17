@@ -548,6 +548,36 @@ def test_calibrate_cancel(client, fakes, monkeypatch):
     assert client.get(f"/api/calibrate/{job_id}").json()["cancelled"] is True
 
 
+def test_calibrate_per_joint_option(client, fakes, monkeypatch):
+    calls = []
+
+    def recording_calibrate(train, eval, start=None, **kw):
+        calls.append(kw)
+        return FakeResult(params=FakeParams(kp=9), baseline=start or FakeParams())
+
+    monkeypatch.setattr(sys.modules["antares.calibrate"], "calibrate", recording_calibrate)
+
+    def run(body):
+        job_id = client.post("/api/calibrate", json=body).json()["job_id"]
+        with client.stream("GET", f"/api/calibrate/{job_id}/events") as resp:
+            events = sse_events(resp)
+        assert events[-1]["type"] == "done", events[-1]
+        return events
+
+    # default: shared only, and the per-joint kwargs are not even passed
+    run({"dataset": FAKE_DS, "name": "shared-a"})
+    assert "per_joint" not in calls[-1]
+    assert client.get("/api/locks").json()[0]["space"] == "shared"
+
+    # opt in: both per-joint kwargs reach calibrate
+    run({"dataset": FAKE_DS, "name": "pj-a", "per_joint": True, "per_joint_max_evaluations": 42})
+    assert calls[-1]["per_joint"] is True and calls[-1]["per_joint_max_evaluations"] == 42
+    run({"dataset": FAKE_DS, "per_joint": True})
+    assert calls[-1]["per_joint_max_evaluations"] == 600  # default budget
+
+    assert client.post("/api/calibrate", json={"dataset": FAKE_DS, "per_joint_max_evaluations": 0}).status_code == 422
+
+
 def test_locks_list_get_delete(client, fakes):
     assert client.get("/api/locks").json() == []
     write_lock(fakes, "unit-a", kp=50.0)

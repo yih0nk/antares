@@ -26,6 +26,27 @@ def _joint_table(per_joint: dict, overall: float, title: str = "") -> str:
     return f"{title}\n{out}" if title else out
 
 
+def _fmt(v) -> str:
+    return str(v) if isinstance(v, int) else f"{v:.4g}"
+
+
+def _params_table(params: dict) -> str:
+    """Scalar params on one line; per-joint params as a joints x fields table."""
+    if not any(isinstance(v, list) for v in params.values()):
+        return "params: " + ", ".join(f"{k}={_fmt(v)}" for k, v in params.items())
+    from antares.sim import JOINTS
+
+    names = list(params)
+    rows = []
+    for j, joint in enumerate(JOINTS):
+        row = [joint]
+        for k in names:
+            v = params[k]
+            row.append(_fmt(v[j] if isinstance(v, list) else v))
+        rows.append(row)
+    return "params (per joint):\n" + _table(["joint"] + names, rows)
+
+
 # --------------------------------------------------------------------------
 # commands
 # --------------------------------------------------------------------------
@@ -72,14 +93,18 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
     from antares import server
 
     ds = server.get_dataset(args.repo_id)
-    print(
-        f"calibrating {ds.repo_id}: {args.n_train} train / {args.n_eval} eval episodes, "
-        f"up to {args.max_evaluations} evaluations"
-    )
-    last = {"n": 0}
+    stages = f"up to {args.max_evaluations} shared evaluations"
+    if args.per_joint:
+        stages += f" + {args.per_joint_evaluations} per-joint evaluations"
+    print(f"calibrating {ds.repo_id}: {args.n_train} train / {args.n_eval} eval episodes, {stages}")
+    last = {"n": 0, "stage": None}
 
     def on_progress(ev) -> None:
         n = ev.evaluation
+        stage = getattr(ev, "stage", "shared")
+        if stage != last["stage"]:
+            last["stage"] = stage
+            print(f"  -- {stage} stage --", flush=True)
         if n - last["n"] >= 10 or n <= 1:
             last["n"] = n
             print(
@@ -96,6 +121,9 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
         max_evaluations=args.max_evaluations,
         seed=args.seed,
         name=args.name,
+        per_joint=args.per_joint,
+        per_joint_max_evaluations=args.per_joint_evaluations,
+        per_joint_sigma0=args.per_joint_sigma0,
         on_progress=on_progress,
     )
     r = result.to_dict()
@@ -115,7 +143,9 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
     print()
     print(_table(["joint", "before (deg)", "after (deg)"], rows))
     print()
-    print("params:", r["params"])
+    print(_params_table(r["params"]))
+    for s in r.get("stages", []):
+        print(f"  {s['name']}: {s['n_evaluations']} evaluations, train {s['train_score']:.3f} deg")
     print(f"{r['n_evaluations']} evaluations in {r['elapsed_s']:.1f}s")
     print(f"saved lock {lock['name']} -> {path}")
     return 0
@@ -352,6 +382,24 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-evaluations", type=int, default=150)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--name", default=None, help="lock name (default: dataset slug)")
+    p.add_argument(
+        "--per-joint",
+        action="store_true",
+        help="after the shared fit, refine one value per joint (plus force limit)",
+    )
+    p.add_argument(
+        "--per-joint-evaluations",
+        type=int,
+        default=600,
+        help="evaluation budget of the per-joint stage (default 600)",
+    )
+    p.add_argument(
+        "--per-joint-sigma0",
+        type=float,
+        default=None,
+        help="CMA-ES step size of the per-joint stage in unit coordinates "
+        "(default 0.05; 0.1 explores more and can win with a budget >= 1200)",
+    )
     p.set_defaults(func=cmd_calibrate)
 
     p = sub.add_parser("cross", help="score locks across datasets (matrix)")

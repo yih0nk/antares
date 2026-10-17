@@ -117,6 +117,70 @@ def test_dr_prints_ranges_table(monkeypatch, capsys, tmp_path):
     assert seen["lock"] == "unit-a" and seen["name"] == "unit-a-wide"
 
 
+class _Result:
+    def __init__(self, d):
+        self._d = d
+
+    def to_dict(self):
+        return self._d
+
+
+def _result_dict(params, stages):
+    return {
+        "params": params,
+        "per_joint_before": {j: 3.0 for j in JOINTS},
+        "per_joint_after": {j: 1.0 for j in JOINTS},
+        "baseline_eval_score": 3.0,
+        "eval_score": 1.0,
+        "n_evaluations": sum(s["n_evaluations"] for s in stages),
+        "elapsed_s": 1.5,
+        "stages": stages,
+    }
+
+
+@pytest.mark.parametrize("per_joint", [False, True])
+def test_calibrate_cli_per_joint_flag(monkeypatch, capsys, tmp_path, per_joint):
+    from antares import server
+
+    calls = []
+    scalar = {"kp": 100.0, "kv": 1.0, "damping": 0.1, "armature": 0.01, "frictionloss": 0.01,
+              "latency_frames": 2, "forcerange": 2.94}
+    stages = [{"name": "shared", "n_evaluations": 5, "train_score": 1.2, "params": scalar}]
+    params = scalar
+    if per_joint:
+        params = {**scalar, "kp": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0], "latency_frames": [0, 1, 2, 3, 4, 5]}
+        stages.append({"name": "per_joint", "n_evaluations": 7, "train_score": 1.1, "params": params})
+
+    def fake_run(ds, **kw):
+        calls.append(kw)
+        for i in range(3):
+            kw["on_progress"](type("Ev", (), {"evaluation": i, "generation": 1, "candidate_score": 2.0,
+                                                "best_score": 2.0, "elapsed_s": 0.1,
+                                                "stage": "per_joint" if (per_joint and i == 2) else "shared"})())
+        return _Result(_result_dict(params, stages)), {"name": "x"}, tmp_path / "x.lock.json"
+
+    monkeypatch.setattr(server, "_DATASETS", {"fake/robot": _dataset()})
+    monkeypatch.setattr(server, "run_calibration", fake_run)
+    argv = ["calibrate", "fake/robot", "--max-evaluations", "5"]
+    if per_joint:
+        argv += ["--per-joint", "--per-joint-evaluations", "7", "--per-joint-sigma0", "0.1"]
+    assert cli.main(argv) == 0
+    out = capsys.readouterr().out
+    assert calls[0]["per_joint"] is per_joint
+    assert calls[0]["per_joint_max_evaluations"] == (7 if per_joint else 600)
+    assert calls[0]["per_joint_sigma0"] == (0.1 if per_joint else None)
+    assert "-- shared stage --" in out
+    assert "shared: 5 evaluations" in out
+    assert "saved lock x" in out
+    if per_joint:
+        assert "+ 7 per-joint evaluations" in out and "-- per_joint stage --" in out
+        assert "per_joint: 7 evaluations" in out
+        assert "params (per joint)" in out and "elbow_flex" in out and "30" in out
+    else:
+        assert "per-joint evaluations" not in out and "-- per_joint stage --" not in out
+        assert "params: kp=100" in out
+
+
 def test_replay_prints_table(monkeypatch, capsys):
     from antares import server
 

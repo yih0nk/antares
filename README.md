@@ -176,6 +176,79 @@ the job streams `progress`, `fit` and `done` events at
 `/api/jobs/{id}/events` like calibration does. `GET /api/dr` lists saved
 ranges, `GET /api/dr/{name}` returns one.
 
+## Per-joint calibration
+
+The shared fit gives all six servos the same gain, damping, armature,
+friction and latency. That leaves the elbow as the worst joint on both demo
+arms (SO-101 held-out: 2.03° vs under 1° for the others), which makes
+sense: each STS3215 carries a different load, from the shoulder lifting the
+whole arm to the wrist lifting almost nothing.
+
+Every `SimParams` field can therefore be a scalar *or* a tuple of six
+per-joint values, and `forcerange` (the actuator force limit, MJCF default
+2.94 N·m) joins the parameters. Scalar locks written before this change
+load and replay unchanged.
+
+`antares calibrate --per-joint` runs a two-stage fit:
+
+1. the shared fit as before (6 dims, `--max-evaluations`, default 150), then
+2. a per-joint refinement over 42 dims (7 parameters × 6 joints), started
+   from the shared optimum with a small CMA-ES step
+   (`--per-joint-sigma0`, default 0.05) for `--per-joint-evaluations`
+   more evaluations (default 600, about a minute at 20 training episodes).
+
+```sh
+.venv/bin/antares calibrate lerobot/svla_so101_pickplace --per-joint \
+    --max-evaluations 200 --per-joint-evaluations 1200 --per-joint-sigma0 0.1 \
+    --name svla_so101_pickplace_perjoint
+```
+
+The HTTP API takes the same options (`per_joint`, `per_joint_max_evaluations`
+in `POST /api/calibrate`); `per_joint` defaults to false so the live demo
+stays fast.
+Progress events carry a `stage` field (`shared` / `per_joint`) and the
+result records a per-stage summary.
+
+Held-out tracking RMSE in degrees, `split_episodes(…, 20, 10, seed=0)`,
+gripper excluded from the overall score. The per-joint locks are
+`locks/*_perjoint.lock.json`; their shared stage reproduces the shipped
+shared locks exactly.
+
+| | SO-101 default | SO-101 shared | SO-101 per-joint | SO-100 default | SO-100 shared | SO-100 per-joint |
+|---|---|---|---|---|---|---|
+| **overall** | 6.007 | 1.054 | **0.812** | 2.744 | 0.791 | **0.530** |
+| shoulder_pan | 8.049 | 0.349 | 0.363 | 3.224 | 0.433 | 0.320 |
+| shoulder_lift | 6.832 | 0.968 | 1.034 | 3.540 | 0.829 | 0.709 |
+| elbow_flex | 5.355 | 2.031 | **1.316** | 2.516 | 1.322 | **0.601** |
+| wrist_flex | 3.797 | 0.476 | 0.455 | 1.955 | 0.432 | 0.408 |
+| wrist_roll | 5.085 | 0.387 | 0.390 | 2.136 | 0.567 | 0.520 |
+| evaluations | – | 200 | 200 + 1200 | – | 150 | 150 + 1200 |
+| per-joint sigma0 | – | – | 0.1 | – | – | 0.05 |
+
+The per-joint stage is sensitive to its step size and budget. Held-out
+score after refining each shared optimum, CMA-ES's default population
+of 15, seed 0:
+
+| sigma0 | SO-101, 600 evals | SO-101, 1200 | SO-100, 600 | SO-100, 1200 |
+|---|---|---|---|---|
+| 0.03 | 0.990 | – | – | – |
+| 0.05 | 0.991 | 0.974 | 0.552 | **0.530** |
+| 0.1 | 1.034 | **0.812** | 0.643 | 0.555 |
+| 0.2 | 1.054 (never beat the start) | – | – | – |
+
+A small step improves quickly but can settle in a nearby basin; on SO-101
+sigma0 0.1 sits flat for ~500 evaluations, then finds a much better one.
+The default (0.05, 600 evaluations) is the safe choice within a minute;
+for a lock worth keeping, try both step sizes with a 1200 budget.
+
+The per-joint locks also transfer across the two arms better than the
+shared ones (`antares cross`, held-out splits): the SO-100 per-joint lock
+scores 1.014° on SO-101 against 1.138° for the SO-100 shared lock, and the
+SO-101 per-joint lock 0.769° on SO-100 against 0.846°.
+
+Caveat: the gripper is not scored (object contacts are not logged), so its
+per-joint parameters are unconstrained and should not be read as physical.
+
 ## Layout
 
 | Path | What |
