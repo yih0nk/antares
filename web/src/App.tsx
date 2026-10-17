@@ -332,6 +332,7 @@ export default function App() {
   const shownParams = replay?.params ?? null;
   const defaultParams = baseline?.params ?? null;
   const currentDs = datasets.find((d) => d.id === dataset);
+  const clip = `${dataset}#${episode ?? ""}`;
 
   // The trace arrays only change with the replay or the joint, not per frame.
   const traceReal = useMemo(() => baseline?.real_q.map((r) => r[jIndex]) ?? [], [baseline, jIndex]);
@@ -385,8 +386,8 @@ export default function App() {
             <Suspense fallback={null}>
               {/* MuJoCo is z-up; three.js is y-up. */}
               <group rotation={[-Math.PI / 2, 0, 0]}>
-                <Arm geometry={geometry} poses={baseline?.real_poses ?? null} playhead={playhead} material={realMaterial} />
-                <Arm geometry={geometry} poses={replay?.sim_poses ?? null} playhead={playhead} material={ghostMaterial} />
+                <Arm geometry={geometry} poses={baseline?.real_poses ?? null} clip={clip} playhead={playhead} material={realMaterial} />
+                <Arm geometry={geometry} poses={replay?.sim_poses ?? null} clip={clip} playhead={playhead} material={ghostMaterial} />
               </group>
             </Suspense>
           )}
