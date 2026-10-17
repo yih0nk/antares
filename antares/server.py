@@ -505,7 +505,8 @@ def replay(
 class ReplayRequest(BaseModel):
     dataset: str
     episode: int
-    params: dict[str, float]
+    # A value is a scalar or a per-joint list of 6, as SimParams.from_dict accepts.
+    params: dict[str, float | list[float]]
 
 
 @app.post("/api/replay")
