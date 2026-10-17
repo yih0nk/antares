@@ -586,3 +586,15 @@ def test_arm_lock_serialises_sim_access(client, fakes):
     for t in ths:
         t.join()
     assert len(seen) == 4
+
+
+def test_generic_job_routes_alias_calibrate(client, fakes):
+    job_id = client.post("/api/calibrate", json={"dataset": FAKE_DS, "n_train": 4, "n_eval": 2}).json()["job_id"]
+    with client.stream("GET", f"/api/jobs/{job_id}/events") as resp:
+        events = sse_events(resp)
+    assert events[-1]["type"] == "done"
+    st = client.get(f"/api/jobs/{job_id}").json()
+    assert st["kind"] == "calibrate" and st["status"] == "done"
+    assert st == client.get(f"/api/calibrate/{job_id}").json()
+    assert client.post(f"/api/jobs/{job_id}/cancel").json()["cancelled"] is True
+    assert client.get("/api/jobs/nope").status_code == 404

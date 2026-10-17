@@ -275,8 +275,11 @@ def build_lock(ds: Dataset, train: list, result, name: str | None):
 
 @dataclass
 class Job:
+    """A background fit streamed to the UI; ``kind`` is ``calibrate`` or ``drift``."""
+
     id: str
     dataset: str
+    kind: str = "calibrate"
     status: str = "running"  # running | done | error
     events: list[dict] = field(default_factory=list)
     cond: threading.Condition = field(default_factory=threading.Condition)
@@ -327,6 +330,40 @@ def get_job(job_id: str) -> Job:
     if job is None:
         raise HTTPException(status_code=404, detail="no such job")
     return job
+
+
+def start_job(kind: str, dataset: str, worker: Callable[..., None], *args: Any) -> Job:
+    """Register a Job and run ``worker(job, *args)`` on a daemon thread."""
+    job = Job(id=uuid.uuid4().hex[:12], dataset=dataset, kind=kind)
+    with _JOBS_LOCK:
+        _JOBS[job.id] = job
+    threading.Thread(target=worker, args=(job, *args), daemon=True).start()
+    return job
+
+
+def job_status_dict(job: Job) -> dict:
+    with job.cond:
+        out: dict[str, Any] = {
+            "job_id": job.id,
+            "kind": job.kind,
+            "dataset": job.dataset,
+            "status": job.status,
+            "events_count": len(job.events),
+            "cancelled": job.stop.is_set(),
+        }
+        if job.result is not None:
+            out["result"] = job.result
+        if job.lock is not None:
+            out["lock"] = job.lock
+        if job.error is not None:
+            out["error"] = job.error
+    return out
+
+
+def job_fail(job: Job, e: Exception) -> None:
+    msg = e.detail if isinstance(e, HTTPException) else f"{type(e).__name__}: {e}"
+    job.push({"type": "error", "message": str(msg)})
+    job.finish("error", error=str(msg))
 
 
 def run_calibration(
@@ -383,9 +420,7 @@ def _job_worker(job: Job, req: "CalibrateRequest") -> None:
         job.push({"type": "done", "lock": lock, "result": result_d})
         job.finish("done", result=result_d, lock=lock)
     except Exception as e:  # noqa: BLE001 - report to the client
-        msg = e.detail if isinstance(e, HTTPException) else f"{type(e).__name__}: {e}"
-        job.push({"type": "error", "message": str(msg)})
-        job.finish("error", error=str(msg))
+        job_fail(job, e)
 
 
 def cross_matrix(
@@ -515,42 +550,29 @@ class CalibrateRequest(BaseModel):
 def calibrate_start(req: CalibrateRequest) -> dict:
     if req.name is not None:
         _lock_path(req.name)  # validate early
-    job = Job(id=uuid.uuid4().hex[:12], dataset=req.dataset)
-    with _JOBS_LOCK:
-        _JOBS[job.id] = job
-    threading.Thread(target=_job_worker, args=(job, req), daemon=True).start()
+    job = start_job("calibrate", req.dataset, _job_worker, req)
     return {"job_id": job.id}
 
 
+# Job routes are shared by every background fit; the ``/api/calibrate/...``
+# spellings are kept for the frontend.
+@app.get("/api/jobs/{job_id}")
 @app.get("/api/calibrate/{job_id}")
-def calibrate_status(job_id: str) -> dict:
-    job = get_job(job_id)
-    with job.cond:
-        out: dict[str, Any] = {
-            "job_id": job.id,
-            "dataset": job.dataset,
-            "status": job.status,
-            "events_count": len(job.events),
-            "cancelled": job.stop.is_set(),
-        }
-        if job.result is not None:
-            out["result"] = job.result
-        if job.lock is not None:
-            out["lock"] = job.lock
-        if job.error is not None:
-            out["error"] = job.error
-    return out
+def job_status(job_id: str) -> dict:
+    return job_status_dict(get_job(job_id))
 
 
+@app.post("/api/jobs/{job_id}/cancel")
 @app.post("/api/calibrate/{job_id}/cancel")
-def calibrate_cancel(job_id: str) -> dict:
+def job_cancel(job_id: str) -> dict:
     job = get_job(job_id)
     job.stop.set()
     return {"job_id": job.id, "cancelled": True, "status": job.status}
 
 
+@app.get("/api/jobs/{job_id}/events")
 @app.get("/api/calibrate/{job_id}/events")
-def calibrate_events(job_id: str):
+def job_events(job_id: str):
     job = get_job(job_id)
 
     def gen() -> Iterator[bytes]:
