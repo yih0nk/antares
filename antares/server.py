@@ -6,7 +6,8 @@ Heavy modules (``antares.sim``, ``antares.gap``, ``antares.calibrate``,
 so the app imports quickly and tests can stub them through ``sys.modules``.
 
 The pure helpers (``replay_episode``, ``run_calibration``, ``run_drift``,
-``cross_matrix``, lock and drift-scan file I/O) are shared with the CLI.
+``run_dr``, ``cross_matrix``, lock / drift-scan / DR-range file I/O) are
+shared with the CLI.
 """
 
 from __future__ import annotations
@@ -53,6 +54,9 @@ try:  # prefer the lock module's defaults when it exists
     del _lock_mod
 except Exception:  # module not written yet
     pass
+
+# Domain-randomization ranges live next to the locks as ``<name>.dr.json``.
+DR_SUFFIX = ".dr.json"
 
 # Override for the STL directory (tests). None means MODEL_PATH.parent / "assets".
 MESH_DIR: Path | None = None
@@ -400,7 +404,50 @@ def _drift_worker(job: Job, req: "DriftRequest") -> None:
 
 
 # --------------------------------------------------------------------------
-# Calibration jobs
+# Domain-randomization ranges (JSON files next to the locks)
+# --------------------------------------------------------------------------
+
+
+def _dr_path(name: str) -> Path:
+    if not _NAME_RE.match(name) or ".." in name:
+        raise HTTPException(status_code=400, detail="invalid ranges name")
+    return Path(LOCK_DIR) / f"{name}{DR_SUFFIX}"
+
+
+def list_dr_dicts() -> list[dict]:
+    d = Path(LOCK_DIR)
+    if not d.is_dir():
+        return []
+    out = []
+    for p in sorted(d.glob(f"*{DR_SUFFIX}")):
+        try:
+            out.append(json.loads(p.read_text()))
+        except (OSError, ValueError):
+            continue
+    out.sort(key=lambda r: str(r.get("created_at", "")), reverse=True)
+    return out
+
+
+def load_dr_dict(name: str) -> dict:
+    p = _dr_path(name)
+    if not p.is_file():
+        raise HTTPException(status_code=404, detail=f"no ranges named {name!r}")
+    return json.loads(p.read_text())
+
+
+def dr_summary(ranges: dict) -> dict:
+    """Listing row: provenance plus lo/hi per parameter, without the samples."""
+    keys = ("name", "dataset", "lock", "n_fits", "n_train", "max_evaluations", "seed", "created_at")
+    out = {k: ranges.get(k) for k in keys}
+    out["ranges"] = {
+        p: {k: r.get(k) for k in ("nominal", "lo", "hi", "scale")}
+        for p, r in (ranges.get("ranges") or {}).items()
+    }
+    return out
+
+
+# --------------------------------------------------------------------------
+# Background jobs (calibration, DR ranges, drift scans) streamed over SSE
 # --------------------------------------------------------------------------
 
 
@@ -410,7 +457,7 @@ class Job:
 
     id: str
     dataset: str
-    kind: str = "calibrate"
+    kind: str = "calibrate"  # calibrate | dr | drift
     status: str = "running"  # running | done | error
     events: list[dict] = field(default_factory=list)
     cond: threading.Condition = field(default_factory=threading.Condition)
@@ -552,6 +599,103 @@ def _job_worker(job: Job, req: "CalibrateRequest") -> None:
         job.finish("done", result=result_d, lock=lock)
     except Exception as e:  # noqa: BLE001 - report to the client
         job_fail(job, e)
+
+
+def run_dr(
+    ds: Dataset,
+    lock_name: str,
+    *,
+    n_fits: int = 8,
+    n_train: int = 12,
+    max_evaluations: int = 60,
+    seed: int = 0,
+    name: str | None = None,
+    on_progress: Callable[[Any], None] | None = None,
+    on_fit: Callable[[int, Any], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
+) -> tuple[Any, dict, Path]:
+    """Derive DR ranges for ``lock_name`` from ``ds``; save and return
+    ``(DRRanges, ranges dict, path)``.
+
+    The bootstrap pool is every episode the lock did not hold out, so the
+    lock's eval split stays clean for validating the ranges afterwards.
+    """
+    from antares.dr import DRRanges, bootstrap_fits
+
+    if n_fits < 1:
+        raise HTTPException(status_code=400, detail="n_fits must be >= 1")
+    if n_train < 1:
+        raise HTTPException(status_code=400, detail="n_train must be >= 1")
+    name = name or lock_name
+    _dr_path(name)  # validate the name before spending time fitting
+    lock = load_lock_dict(lock_name)
+    params = params_from_dict(lock["params"])
+    held_out = set((lock.get("result") or {}).get("eval_episodes") or [])
+    pool = [ep for ep in ds.episodes if ep.index not in held_out]
+    if not pool:
+        raise HTTPException(status_code=400, detail="lock holds out every episode of the dataset")
+
+    results = bootstrap_fits(
+        pool,
+        params,
+        n_fits=n_fits,
+        n_train=n_train,
+        max_evaluations=max_evaluations,
+        seed=seed,
+        on_progress=on_progress,
+        should_stop=should_stop,
+        on_fit=on_fit,
+    )
+    if not results:
+        raise HTTPException(status_code=409, detail="cancelled before the first fit finished")
+    ranges = DRRanges.from_fits(results, params, dataset=ds.repo_id, lock=lock_name, name=name, seed=seed)
+    path = ranges.save(_dr_path(name))
+    return ranges, ranges.to_dict(), path
+
+
+def _dr_job_worker(job: Job, req: "DRRequest") -> None:
+    try:
+        ds = get_dataset(req.dataset)
+
+        def on_progress(ev) -> None:
+            job.push({"type": "progress", **ev.to_dict()})
+
+        def on_fit(i: int, result) -> None:
+            job.push(
+                {
+                    "type": "fit",
+                    "fit": i,
+                    "n_fits": req.n_fits,
+                    "params": result.params.to_dict(),
+                    "train_score": result.to_dict()["train_score"],
+                    "train_episodes": [int(e) for e in result.train_episodes],
+                }
+            )
+
+        _, ranges, _ = run_dr(
+            ds,
+            req.lock or _slug(req.dataset),
+            n_fits=req.n_fits,
+            n_train=req.n_train,
+            max_evaluations=req.max_evaluations,
+            seed=req.seed,
+            name=req.name,
+            on_progress=on_progress,
+            on_fit=on_fit,
+            should_stop=job.stop.is_set,
+        )
+        job.push({"type": "done", "ranges": ranges})
+        job.finish("done", result=ranges)
+    except Exception as e:  # noqa: BLE001 - report to the client
+        msg = e.detail if isinstance(e, HTTPException) else f"{type(e).__name__}: {e}"
+        job.push({"type": "error", "message": str(msg)})
+        job.finish("error", error=str(msg))
+
+
+def _slug(repo_id: str) -> str:
+    from antares.lock import slug
+
+    return slug(repo_id)
 
 
 def cross_matrix(
@@ -738,6 +882,42 @@ def job_events(job_id: str):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+class DRRequest(BaseModel):
+    dataset: str
+    lock: str | None = None  # default: the lock named after the dataset
+    n_fits: int = Field(8, ge=1)
+    n_train: int = Field(12, ge=1)
+    max_evaluations: int = Field(60, ge=1)
+    seed: int = 0
+    name: str | None = None  # default: the lock name
+
+
+@app.post("/api/dr")
+def dr_start(req: DRRequest) -> dict:
+    lock_name = req.lock or _slug(req.dataset)
+    load_lock_dict(lock_name)  # 404 now rather than as a job error
+    _dr_path(req.name or lock_name)
+    job = Job(id=uuid.uuid4().hex[:12], dataset=req.dataset, kind="dr")
+    with _JOBS_LOCK:
+        _JOBS[job.id] = job
+    threading.Thread(target=_dr_job_worker, args=(job, req), daemon=True).start()
+    return {
+        "job_id": job.id,
+        "status_url": f"/api/jobs/{job.id}",
+        "events_url": f"/api/jobs/{job.id}/events",
+    }
+
+
+@app.get("/api/dr")
+def dr_list() -> list[dict]:
+    return [dr_summary(r) for r in list_dr_dicts()]
+
+
+@app.get("/api/dr/{name}")
+def dr_get(name: str) -> dict:
+    return load_dr_dict(name)
 
 
 @app.get("/api/locks")
