@@ -662,18 +662,30 @@ def scan(
 
 #: Parameters searched on a log scale; their spread is measured in log10.
 LOG_PARAMS: tuple[str, ...] = ("kp", "kv", "damping", "armature", "frictionloss")
-STAT_PARAMS: tuple[str, ...] = LOG_PARAMS + ("latency_frames", "latency_ms")
+#: Per-robot scores that are summarised alongside the parameters.
+SCORE_FIELDS: tuple[str, ...] = ("baseline_eval", "calibrated_eval", "improvement")
+STAT_PARAMS: tuple[str, ...] = LOG_PARAMS + ("latency_frames", "latency_ms") + SCORE_FIELDS
+_LOG_SCALE = frozenset(LOG_PARAMS) | {"baseline_eval", "calibrated_eval"}
 OUTLIER_Z = 2.5
+
+
+def _value_of(r: RobotEntry, param: str) -> float | None:
+    if param == "latency_ms":
+        v = r.latency_ms
+    elif param in SCORE_FIELDS:
+        v = getattr(r, param)
+    else:
+        v = r.params.get(param)
+    return None if v is None else float(v)
 
 
 def _param_values(robots: Sequence[RobotEntry], param: str) -> list[tuple[str, float]]:
     out = []
     for r in robots:
-        v = r.latency_ms if param == "latency_ms" else r.params.get(param)
+        v = _value_of(r, param)
         if v is None:
             continue
-        v = float(v)
-        if math.isfinite(v) and (param not in LOG_PARAMS or v > 0):
+        if math.isfinite(v) and (param not in _LOG_SCALE or v > 0):
             out.append((r.dataset, v))
     return out
 
@@ -714,7 +726,7 @@ def fleet_stats(robots: Sequence[RobotEntry], params: Sequence[str] = STAT_PARAM
             continue
         names = [n for n, _ in pairs]
         x = np.array([v for _, v in pairs], dtype=np.float64)
-        log = param in LOG_PARAMS
+        log = param in _LOG_SCALE
         q25, med, q75 = np.percentile(x, [25, 50, 75])
         z = robust_z(np.log10(x) if log else x)
         stats[param] = {
@@ -735,10 +747,10 @@ def find_outliers(
     robots: Sequence[RobotEntry],
     stats: dict[str, dict[str, Any]],
     threshold: float = OUTLIER_Z,
-    params: Sequence[str] = LOG_PARAMS + ("latency_frames",),
+    params: Sequence[str] = LOG_PARAMS + ("latency_frames",) + SCORE_FIELDS,
 ) -> list[dict[str, Any]]:
-    """Robots whose fitted value sits more than ``threshold`` robust sigmas
-    from the fleet median, most extreme first."""
+    """Robots whose fitted value (or score) sits more than ``threshold``
+    robust sigmas from the fleet median, most extreme first."""
     by_name = {r.dataset: r for r in robots}
     out = []
     for param in params:
@@ -750,16 +762,19 @@ def find_outliers(
             if z is None or abs(z) < threshold:
                 continue
             r = by_name.get(name)
-            value = r.params.get(param) if r is not None else None
+            value = _value_of(r, param) if r is not None else None
             if value is None or med is None:
                 continue
             if param == "latency_frames":
-                fps = r.fps if r is not None else 0.0
-                ms = f" ({1000 * value / fps:.0f} ms)" if fps else ""
+                ms = f" ({1000 * value / r.fps:.0f} ms)" if r.fps else ""
                 note = f"latency {int(value)} frames{ms} vs fleet median {med:g}"
+            elif param == "improvement":
+                note = f"{value:.0%} of the held-out gap closed vs fleet median {med:.0%}"
+            elif param in SCORE_FIELDS:
+                note = f"{param.replace('_', ' ')} {value:.3g} deg vs fleet median {med:.3g} deg"
             else:
                 ratio = value / med if med else float("inf")
-                note = f"{param} {value:.3g} is {ratio:.1f}x the fleet median {med:.3g}"
+                note = f"{param} {value:.3g} is {ratio:.2g}x the fleet median {med:.3g}"
             out.append({"dataset": name, "param": param, "z": round(float(z), 2), "value": value, "median": med, "note": note})
     out.sort(key=lambda o: -abs(o["z"]))
     return out
@@ -776,12 +791,20 @@ def pick_cross_robots(
     prefer: Sequence[str] = PINNED,
     n_train: int = 20,
     n_eval: int = 10,
+    exclude: Iterable[str] = (),
 ) -> list[RobotEntry]:
     """Up to ``n`` robots for the cross matrix: the preferred (demo) ones
     first, then others in scan order. Only robots with enough episodes for
     the full ``n_train + n_eval`` split qualify, so every row uses the same
-    held-out split the lock was scored on."""
-    ok = [r for r in robots if r.n_episodes >= n_train + n_eval and math.isfinite(r.calibrated_eval)]
+    held-out split the lock was scored on. ``exclude`` names robots to skip
+    (the scan passes its score outliers, so one arm the sim cannot explain
+    does not dominate the matrix)."""
+    skip = set(exclude)
+    ok = [
+        r
+        for r in robots
+        if r.n_episodes >= n_train + n_eval and math.isfinite(r.calibrated_eval) and r.dataset not in skip
+    ]
     chosen = [r for p in prefer for r in ok if r.dataset == p]
     for r in ok:
         if len(chosen) >= n:
@@ -804,6 +827,8 @@ def cross_summary(matrix: dict[str, Any]) -> dict[str, Any]:
     diag = np.diag(locks)
     off = locks[off_mask]
     ratio = lambda a: _json_float(a / diag.mean()) if diag.mean() > 0 else None  # noqa: E731
+    safe_diag = np.where(diag > 0, diag, np.nan)
+    row_off = np.array([locks[i, off_mask[i]].mean() for i in range(k)]) if k > 1 else np.full(k, np.nan)
     return {
         "n": k,
         "mean_diagonal": _json_float(diag.mean()),
@@ -811,6 +836,9 @@ def cross_summary(matrix: dict[str, Any]) -> dict[str, Any]:
         "mean_default": _json_float(default.mean()),
         "off_over_diagonal": ratio(off.mean()) if off.size else None,
         "default_over_diagonal": ratio(default.mean()),
+        # per-robot ratios, then the median: robust to one robot with a huge gap
+        "median_row_off_over_diagonal": _json_float(np.nanmedian(row_off / safe_diag)) if off.size else None,
+        "median_row_default_over_diagonal": _json_float(np.nanmedian(default / safe_diag)),
         # share of (robot, other lock) pairs where the other robot's lock still beats the default
         "other_lock_beats_default": _json_float(np.mean((locks < default[:, None])[off_mask])) if off.size else None,
         # robots whose own lock is the best of all locks on their eval split
@@ -848,9 +876,10 @@ def fleet_cross(
     load: Callable[[str], Dataset] | None = None,
     cross_fn: Callable[..., dict[str, Any]] | None = None,
     retries: int = 3,
+    exclude: Iterable[str] = (),
 ) -> dict[str, Any] | None:
     """Score each chosen robot's lock on every chosen robot's eval split."""
-    chosen = pick_cross_robots(robots, n=n, prefer=prefer, n_train=n_train, n_eval=n_eval)
+    chosen = pick_cross_robots(robots, n=n, prefer=prefer, n_train=n_train, n_eval=n_eval, exclude=exclude)
     if len(chosen) < 2:
         return None
     if load is None:
@@ -875,11 +904,16 @@ def finalize(
     cross_fn: Callable[..., dict[str, Any]] | None = None,
     retries: int = 3,
 ) -> FleetReport:
-    """Fill ``stats``, ``outliers`` and (``cross_n`` > 1) ``cross`` in place."""
+    """Fill ``stats``, ``outliers`` and (``cross_n`` > 1) ``cross`` in place.
+
+    Robots flagged as outliers on their scores (an arm the simulator cannot
+    explain, or a dataset whose commands equal its measured state) are kept
+    out of the cross matrix unless they are preferred."""
     report.stats = fleet_stats(report.robots)
     report.outliers = find_outliers(report.robots, report.stats)
     if cross_n > 1 and report.robots:
         s = report.settings
+        score_outliers = {o["dataset"] for o in report.outliers if o["param"] in SCORE_FIELDS}
         report.cross = fleet_cross(
             report.robots,
             lock_dir=lock_dir,
@@ -891,6 +925,7 @@ def finalize(
             load=load,
             cross_fn=cross_fn,
             retries=retries,
+            exclude=score_outliers - set(cross_prefer),
         )
     return report
 
@@ -918,6 +953,7 @@ __all__ = [
     "plan_split",
     "scan",
     "LOG_PARAMS",
+    "SCORE_FIELDS",
     "STAT_PARAMS",
     "OUTLIER_Z",
     "robust_z",

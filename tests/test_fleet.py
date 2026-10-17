@@ -392,10 +392,11 @@ def test_scan_rejects_wrong_joints_and_unusable_episodes(tmp_path):
     assert rep.robots[0].dataset == "b/y" and rep.robots[0].n_episodes == 12  # the two unusable episodes dropped
 
 
-def entry(dataset, n_episodes=50, fps=30.0, **params):
+def entry(dataset, n_episodes=50, fps=30.0, baseline=5.0, calibrated=2.0, **params):
     p = {"kp": 1000.0, "kv": 3.0, "damping": 0.5, "armature": 0.03, "frictionloss": 0.05, "latency_frames": 2}
     p.update(params)
-    return RobotEntry(dataset, "so101", n_episodes, fps, 20, 10, 5.0, 2.0, 0.6, p, fleet.lock_name(dataset))
+    improvement = 1 - calibrated / baseline
+    return RobotEntry(dataset, "so101", n_episodes, fps, 20, 10, baseline, calibrated, improvement, p, fleet.lock_name(dataset))
 
 
 def test_robust_z():
@@ -435,11 +436,39 @@ def test_fleet_stats_and_outliers():
     assert fleet.fleet_stats([]) == {}
 
 
+def test_score_outliers_are_flagged_and_kept_out_of_the_cross_matrix(tmp_path):
+    robots = [entry(f"u{i}/arm", baseline=3.0 + 0.3 * i, calibrated=1.0 + 0.15 * i) for i in range(8)]
+    weird = RobotEntry("odd/arm", "so101", 50, 30.0, 20, 10, 60.0, 40.0, 0.33, robots[0].params, "odd__arm")
+    flat = RobotEntry("flat/arm", "so101", 50, 30.0, 20, 10, 0.1, 0.03, 0.7, robots[0].params, "flat__arm")
+    robots += [weird, flat]
+    stats = fleet.fleet_stats(robots)
+    assert stats["baseline_eval"]["scale"] == "log" and stats["improvement"]["scale"] == "linear"
+    outliers = fleet.find_outliers(robots, stats)
+    flagged = {(o["dataset"], o["param"]) for o in outliers}
+    assert ("odd/arm", "baseline_eval") in flagged and ("flat/arm", "baseline_eval") in flagged
+    assert ("odd/arm", "calibrated_eval") in flagged and ("flat/arm", "calibrated_eval") in flagged
+    note = next(o["note"] for o in outliers if o["dataset"] == "odd/arm" and o["param"] == "baseline_eval")
+    assert "baseline eval 60 deg vs fleet median" in note
+    note = next(o["note"] for o in outliers if o["param"] == "improvement")
+    assert "% of the held-out gap closed" in note
+
+    def cross_fn(dss, locks, n_train, n_eval, seed, lock_dir):
+        k = len(dss)
+        return {"rows": [d.repo_id for d in dss], "cols": list(locks) + ["default"],
+                "scores": [[1.0 if i == j else 2.0 for j in range(k)] + [3.0] for i in range(k)], "per_joint": []}
+
+    rep = FleetReport("", "", {"n_train": 20, "n_eval": 10, "seed": 0}, robots=list(reversed(robots)))
+    fleet.finalize(rep, lock_dir=tmp_path, cross_n=4, load=lambda rid: make_dataset(rid, n=30), cross_fn=cross_fn)
+    assert rep.cross["rows"] == ["u7/arm", "u6/arm", "u5/arm", "u4/arm"]  # odd and flat skipped
+
+
 def test_pick_cross_robots_prefers_demo_and_needs_full_split():
     robots = [entry("a/x"), entry("b/y", n_episodes=29), entry("lerobot/svla_so100_pickplace"), entry("c/z"), entry("d/w")]
     chosen = fleet.pick_cross_robots(robots, n=3, prefer=fleet.PINNED)
     assert [r.dataset for r in chosen] == ["lerobot/svla_so100_pickplace", "a/x", "c/z"]
     assert len(fleet.pick_cross_robots(robots, n=10)) == 4  # b/y cannot take the 20 + 10 split
+    chosen = fleet.pick_cross_robots(robots, n=3, prefer=fleet.PINNED, exclude={"a/x"})
+    assert [r.dataset for r in chosen] == ["lerobot/svla_so100_pickplace", "c/z", "d/w"]
 
 
 def test_cross_summary():
@@ -452,6 +481,9 @@ def test_cross_summary():
     assert s["off_over_diagonal"] == pytest.approx(3.0) and s["default_over_diagonal"] == pytest.approx(10 / 3)
     assert s["other_lock_beats_default"] == pytest.approx(3 / 6)
     assert s["own_lock_is_best"] == 3
+    # per-row ratios: a 2.5/1, b 3.5/1, c 3/1 -> median 3; default: 4, 4, 2 -> median 4
+    assert s["median_row_off_over_diagonal"] == pytest.approx(3.0)
+    assert s["median_row_default_over_diagonal"] == pytest.approx(4.0)
     with pytest.raises(ValueError):
         fleet.cross_summary({"rows": ["a"], "scores": [[1.0]]})
 
