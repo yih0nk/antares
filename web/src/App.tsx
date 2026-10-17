@@ -66,7 +66,9 @@ function Driver({
   const last = useRef(-1);
   useFrame((_, dt) => {
     if (frames < 2) return;
-    if (playing) playhead.frame = (playhead.frame + Math.min(dt, 0.1) * fps * speed) % frames;
+    // Cap dt only against long stalls (a backgrounded tab), so slow renders
+    // still play back in real time.
+    if (playing) playhead.frame = (playhead.frame + Math.min(dt, 0.5) * fps * speed) % frames;
     const f = Math.floor(playhead.frame);
     if (f !== last.current) {
       last.current = f;
