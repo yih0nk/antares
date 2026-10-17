@@ -11,6 +11,7 @@ import {
   type JobEvent,
   type LockSummary,
   type Params,
+  type ParamValue,
   type ProgressEvent,
   type Replay,
 } from "./api";
@@ -39,11 +40,29 @@ type Calibration = {
 
 const deg = (v: number | null | undefined, digits = 2) => (v == null || !isFinite(v) ? "--" : `${v.toFixed(digits)}°`);
 
-function fmtParam(k: keyof Params, v: number) {
+function fmtScalar(k: keyof Params, v: number) {
   if (k === "latency_frames") return `${Math.round(v)} fr`;
   if (Math.abs(v) >= 100) return v.toFixed(1);
   if (Math.abs(v) >= 1) return v.toFixed(3);
   return v.toFixed(4);
+}
+
+// A per-joint value shows as its range across the six joints.
+function fmtParam(k: keyof Params, v: ParamValue) {
+  if (!Array.isArray(v)) return fmtScalar(k, v);
+  const lo = Math.min(...v);
+  const hi = Math.max(...v);
+  return lo === hi ? fmtScalar(k, lo) : `${fmtScalar(k, lo)}–${fmtScalar(k, hi)}`;
+}
+
+function sameParam(a: ParamValue, b: ParamValue) {
+  const av = Array.isArray(a) ? a : [a];
+  const bv = Array.isArray(b) ? b : [b];
+  const n = Math.max(av.length, bv.length);
+  for (let i = 0; i < n; i++) {
+    if (Math.abs(av[i % av.length] - bv[i % bv.length]) > 1e-9) return false;
+  }
+  return true;
 }
 
 // Advances the shared playhead inside the render loop so playback never
@@ -530,7 +549,7 @@ export default function App() {
                   <tr key={k}>
                     <td>{k}</td>
                     <td>{fmtParam(k, defaultParams[k])}</td>
-                    <td className={Math.abs(shownParams[k] - defaultParams[k]) > 1e-9 ? "changed" : ""}>
+                    <td className={sameParam(shownParams[k], defaultParams[k]) ? "" : "changed"}>
                       {fmtParam(k, shownParams[k])}
                     </td>
                   </tr>

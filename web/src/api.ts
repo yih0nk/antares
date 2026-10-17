@@ -1,13 +1,16 @@
 // Thin client for the antares API (antares/server.py). Angles are degrees,
 // poses are MuJoCo world-frame [x, y, z, qw, qx, qy, qz] per body.
 
+// A parameter is one shared value or, for a per-joint lock, one value per joint.
+export type ParamValue = number | number[];
+
 export type Params = {
-  kp: number;
-  kv: number;
-  damping: number;
-  armature: number;
-  frictionloss: number;
-  latency_frames: number;
+  kp: ParamValue;
+  kv: ParamValue;
+  damping: ParamValue;
+  armature: ParamValue;
+  frictionloss: ParamValue;
+  latency_frames: ParamValue;
 };
 
 export type DatasetInfo = {
