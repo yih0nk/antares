@@ -123,6 +123,7 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
         name=args.name,
         per_joint=args.per_joint,
         per_joint_max_evaluations=args.per_joint_evaluations,
+        per_joint_sigma0=args.per_joint_sigma0,
         on_progress=on_progress,
     )
     r = result.to_dict()
@@ -239,6 +240,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=600,
         help="evaluation budget of the per-joint stage (default 600)",
+    )
+    p.add_argument(
+        "--per-joint-sigma0",
+        type=float,
+        default=None,
+        help="CMA-ES step size of the per-joint stage in unit coordinates "
+        "(default 0.05; 0.1 explores more and can win with a budget >= 1200)",
     )
     p.set_defaults(func=cmd_calibrate)
 

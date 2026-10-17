@@ -124,11 +124,12 @@ def test_calibrate_cli_per_joint_flag(monkeypatch, capsys, tmp_path, per_joint):
     monkeypatch.setattr(server, "run_calibration", fake_run)
     argv = ["calibrate", "fake/robot", "--max-evaluations", "5"]
     if per_joint:
-        argv += ["--per-joint", "--per-joint-evaluations", "7"]
+        argv += ["--per-joint", "--per-joint-evaluations", "7", "--per-joint-sigma0", "0.1"]
     assert cli.main(argv) == 0
     out = capsys.readouterr().out
     assert calls[0]["per_joint"] is per_joint
     assert calls[0]["per_joint_max_evaluations"] == (7 if per_joint else 600)
+    assert calls[0]["per_joint_sigma0"] == (0.1 if per_joint else None)
     assert "-- shared stage --" in out
     assert "shared: 5 evaluations" in out
     assert "saved lock x" in out

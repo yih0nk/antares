@@ -340,13 +340,14 @@ def run_calibration(
     name: str | None = None,
     per_joint: bool = False,
     per_joint_max_evaluations: int = 600,
+    per_joint_sigma0: float | None = None,
     on_progress: Callable[[Any], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
 ) -> tuple[Any, dict, Path]:
     """Calibrate on ``ds``, save a lock, return (CalibrationResult, lock dict, path).
 
     ``per_joint`` adds the per-joint refinement stage after the shared fit,
-    with its own evaluation budget.
+    with its own evaluation budget and (optionally) CMA-ES step size.
     """
     from antares.calibrate import calibrate, split_episodes
 
@@ -358,6 +359,8 @@ def run_calibration(
     extra: dict[str, Any] = {}
     if per_joint:
         extra = {"per_joint": True, "per_joint_max_evaluations": int(per_joint_max_evaluations)}
+        if per_joint_sigma0 is not None:
+            extra["per_joint_sigma0"] = float(per_joint_sigma0)
     result = calibrate(
         train,
         eval_,
