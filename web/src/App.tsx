@@ -890,6 +890,13 @@ export default function App() {
           <button className="icon" onClick={() => setPlaying((p) => !p)} disabled={!frames} aria-label={playing ? "Pause" : "Play"}>
             {playing ? "❚❚" : "▶"}
           </button>
+          <div className="speeds">
+            {SPEEDS.map((s) => (
+              <button key={s} className={s === speed ? "on" : ""} onClick={() => setSpeed(s)}>
+                {s}×
+              </button>
+            ))}
+          </div>
           <select
             className="picker"
             value={episode ?? ""}
@@ -912,13 +919,6 @@ export default function App() {
             |real − sim| <i className="swatch contact" /> contact <i className="swatch anomaly" /> anomaly{" "}
             <i className="swatch grasp" /> gripper closed
           </span>
-          <div className="speeds">
-            {SPEEDS.map((s) => (
-              <button key={s} className={s === speed ? "on" : ""} onClick={() => setSpeed(s)}>
-                {s}×
-              </button>
-            ))}
-          </div>
         </div>
         {baseline && (
           <>
