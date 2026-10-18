@@ -1,0 +1,382 @@
+{
+  "summary": {
+    "nominal": {
+      "raw": {
+        "mean_deg": 3.2661199901066365,
+        "median_deg": 3.0384957789919564,
+        "worst_arm_deg": 6.445650218065713,
+        "elbow_deg": 3.754669298219143,
+        "seed_range_deg": [
+          3.2661199901066365,
+          3.2661199901066365
+        ],
+        "n": 100
+      },
+      "shift_fleet_mean_3": {
+        "mean_deg": 0.8846060912274509,
+        "median_deg": 0.8297299402577513,
+        "worst_arm_deg": 1.6443983390672252,
+        "elbow_deg": 1.0286842365825963,
+        "seed_range_deg": [
+          0.8846060912274509,
+          0.8846060912274509
+        ],
+        "n": 100
+      },
+      "shift_own_latency": {
+        "mean_deg": 0.7290402088763301,
+        "median_deg": 0.5521169462586311,
+        "worst_arm_deg": 1.6443983390672252,
+        "elbow_deg": 0.8922544656042125,
+        "seed_range_deg": [
+          0.7290402088763301,
+          0.7290402088763301
+        ],
+        "n": 100
+      },
+      "ilc_own_model": {
+        "mean_deg": 0.0959263144624323,
+        "median_deg": 0.05266916945385191,
+        "worst_arm_deg": 0.21989246348192726,
+        "elbow_deg": 0.06904235245623222,
+        "seed_range_deg": [
+          0.0959263144624323,
+          0.0959263144624323
+        ],
+        "n": 100
+      },
+      "learned_default": {
+        "mean_deg": 2.1214474223985356,
+        "median_deg": 1.890176462769768,
+        "worst_arm_deg": 4.174438682425476,
+        "elbow_deg": 2.445275232439423,
+        "seed_range_deg": [
+          1.81345166844578,
+          2.3100257446285513
+        ],
+        "n": 300
+      },
+      "learned_default_dr30": {
+        "mean_deg": 2.408074637710676,
+        "median_deg": 2.1548223977470125,
+        "worst_arm_deg": 4.768046575474569,
+        "elbow_deg": 2.7685121698790613,
+        "seed_range_deg": [
+          2.1688156315268485,
+          2.654004590438486
+        ],
+        "n": 300
+      },
+      "learned_lock": {
+        "mean_deg": 3.168652047386932,
+        "median_deg": 0.5699635076086749,
+        "worst_arm_deg": 21.372578821908682,
+        "elbow_deg": 3.7530852410989133,
+        "seed_range_deg": [
+          0.6760457104324594,
+          5.981377191787876
+        ],
+        "n": 300
+      },
+      "learned_lock_dr": {
+        "mean_deg": 0.8082432296505143,
+        "median_deg": 0.7500430274144276,
+        "worst_arm_deg": 1.2338422245926772,
+        "elbow_deg": 0.8682293478867568,
+        "seed_range_deg": [
+          0.7619432414565753,
+          0.8870013805675941
+        ],
+        "n": 300
+      },
+      "learned_fleet": {
+        "mean_deg": 2.2315083186849654,
+        "median_deg": 0.47878247567920884,
+        "worst_arm_deg": 17.17822467700027,
+        "elbow_deg": 2.4385638268695047,
+        "seed_range_deg": [
+          1.0827375300673219,
+          3.3976027449013797
+        ],
+        "n": 300
+      },
+      "learned_fleet_cond": {
+        "mean_deg": 1.4222119847682086,
+        "median_deg": 0.6541867550320463,
+        "worst_arm_deg": 4.921776024577824,
+        "elbow_deg": 1.3723933706741134,
+        "seed_range_deg": [
+          0.6931800893423141,
+          1.8697092623212643
+        ],
+        "n": 300
+      }
+    },
+    "payload": {
+      "raw": {
+        "mean_deg": 3.3160287980478347,
+        "median_deg": 3.061975807650084,
+        "worst_arm_deg": 6.451694265621422,
+        "elbow_deg": 3.8544328939448294,
+        "seed_range_deg": [
+          3.3160287980478347,
+          3.3160287980478347
+        ],
+        "n": 100
+      },
+      "shift_fleet_mean_3": {
+        "mean_deg": 1.0082212952476826,
+        "median_deg": 1.0212200925774884,
+        "worst_arm_deg": 2.291611721522509,
+        "elbow_deg": 1.2279547010336842,
+        "seed_range_deg": [
+          1.0082212952476826,
+          1.0082212952476826
+        ],
+        "n": 100
+      },
+      "shift_own_latency": {
+        "mean_deg": 0.860165814994281,
+        "median_deg": 0.6356729077613739,
+        "worst_arm_deg": 2.291611721522509,
+        "elbow_deg": 1.1099495403192141,
+        "seed_range_deg": [
+          0.860165814994281,
+          0.860165814994281
+        ],
+        "n": 100
+      },
+      "ilc_own_model": {
+        "mean_deg": 0.23881662314711186,
+        "median_deg": 0.18935020108106274,
+        "worst_arm_deg": 0.7859680940668301,
+        "elbow_deg": 0.3095933653483842,
+        "seed_range_deg": [
+          0.23881662314711186,
+          0.23881662314711186
+        ],
+        "n": 100
+      },
+      "learned_default": {
+        "mean_deg": 2.1734270324414093,
+        "median_deg": 1.916855689490061,
+        "worst_arm_deg": 4.177738878782369,
+        "elbow_deg": 2.5463760568376923,
+        "seed_range_deg": [
+          1.8630349658302512,
+          2.3650074535742114
+        ],
+        "n": 300
+      },
+      "learned_default_dr30": {
+        "mean_deg": 2.464274803569822,
+        "median_deg": 2.1629235041295236,
+        "worst_arm_deg": 4.7712245830577675,
+        "elbow_deg": 2.8784970168848205,
+        "seed_range_deg": [
+          2.216829811708786,
+          2.7177358139992096
+        ],
+        "n": 300
+      },
+      "learned_lock": {
+        "mean_deg": 4.1080140655894635,
+        "median_deg": 0.5524314520806111,
+        "worst_arm_deg": 30.264199440219937,
+        "elbow_deg": 5.472910922382699,
+        "seed_range_deg": [
+          1.619968924252997,
+          7.089339421822382
+        ],
+        "n": 300
+      },
+      "learned_lock_dr": {
+        "mean_deg": 2.5630053016024505,
+        "median_deg": 0.7672094528622763,
+        "worst_arm_deg": 18.311312843286363,
+        "elbow_deg": 3.2319745760043865,
+        "seed_range_deg": [
+          1.7882616422697815,
+          3.0049012871115353
+        ],
+        "n": 300
+      },
+      "learned_fleet": {
+        "mean_deg": 2.6873732071983274,
+        "median_deg": 0.5423139938875907,
+        "worst_arm_deg": 20.84867917352388,
+        "elbow_deg": 3.326155024118735,
+        "seed_range_deg": [
+          1.448340826062695,
+          3.618405316798229
+        ],
+        "n": 300
+      },
+      "learned_fleet_cond": {
+        "mean_deg": 1.9987542680930548,
+        "median_deg": 0.7064232822599028,
+        "worst_arm_deg": 9.908022748297045,
+        "elbow_deg": 2.18075111378773,
+        "seed_range_deg": [
+          1.59836103988394,
+          2.611665482586609
+        ],
+        "n": 300
+      }
+    }
+  },
+  "train_arms": [
+    "lerobot__svla_so101_pickplace",
+    "youliangtan__so101-table-cleanup",
+    "hungho77__so101_left_arm_pick_red_cube_into_pot",
+    "codywang__so101_pickup_test",
+    "dharak22__so101-red-cube-3d-print-clean",
+    "apayan__so100_ball8",
+    "deviant65__so101_redcube_20260925_154203",
+    "twu31__so101_hand_blue_napkin",
+    "shubham4413__so100_smolvla_rc",
+    "hjkso1406__eval_smolvla-so101-4tasks-aug-v2_stack_30",
+    "samsitol__so100_pnpacorn",
+    "askel1419__so101_3_cup_no4",
+    "dongdong123123__so101_stack_cubes",
+    "haribot099__so101_60",
+    "rerun__so101-pick-and-place",
+    "lerobot-worldwide-hackathon__190-recyclobots-recyclobots",
+    "jccj__so100_block_in_cup",
+    "okzriku__so101-turn-up-drone",
+    "sgpatil__so101_table_cleanup",
+    "selinaliu1030__egg_0806",
+    "sreetz-nv__so101_teleop_vials_rack_left",
+    "aaaay-0610__so101-task-1",
+    "tshiamor__so101-long-horizon-datasetombo",
+    "sergiov2000__so100_lego_leader_40",
+    "tenkau__so101-stack3blocks",
+    "salza2004__so101_track_rails_depth_2",
+    "shylee__so100_cube",
+    "pranavsaroha__so100_medicine_0605"
+  ],
+  "test_arms": [
+    "lerobot__svla_so100_pickplace",
+    "kmg0620__so101_bomb_pick_place_v1",
+    "blackwhite123__fold_cloth",
+    "samanthalhy__so100_popcorn_2_transport",
+    "witsense-ai__so101_pick_and_place_ring_33",
+    "maxt90__so101-pick-place",
+    "luosyrrrrr__so101_yellow_tape_v1_v21",
+    "jimmypeng02__so100_test_6",
+    "jiamo0912__robocolosseum-so101-black-screwdriver-box-to-table-100episodes",
+    "teamiorobotics__so101_pickplace_v1"
+  ],
+  "settings": {
+    "refs": "/mnt/project-files/antares/policy-transfer/refs.npz",
+    "out": "/home/claude/results/run2",
+    "conditions": [
+      "default",
+      "default_dr30",
+      "lock",
+      "lock_dr",
+      "fleet",
+      "fleet_cond"
+    ],
+    "n_test": 10,
+    "generations": 150,
+    "batch": 32,
+    "eval_refs": 10,
+    "max_len": 600,
+    "seed": 0,
+    "train_seeds": 3,
+    "workers": 4
+  },
+  "train_final": {
+    "default_s0": {
+      "gen": 149,
+      "best": 0.20378071595483643,
+      "mean_theta": 0.2033451991975851
+    },
+    "default_s1": {
+      "gen": 149,
+      "best": 0.20623847232532327,
+      "mean_theta": 0.2017495385227617
+    },
+    "default_s2": {
+      "gen": 149,
+      "best": 0.28897321555227373,
+      "mean_theta": 0.25759497109761914
+    },
+    "default_dr30_s0": {
+      "gen": 149,
+      "best": 0.1304383223853373,
+      "mean_theta": 0.12981617645846721
+    },
+    "default_dr30_s1": {
+      "gen": 149,
+      "best": 0.25034012844314835,
+      "mean_theta": 0.23977049885164897
+    },
+    "default_dr30_s2": {
+      "gen": 149,
+      "best": 0.1448561379024097,
+      "mean_theta": 0.14428236992111595
+    },
+    "lock_s0": {
+      "gen": 149,
+      "best": 0.6038315177990339,
+      "mean_theta": 0.596117749808876
+    },
+    "lock_s1": {
+      "gen": 149,
+      "best": 0.7266980112844529,
+      "mean_theta": 0.7263231299117479
+    },
+    "lock_s2": {
+      "gen": 149,
+      "best": 0.6874693610911657,
+      "mean_theta": 0.7126495818485358
+    },
+    "lock_dr_s0": {
+      "gen": 149,
+      "best": 1.046037396762797,
+      "mean_theta": 1.0465833354893386
+    },
+    "lock_dr_s1": {
+      "gen": 149,
+      "best": 0.9630351408723486,
+      "mean_theta": 0.9653554384234644
+    },
+    "lock_dr_s2": {
+      "gen": 149,
+      "best": 0.9438989540797991,
+      "mean_theta": 0.9425629706157496
+    },
+    "fleet_s0": {
+      "gen": 149,
+      "best": 0.8099708416325365,
+      "mean_theta": 0.8064623360699215
+    },
+    "fleet_s1": {
+      "gen": 149,
+      "best": 0.9075051152212594,
+      "mean_theta": 0.9105996825645994
+    },
+    "fleet_s2": {
+      "gen": 149,
+      "best": 0.7646655618939886,
+      "mean_theta": 0.7356965490217067
+    },
+    "fleet_cond_s0": {
+      "gen": 149,
+      "best": 0.8975928511897304,
+      "mean_theta": 0.8690791253019529
+    },
+    "fleet_cond_s1": {
+      "gen": 149,
+      "best": 0.9896266881010591,
+      "mean_theta": 0.9492472294344878
+    },
+    "fleet_cond_s2": {
+      "gen": 149,
+      "best": 1.022708157455027,
+      "mean_theta": 0.943074590424114
+    }
+  }
+}
