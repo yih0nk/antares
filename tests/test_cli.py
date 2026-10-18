@@ -223,7 +223,8 @@ def test_calibrate_cli_per_joint_flag(monkeypatch, capsys, tmp_path, per_joint):
     assert calls[0]["per_joint"] is per_joint
     assert calls[0]["per_joint_max_evaluations"] == (7 if per_joint else 600)
     assert calls[0]["per_joint_sigma0"] == (0.1 if per_joint else None)
-    assert "-- shared stage --" in out
+    assert calls[0]["n_seeds"] == 1
+    assert "-- shared stage --" in out and "seeds:" not in out
     assert "shared: 5 evaluations" in out
     assert "saved lock x" in out
     if per_joint:
@@ -233,6 +234,42 @@ def test_calibrate_cli_per_joint_flag(monkeypatch, capsys, tmp_path, per_joint):
     else:
         assert "per-joint evaluations" not in out and "-- per_joint stage --" not in out
         assert "params: kp=100" in out
+
+
+def test_calibrate_cli_seeds_flag(monkeypatch, capsys, tmp_path):
+    from antares import server
+
+    calls = []
+    scalar = {"kp": 100.0, "kv": 1.0, "damping": 0.1, "armature": 0.01, "frictionloss": 0.01,
+              "latency_frames": 2, "forcerange": 2.94}
+    stages = [{"name": "shared", "n_evaluations": 5, "train_score": 1.2, "params": scalar, "seed": s}
+              for s in (0, 100, 200)]
+    seeds = {"n": 3, "seeds": [0, 100, 200], "chosen": 1, "eval_scores": [1.3, 1.1, None],
+             "train_scores": [1.2, 1.0, 1.4], "params": [scalar] * 3,
+             "spread": {"kp": {"min": 100.0, "max": 2500.0, "ratio": 25.0},
+                        "latency_frames": {"min": 2.0, "max": 3.0, "range": 1.0}},
+             "pinned": ["latency_frames"]}
+
+    def fake_run(ds, **kw):
+        calls.append(kw)
+        for i, seed in enumerate((0, 0, 1, 2)):
+            kw["on_progress"](type("Ev", (), {"evaluation": i, "generation": 1, "candidate_score": 2.0,
+                                                "best_score": 2.0, "elapsed_s": 0.1, "stage": "shared",
+                                                "seed": seed})())
+        return _Result({**_result_dict(scalar, stages), "seeds": seeds}), {"name": "x"}, tmp_path / "x.lock.json"
+
+    monkeypatch.setattr(server, "_DATASETS", {"fake/robot": _dataset()})
+    monkeypatch.setattr(server, "run_calibration", fake_run)
+    assert cli.main(["calibrate", "fake/robot", "--seeds", "3"]) == 0
+    out = capsys.readouterr().out
+    assert calls[0]["n_seeds"] == 3
+    assert "best of 3 seeds x up to 150 shared evaluations" in out
+    assert "-- shared stage, seed 1/3 --" in out and "-- shared stage, seed 3/3 --" in out
+    assert "shared (seed 100): 5 evaluations" in out
+    assert "seeds: kept seed 100 (2 of 3); held-out 1.300 / 1.100 / - deg" in out
+    assert "pinned (agree across seeds): latency_frames" in out
+    assert "kp x25" in out and "latency_frames +-1 frames" in out
+    assert "not a measurement" in out
 
 
 def _exact_simulate(params, ep):
@@ -848,6 +885,8 @@ def test_fleet_list(tmp_path, capsys):
     assert "alice/so101_a" in out and "4.000" in out and "1.500" in out and "62%" in out
     assert "3 (100 ms)" in out and "1200" in out
     assert "fitted parameters" in out and "kp" in out
+    # single-seed locks: only latency is pinned across the fleet
+    assert "pinned across the fleet's locks: latency_frames (0/2 locks carry seed spread)" in out
     assert "outliers" in out and "+2.7" in out
     assert "cross matrix" in out and "1.67x" in out and "own lock best for 2/2" in out
     assert "carol/broken" in out

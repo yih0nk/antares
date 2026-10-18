@@ -774,6 +774,14 @@ def test_calibrate_per_joint_option(client, fakes, monkeypatch):
     run({"dataset": FAKE_DS, "per_joint": True})
     assert calls[-1]["per_joint_max_evaluations"] == 600  # default budget
 
+    # best of N seeds: forwarded only when asked for, bounded at 10
+    run({"dataset": FAKE_DS, "name": "seeds-a"})
+    assert "n_seeds" not in calls[-1]
+    run({"dataset": FAKE_DS, "name": "seeds-b", "n_seeds": 3})
+    assert calls[-1]["n_seeds"] == 3
+    assert client.post("/api/calibrate", json={"dataset": FAKE_DS, "n_seeds": 0}).status_code == 422
+    assert client.post("/api/calibrate", json={"dataset": FAKE_DS, "n_seeds": 11}).status_code == 422
+
     assert client.post("/api/calibrate", json={"dataset": FAKE_DS, "per_joint_max_evaluations": 0}).status_code == 422
 
 
