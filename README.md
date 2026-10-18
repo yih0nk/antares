@@ -359,7 +359,12 @@ antares calibrate <id> --factors-file examples/factors.toml --factors +link_mass
 An added factor starts as "untested"; run `antares identify` on the lock
 before reading its value as a measurement. Every lock records which factors
 each stage fitted (`"factors"` in the lock JSON), and the viewer's
-calibrate panel has the same checklist.
+calibrate panel has the same checklist. A lock fitted with an added factor
+needs its file loaded wherever the lock is replayed (`check`, `export`,
+`replay`, the server): without it antares refuses to load the lock rather
+than silently replay different physics. A selection the stage cannot fit
+(`+sensor_gain`, which belongs to `--fit-sensor`; `gravity_scale` per
+joint) or that leaves nothing to fit is a usage error.
 
 ## Drift over a session
 

@@ -477,6 +477,8 @@ def _lock_robot(lock: RobotLock):
 def _generic(lock: RobotLock) -> bool:
     """Exported through MjSpec (no shared servo class to bake into)?"""
     return _lock_robot(lock).export_class is None
+
+
 def _fmt_param(v: ParamValue) -> str:
     """A scalar as :func:`_fmt`; a per-joint tuple as ``[v0 v1 ... v5]``."""
     if isinstance(v, (tuple, list)):
@@ -540,8 +542,15 @@ def _base_model_text(robot) -> str:
     return f"MuJoCo Menagerie {m.directory}/{m.xml} at {m.commit[:12]}"
 
 
-def sidecar_dict(lock: RobotLock, model: mujoco.MjModel, model_file: str, meshdir: str) -> dict[str, Any]:
+def sidecar_dict(
+    lock: RobotLock, model: mujoco.MjModel, model_file: str, meshdir: str, unit_map: UnitMap | None = None
+) -> dict[str, Any]:
+    """The ``.antares.json`` next to an export. ``unit_map`` is the fitted
+    arm's map for robots exported through :func:`fitted_spec` (the SO arms
+    read theirs off ``model``)."""
     r = lock.result
+    robot = _lock_robot(lock)
+    generic = robot.export_class is None
     return {
         "format": EXPORT_FORMAT,
         "antares_version": __version__,
@@ -563,20 +572,19 @@ def sidecar_dict(lock: RobotLock, model: mujoco.MjModel, model_file: str, meshdi
             "Command delay in dataset frames (at the dataset's recording rate). "
             "Not representable in MJCF: delay each ctrl by latency_frames frames."
         ),
-        "joints": list(_lock_robot(lock).joints) if _generic(lock) else list(JOINTS),
+        "joints": list(robot.joints) if generic else list(JOINTS),
         "robot": getattr(lock, "robot", None),
         "deadband_note": (
             "Servo position-error deadband in radians (params.deadband, shared or per joint; "
             "0 or absent means none). Not representable in MJCF: command q + shrink(target - q) "
             "with |error| reduced by the band, as antares.sim.Arm.replay does."
         ),
-        "joints": list(JOINTS),
         "command_map": {
-            **CommandMap.from_dict(lock.command_map, _lock_robot(lock).n_joints).to_dict(),
+            **CommandMap.from_dict(lock.command_map, robot.n_joints).to_dict(),
             "note": "Per-arm sensor calibration: correct each logged command as "
             "gain * u + bias (LeRobot units) before the unit map. Identity if the lock has none.",
         },
-        "unit_map": _unit_map_entry(lock, model),
+        "unit_map": _unit_map_entry(robot, model, unit_map),
         "scores": {
             "baseline_eval_score": _score(r.baseline_eval_score),
             "eval_score": _score(r.eval_score),
@@ -589,17 +597,17 @@ def sidecar_dict(lock: RobotLock, model: mujoco.MjModel, model_file: str, meshdi
     }
 
 
-def _unit_map_entry(lock: RobotLock, model: mujoco.MjModel) -> dict[str, Any]:
-    if not _generic(lock):
+def _unit_map_entry(robot: Any, model: mujoco.MjModel, unit_map: UnitMap | None) -> dict[str, Any]:
+    if robot.export_class is not None:
         return {
             **UnitMap.from_model(model).to_dict(),
             "note": "rad = scale * u + offset, clipped to [lo, hi]; u in LeRobot units "
             "(body joints -100..100, gripper 0..100).",
         }
-    robot = _lock_robot(lock)
-    arm = Arm(robot=robot.name)
+    if unit_map is None:  # the arm the spec was fitted on is normally passed in
+        unit_map = Arm(robot=robot.name).unit_map
     return {
-        **arm.unit_map.to_dict(),
+        **unit_map.to_dict(),
         "units": list(robot.unit_kinds()),
         "note": "rad = scale * u + offset, clipped to [lo, hi]; u in the dataset's own units, "
         "one entry per column of 'joints'.",
@@ -629,17 +637,18 @@ def _copy_assets(xml: str, dest: Path) -> list[str]:
     return files
 
 
-def fitted_spec(lock: RobotLock) -> mujoco.MjSpec:
+def fitted_spec(lock: RobotLock, arm: Arm | None = None) -> mujoco.MjSpec:
     """The lock's robot as an :class:`mujoco.MjSpec` carrying the fitted values.
 
     The parameters (added factors included) are applied to a compiled
-    :class:`~antares.sim.Arm`, so the export holds exactly what the fit
-    simulated; each mapped joint gets its damping, armature and friction
-    loss, each actuator its gains, bias and force range, and the global
-    options (timestep, gravity) are copied.
+    :class:`~antares.sim.Arm` (``arm``, or one built for the lock's robot),
+    so the export holds exactly what the fit simulated; each mapped joint
+    gets its damping, armature and friction loss, each actuator its gains,
+    bias and force range, and the global options (timestep, gravity) are
+    copied.
     """
-    robot = _lock_robot(lock)
-    arm = Arm(robot=robot.name)
+    if arm is None:
+        arm = Arm(robot=_lock_robot(lock).name)
     arm.apply(lock.params)
     m = arm.model
     spec = mujoco.MjSpec.from_file(str(arm.model_path))
@@ -666,7 +675,8 @@ def fitted_spec(lock: RobotLock) -> mujoco.MjSpec:
 
 def _export_generic(lock: RobotLock, out_path: Path, bundle_assets: bool) -> Path:
     robot = _lock_robot(lock)
-    spec = fitted_spec(lock)
+    arm = Arm(robot=robot.name)  # one compile: the spec's values and the sidecar's unit map
+    spec = fitted_spec(lock, arm)
     src_dir = Path(spec.modelfiledir) if spec.modelfiledir else robot.model_path.parent
     mesh_src = src_dir / (spec.meshdir or "")
     tex_src = src_dir / (spec.texturedir or "")
@@ -692,7 +702,7 @@ def _export_generic(lock: RobotLock, out_path: Path, bundle_assets: bool) -> Pat
     xml = insert_header(xml, _comment(header_lines(lock)))
     out_path.write_text(xml)
     model = mujoco.MjModel.from_xml_path(str(out_path))  # validates the export
-    sidecar = sidecar_dict(lock, model, out_path.name, meshdir)
+    sidecar = sidecar_dict(lock, model, out_path.name, meshdir, unit_map=arm.unit_map)
     sidecar_path(out_path).write_text(json.dumps(sidecar, indent=2) + "\n")
     return out_path
 

@@ -941,7 +941,10 @@ def model_geometry(
                 }
             )
             continue
-        file, scale = meshes[mesh_name]
+        entry = meshes.get(mesh_name)
+        if entry is None:  # an inline mesh (vertices in the XML): nothing to serve
+            continue
+        file, scale = entry
         mat = int(model.geom_matid[g])
         geoms.append(
             {

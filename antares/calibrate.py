@@ -617,16 +617,23 @@ def describe_simulate(simulate: Callable[..., Any], arm: Any) -> Callable[..., A
 
 
 def robot_of(simulate: Any) -> Any | None:
-    """The :class:`antares.robots.RobotModel` a simulate callable runs, if tagged."""
+    """The :class:`antares.robots.RobotModel` behind ``simulate``: a tagged
+    simulate callable or an :class:`antares.sim.Arm` (their ``robot``), or
+    the model itself when one is passed; None when untagged."""
+    from antares.robots import RobotModel
+
+    if isinstance(simulate, RobotModel):
+        return simulate
     return getattr(simulate, "robot", None)
 
 
-def scoring_names(simulate: Any) -> dict[str, Any]:
-    """``joint_names``/``exclude`` keyword arguments for scoring ``simulate``'s
-    output: the robot's columns and grippers, or the SO arms' by default."""
+def scoring_names(simulate: Any) -> dict[str, tuple[str, ...]]:
+    """``joint_names``/``exclude`` keyword arguments for scoring what
+    ``simulate`` (see :func:`robot_of`) replays: the robot's columns and
+    grippers, or the SO arms' six with the gripper unscored when untagged."""
     r = robot_of(simulate)
     if r is None:
-        return {}
+        return {"joint_names": tuple(JOINTS), "exclude": ("gripper",)}
     return {"joint_names": tuple(r.joints), "exclude": tuple(r.grippers)}
 
 
@@ -889,11 +896,7 @@ def calibrate(
     so_arm = robot is None or robot.default_params == "sts3215"
     if start is None:
         start = SimParams() if so_arm else simulate.default_params  # type: ignore[attr-defined]
-    shared_space, per_joint_space = spaces_for(
-        None if so_arm and robot is not None and tuple(robot.joints) == JOINTS and not robot.bounds else robot,
-        fit_factors,
-        per_joint_factors,
-    )
+    shared_space, per_joint_space = spaces_for(robot, fit_factors, per_joint_factors)
     if not so_arm:
         shared_space = shared_space.relative_to(start)
 

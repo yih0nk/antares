@@ -242,8 +242,9 @@ def dataset_robot(ds: Dataset) -> str:
 
 def _scoring(robot: str | None) -> dict[str, Any]:
     """``joint_names``/``exclude`` for scoring on ``robot``'s model."""
-    r = get_robot(check_robot(robot))
-    return {"joint_names": tuple(r.joints), "exclude": tuple(r.grippers)}
+    from antares.calibrate import scoring_names
+
+    return scoring_names(get_robot(check_robot(robot)))
 
 
 def dataset_summary(repo_id: str) -> dict:

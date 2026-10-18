@@ -254,8 +254,9 @@ def check(
         from antares.calibrate import default_simulate
 
         simulate = default_simulate(robot=lock_robot(lock))
-    r = getattr(simulate, "robot", None)  # see antares.calibrate.describe_simulate
-    names = {"joint_names": tuple(r.joints), "exclude": tuple(r.grippers)} if r is not None else {}
+    from antares.calibrate import scoring_names
+
+    names = scoring_names(simulate)
     report = aggregate([tracking_error(*simulate(params, ep), **names) for ep in eps])
     overall = float(report.overall_deg)
     scored = tuple(report.scored_joints)

@@ -30,6 +30,7 @@ from typing import Any
 
 import numpy as np
 
+from antares.calibrate import scoring_names
 from antares.data import Dataset, Episode
 from antares.gap import GapReport, aggregate, tracking_error
 from antares.sim import JOINTS, Arm, SimParams
@@ -63,17 +64,8 @@ def shift_compensate(q_des: np.ndarray, latency_frames: int) -> np.ndarray:
     return q_des[src].copy()
 
 
-def _scoring(arm: Any) -> dict[str, tuple[str, ...]]:
-    """``joint_names``/``exclude`` for the columns ``arm`` replays (the SO
-    arm's six, gripper unscored, when it carries no robot)."""
-    robot = getattr(arm, "robot", None)
-    if robot is None:
-        return {"joint_names": tuple(JOINTS), "exclude": ("gripper",)}
-    return {"joint_names": tuple(robot.joints), "exclude": tuple(robot.grippers)}
-
-
 def _rms_deg(q_des: np.ndarray, q_sim: np.ndarray, names: dict | None = None) -> float:
-    return float(tracking_error(q_des, q_sim, **(names or _scoring(None))).overall_deg)
+    return float(tracking_error(q_des, q_sim, **(names or scoring_names(None))).overall_deg)
 
 
 def _smooth(x: np.ndarray, window: int) -> np.ndarray:
@@ -130,7 +122,7 @@ def ilc(
     """
     q_des = np.asarray(q_des, dtype=np.float64)
     q0 = np.asarray(q0, dtype=np.float64).reshape(-1)
-    names = _scoring(arm)
+    names = scoring_names(arm)
     n = len(names["joint_names"])
     if q_des.ndim != 2 or q_des.shape[1] != n:
         raise ValueError(f"q_des must be (T,{n}), got {q_des.shape}")
@@ -198,7 +190,7 @@ def ilc_compensate(
 
 def max_joint_velocity(episodes: Sequence[Episode], arm: Arm) -> np.ndarray:
     """Fastest measured joint motion per joint, deg/s, over ``episodes``."""
-    vmax = np.zeros(len(_scoring(arm)["joint_names"]))
+    vmax = np.zeros(len(scoring_names(arm)["joint_names"]))
     for ep in episodes:
         if len(ep) < 2:
             continue
@@ -364,7 +356,7 @@ def compensate_episode(
     if real_vmax_deg_s is None:
         real_vmax_deg_s = max_joint_velocity([episode], arm)
     ctrl_comp = res.ctrl if method == "ilc" else ctrl_shift
-    names = _scoring(arm)
+    names = scoring_names(arm)
     feas = feasibility(ctrl_raw, ctrl_comp, fps, real_vmax_deg_s, (lo, hi), joint_names=names["joint_names"])
 
     return CompensationReport(
@@ -437,7 +429,7 @@ def compensate_episodes(
     worst = max(reports, key=lambda r: (len(r.feasibility["flagged_joints"]), r.feasibility["clipped_frames"]))
     per_joint = {k: {j: float(v) for j, v in g.per_joint_deg.items()} for k, g in gaps.items()}
     flagged = sorted({j for r in reports for j in r.feasibility["flagged_joints"]})
-    joints = _scoring(arm)["joint_names"]
+    joints = scoring_names(arm)["joint_names"]
     feas = {
         "velocity_factor": float(VELOCITY_FACTOR),
         "ok": all(r.feasibility["ok"] for r in reports),

@@ -13,8 +13,20 @@ function objGeometry(group: THREE.Group): THREE.BufferGeometry {
     if (o instanceof THREE.Mesh) parts.push((o.geometry as THREE.BufferGeometry).clone().toNonIndexed());
   });
   if (parts.length === 1) return parts[0];
-  for (const p of parts) for (const k of Object.keys(p.attributes)) if (k !== "position" && k !== "normal") p.deleteAttribute(k);
-  return mergeGeometries(parts) ?? parts[0] ?? new THREE.BufferGeometry();
+  // mergeGeometries needs every part to carry the same attributes: keep
+  // position and normal, and give a part without normals computed ones.
+  for (const p of parts) {
+    for (const k of Object.keys(p.attributes)) if (k !== "position" && k !== "normal") p.deleteAttribute(k);
+    if (!p.getAttribute("normal")) p.computeVertexNormals();
+  }
+  let merged = mergeGeometries(parts);
+  if (!merged) {
+    // Still mismatched (e.g. normal item sizes differ): merge positions alone.
+    for (const p of parts) p.deleteAttribute("normal");
+    merged = mergeGeometries(parts);
+    merged?.computeVertexNormals();
+  }
+  return merged ?? new THREE.BufferGeometry();
 }
 
 const isObj = (f: string) => f.toLowerCase().endsWith(".obj");

@@ -147,15 +147,13 @@ def _finish(v: Verdict) -> Verdict:
     return v
 
 
-def _robot_for(robot: str | None, family: str | None, repo_id: str = "") -> Any:
-    """The registry entry a dataset is checked against: ``robot`` if given,
-    else the catalog's pick for ``repo_id``, else its family's model, else
+def _robot_for(robot: str | None, family: str | None) -> Any:
+    """The registry entry a dataset is checked against: ``robot`` if given
+    (the caller folds in the catalog's pick), else its family's model, else
     the SO-101 (so an unknown arm is still told what was expected)."""
-    from antares.catalog import robot_for_dataset
     from antares.robots import get_robot, model_for_family
 
-    name = robot or robot_for_dataset(repo_id) or (model_for_family(family) if family else None)
-    return get_robot(name)
+    return get_robot(robot or (model_for_family(family) if family else None))
 
 
 def _joint_label(r: Any) -> str:
@@ -222,7 +220,7 @@ def validate_dataset_info(
     from antares.catalog import robot_for_dataset
 
     chosen = robot or robot_for_dataset(repo_id)
-    r = _robot_for(chosen, v.robot_family, repo_id)
+    r = _robot_for(chosen, v.robot_family)
     if chosen:
         v.robot = r.name
     elif v.robot_family is not None:
@@ -325,7 +323,7 @@ def validate_dataset(
     from antares.catalog import robot_for_dataset
 
     chosen = robot or robot_for_dataset(ds.repo_id)
-    r = _robot_for(chosen, v.robot_family, ds.repo_id)
+    r = _robot_for(chosen, v.robot_family)
     if chosen or v.robot_family is not None:
         v.robot = r.name
     cols, why = check_joint_names(list(ds.joint_names), r)

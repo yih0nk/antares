@@ -328,8 +328,11 @@ def fakes(monkeypatch, tmp_path):
                   model_geometry=lambda model=None: {"bodies": [], "geoms": [], "joints": []})
     gap = _module("antares.gap", GapReport=FakeGap, tracking_error=fake_tracking_error,
                   aggregate=fake_aggregate)
+    from antares.calibrate import scoring_names  # the real one: pure, reads the robot off its argument
+
     cal = _module("antares.calibrate", calibrate=fake_calibrate, split_episodes=fake_split,
-                  default_simulate=lambda command_map=None, robot=None: (lambda params, ep: (ep.state, ep.action)))
+                  default_simulate=lambda command_map=None, robot=None: (lambda params, ep: (ep.state, ep.action)),
+                  scoring_names=scoring_names)
     lock = _module("antares.lock", RobotLock=FakeLock, dataset_digest=lambda eps: "deadbeef",
                    slug=lambda r: r.replace("/", "__"), LOCK_DIR=tmp_path / "locks",
                    LOCK_SUFFIX=LOCK_SUFFIX,

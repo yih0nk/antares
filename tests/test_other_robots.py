@@ -222,7 +222,11 @@ def test_factors_endpoint():
 # --------------------------------------------------------------------------
 
 _MINI_XML = """<mujoco model="mini">
+  <compiler angle="radian"/>
   <option timestep="0.002"/>
+  <default>
+    <joint damping="0.1" armature="0.01" frictionloss="0.01"/>
+  </default>
   <worldbody>
     <body name="link1">
       <joint name="j1" type="hinge" axis="0 0 1" range="-1.5 1.5"/>
@@ -235,7 +239,7 @@ _MINI_XML = """<mujoco model="mini">
           <geom type="box" size="0.01 0.01 0.02" mass="0.02"/>
         </body>
         <body name="fr" pos="0 0 0.2">
-          <joint name="right_finger" type="slide" axis="0 -1 0" range="0 0.04" ref="0.005"/>
+          <joint name="right_finger" type="slide" axis="0 -1 0" range="-0.05 0.05" ref="0.005"/>
           <geom type="box" size="0.01 0.01 0.02" mass="0.02"/>
         </body>
       </body>
@@ -345,3 +349,31 @@ def test_unlimited_actuator_starts_inside_the_forcerange_bounds(mini_robot):
     wide = dataclasses.replace(mini_robot, bounds={"forcerange": (0.5, 500.0, "log")})
     REGISTRY["mini"] = wide
     assert Arm(robot="mini").forcerange_limit() == 500.0
+
+
+def test_generic_export_of_a_toml_robot_compiles_one_arm(mini_robot, tmp_path, monkeypatch):
+    from antares import export
+    from antares.export import export_mjcf, load_exported_arm, read_sidecar
+    from tests.test_export import make_lock
+
+    arm = Arm(robot="mini")
+    p = arm.default_params(from_model=True).replace(kp=(60.0, 40.0, 25.0), latency_frames=1)
+    lock = dataclasses.replace(make_lock(p), robot="mini")
+    built = []
+    real_arm = export.Arm
+
+    class CountingArm(real_arm):
+        def __init__(self, *a, **kw):
+            built.append(kw.get("robot"))
+            super().__init__(*a, **kw)
+
+    monkeypatch.setattr(export, "Arm", CountingArm)
+    out = export_mjcf(lock, tmp_path / "out" / "mini.xml")
+    assert built == ["mini"]  # the spec's values and the sidecar's unit map from one compile
+    side = read_sidecar(out)
+    assert side["robot"] == "mini" and side["joints"] == ["j1", "j2", "gripper"]
+    assert side["unit_map"]["scale"] == arm.unit_map.to_dict()["scale"]
+    exported = load_exported_arm(out)
+    ep = _episodes(arm, p, n=1, T=40)[0]
+    arm.apply(p)
+    np.testing.assert_allclose(exported.replay(ep), arm.replay(ep), atol=1e-6)
