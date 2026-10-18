@@ -62,6 +62,8 @@ const TUNE_KEYS: { key: NumericParamKey; kind: "scale" | "frames"; hint: string 
 ];
 const TUNE_LOG_RANGE = 2; // the multiplier spans 10^-2 to 10^2
 const TUNE_FRAMES = 6;
+// What the server accepts as a lock name.
+const LOCK_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const PARAM_KEYS: NumericParamKey[] = ["kp", "kv", "damping", "armature", "frictionloss", "latency_frames", "forcerange", "gravity_scale", "deadband"];
 // Terms a lock omits at their defaults; the row shows only when the lock carries one.
 const OPTIONAL_DEFAULTS: Partial<Record<NumericParamKey, number>> = { gravity_scale: 1, deadband: 0 };
@@ -374,6 +376,10 @@ export default function App() {
   // The saved lock the tuning started from (its command map and unit map
   // stay with the tuned parameters), or null for the default/live sim.
   const [tuneLock, setTuneLock] = useState<string | null>(null);
+  // Saving the tuned values as a lock: its name, and the request's state.
+  const [saveName, setSaveName] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [tuneAdj, setTuneAdj] = useState<Partial<Record<NumericParamKey, number>>>({});
   // A second episode shown side by side with the first; null when off.
   const [compare, setCompare] = useState<number | null>(null);
@@ -713,10 +719,27 @@ export default function App() {
     setTuneFrom(ghostLabel);
     setTuneLock(fromLock);
     setTuneAdj({});
+    setSaveName(`${lockNameFor(dataset)}-tuned`);
+    setSaveError(null);
     liveLock.current = fromLock;
     liveReport.current = true;
     liveKey.current = ""; // the lock's own replay came from GET /api/replay; replay the base once
     setGhost(MANUAL);
+  };
+
+  const saveTuned = async () => {
+    if (!tuned || !dataset) return;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const saved = await api.saveLock(dataset, saveName.trim(), tuned, tuneLock);
+      setLocks(await api.locks());
+      setGhost(saved.name); // the ghost now replays the saved lock
+    } catch (e) {
+      setSaveError((e as Error).message);
+    } finally {
+      setSaving(false);
+    }
   };
 
   // ---- calibration -----------------------------------------------------------
@@ -1347,6 +1370,26 @@ export default function App() {
             >
               Replay from the start
             </button>
+            <div className="save-lock">
+              <input
+                className="picker"
+                value={saveName}
+                onChange={(e) => setSaveName(e.target.value)}
+                aria-label="Name for the new lock"
+                spellCheck={false}
+              />
+              <button className="cta" onClick={saveTuned} disabled={saving || !LOCK_NAME.test(saveName.trim())}>
+                {saving ? "Saving…" : "Save as lock"}
+              </button>
+            </div>
+            {saveError ? (
+              <div className="bad small">{saveError}</div>
+            ) : (
+              <div className="muted small">
+                Scored on the same held-out episodes as a calibration, then listed with the other locks
+                {tuneLock && `; keeps ${tuneLock}'s sensor map and camera fits`}.
+              </div>
+            )}
           </section>
         )}
 
