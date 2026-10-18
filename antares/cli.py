@@ -124,6 +124,7 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
         per_joint=args.per_joint,
         per_joint_max_evaluations=args.per_joint_evaluations,
         per_joint_sigma0=args.per_joint_sigma0,
+        fit_gravity=args.fit_gravity,
         on_progress=on_progress,
     )
     r = result.to_dict()
@@ -514,6 +515,58 @@ def cmd_compensate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_sag(args: argparse.Namespace) -> int:
+    import json
+
+    from antares import server
+    from antares.sag import sag_report
+    from antares.sim import Arm
+
+    ds = server.get_dataset(args.repo_id)
+    lock = server.load_lock_dict(args.lock)
+    params = server.params_from_dict(lock["params"])
+    wanted = set(lock["result"].get("eval_episodes") or []) if not args.all else set()
+    episodes = [ep for ep in ds.episodes if args.all or ep.index in wanted]
+    if not episodes:
+        print("the lock lists no held-out episodes; pass --all", file=sys.stderr)
+        return 2
+    rep = sag_report(Arm(params), episodes)
+    if args.json:
+        print(json.dumps(rep.to_dict(), indent=2))
+        return 0
+    which = "all" if args.all else "held-out"
+    print(
+        f"{ds.repo_id} vs lock {args.lock}: {rep.n_episodes} {which} episodes, {rep.n_frames} frames, "
+        f"gravity_scale {rep.gravity_scale:.3g}"
+    )
+    print("residual (sim - real) regressed on the torque that holds each pose against gravity")
+    rows = [
+        [
+            j.joint,
+            _fmt(j.rms_deg),
+            _fmt(j.rms_corrected_deg),
+            f"{j.slope_deg_per_nm:+.3g}",
+            f"{100 * j.partial_r2:.0f}%",
+            _fmt(j.torque_std_nm),
+            "-" if j.implied_gravity_scale is None else _fmt(j.implied_gravity_scale),
+        ]
+        for j in rep.joints.values()
+    ]
+    print(
+        _table(
+            ["joint", "rms (deg)", "w/o sag", "deg per N*m", "explained", "torque std", "implied scale"],
+            rows,
+        )
+    )
+    worst = rep.worst_joint
+    if worst is not None:
+        bins = ", ".join(f"{t:+.2f} N*m: {r:+.2f} deg" for t, r, _ in rep.joints[worst].bins)
+        print(f"{worst} mean residual by holding torque: {bins}")
+    if rep.implied_gravity_scale is not None:
+        print(f"implied gravity_scale {rep.implied_gravity_scale:.3g}; fit it with calibrate --fit-gravity")
+    return 0
+
+
 def cmd_locks(args: argparse.Namespace) -> int:
     from antares import server
 
@@ -764,6 +817,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="CMA-ES step size of the per-joint stage in unit coordinates "
         "(default 0.05; 0.1 explores more and can win with a budget >= 1200)",
     )
+    p.add_argument(
+        "--fit-gravity",
+        action="store_true",
+        help="also fit gravity_scale, the arm's gravity load (sets how much it sags per pose)",
+    )
     p.set_defaults(func=cmd_calibrate)
 
     p = sub.add_parser("cross", help="score locks across datasets (matrix)")
@@ -841,6 +899,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--heldout", action="store_true", help="instead of one episode, aggregate over the lock's held-out split"
     )
     p.set_defaults(func=cmd_compensate)
+
+    p = sub.add_parser("sag", help="measure how a lock's leftover error depends on gravity load (pose)")
+    p.add_argument("repo_id")
+    p.add_argument("--lock", required=True)
+    p.add_argument("--all", action="store_true", help="use every episode, not just the lock's held-out set")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_sag)
 
     p = sub.add_parser("locks", help="list saved locks")
     p.set_defaults(func=cmd_locks)

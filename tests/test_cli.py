@@ -26,7 +26,7 @@ def test_help_exits_zero(capsys):
         cli.main(["--help"])
     assert e.value.code == 0
     out = capsys.readouterr().out
-    for cmd in ("serve", "inspect", "replay", "calibrate", "cross", "drift", "dr", "locks", "export", "check", "events", "compensate", "fleet"):
+    for cmd in ("serve", "inspect", "replay", "calibrate", "cross", "drift", "dr", "locks", "export", "check", "events", "compensate", "sag", "fleet"):
         assert cmd in out
 
 
@@ -646,3 +646,46 @@ def test_fleet_scan_wires_discover_and_scan(monkeypatch, capsys, tmp_path):
     assert "4.000 -> 1.500 deg (62% closed), latency 3 frames, kp 1200" in out
     assert "FAILED bob/x: boom" in out and "skipped carol/y" in out and "saved" in out
     assert "2 robots calibrated" in out  # final tables
+
+
+def test_sag_scores_the_locks_heldout_episodes(monkeypatch, capsys, tmp_path):
+    from antares import server
+
+    T = 60
+    eps = []
+    for i in range(3):
+        a = np.zeros((T, 6))
+        a[:, 2] = np.linspace(-40, 40, T)
+        eps.append(Episode(index=i, fps=30.0, joint_names=JOINTS, state=a + 1.0, action=a))
+    ds = Dataset(repo_id="fake/robot", robot_type="so101_follower", fps=30.0, joint_names=JOINTS, episodes=tuple(eps))
+    monkeypatch.setattr(server, "_DATASETS", {"fake/robot": ds})
+    monkeypatch.setattr(server, "LOCK_DIR", tmp_path)
+    monkeypatch.setattr(server, "LOCK_SUFFIX", ".lock.json")
+    (tmp_path / "unit-a.lock.json").write_text(json.dumps({"name": "unit-a", "params": {"kp": 10.0},
+                                                          "result": {"eval_episodes": [1, 2]}}))
+    assert cli.main(["sag", "fake/robot", "--lock", "unit-a"]) == 0
+    out = capsys.readouterr().out
+    assert "2 held-out episodes, 120 frames" in out and "elbow_flex" in out and "implied scale" in out
+    assert cli.main(["sag", "fake/robot", "--lock", "unit-a", "--all", "--json"]) == 0
+    d = json.loads(capsys.readouterr().out)
+    assert d["n_episodes"] == 3 and "elbow_flex" in d["joints"]
+
+
+def test_calibrate_cli_fit_gravity_flag(monkeypatch, capsys, tmp_path):
+    from antares import server
+
+    calls = []
+    params = {"kp": 100.0, "kv": 1.0, "damping": 0.1, "armature": 0.01, "frictionloss": 0.01,
+              "latency_frames": 2, "forcerange": 2.94, "gravity_scale": 0.4}
+
+    def fake_run(ds, **kw):
+        calls.append(kw)
+        return _Result(_result_dict(params, [])), {"name": "x"}, tmp_path / "x.lock.json"
+
+    monkeypatch.setattr(server, "_DATASETS", {"fake/robot": _dataset()})
+    monkeypatch.setattr(server, "run_calibration", fake_run)
+    assert cli.main(["calibrate", "fake/robot", "--fit-gravity"]) == 0
+    assert calls[0]["fit_gravity"] is True
+    assert "gravity_scale=0.4" in capsys.readouterr().out
+    assert cli.main(["calibrate", "fake/robot"]) == 0
+    assert calls[1]["fit_gravity"] is False
