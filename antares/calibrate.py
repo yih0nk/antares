@@ -366,15 +366,16 @@ def _parse_float(v: Any) -> float:
 # --------------------------------------------------------------------------
 
 
-def default_simulate() -> SimulateFn:
+def default_simulate(robot: str | None = None) -> SimulateFn:
     """Build one MuJoCo :class:`antares.sim.Arm` and wrap it as a ``SimulateFn``.
 
-    The arm is reused across calls (``apply`` is cheap); the real trajectory
-    does not depend on the parameters, so it is cached per episode.
+    ``robot`` picks the model from :data:`antares.robots.REGISTRY` (default
+    SO-101). The arm is reused across calls (``apply`` is cheap); the real
+    trajectory does not depend on the parameters, so it is cached per episode.
     """
     from antares.sim import Arm
 
-    arm = Arm()
+    arm = Arm(robot=robot)
     real_cache: dict[int, tuple[Episode, np.ndarray]] = {}
 
     def simulate(params: SimParams, episode: Episode) -> tuple[np.ndarray, np.ndarray]:

@@ -23,6 +23,7 @@ import numpy as np
 from antares import __version__
 from antares.calibrate import CalibrationResult, SimParams
 from antares.data import Episode
+from antares.robots import DEFAULT_ROBOT
 
 LOCK_DIR = Path("locks")
 LOCK_SUFFIX = ".lock.json"
@@ -64,6 +65,9 @@ class RobotLock:
     result: CalibrationResult
     created_at: str
     antares_version: str
+    #: Which simulator model (``antares.robots.REGISTRY`` key) the fit ran on.
+    #: Locks written before the registry existed were all SO-101.
+    robot: str = DEFAULT_ROBOT
 
     @classmethod
     def create(
@@ -73,6 +77,7 @@ class RobotLock:
         train_episodes: Sequence[Episode],
         result: CalibrationResult,
         name: str | None = None,
+        robot: str = DEFAULT_ROBOT,
     ) -> "RobotLock":
         """Build a lock for a finished calibration, stamping time and version."""
         return cls(
@@ -84,6 +89,7 @@ class RobotLock:
             result=result,
             created_at=_now_iso(),
             antares_version=__version__,
+            robot=robot,
         )
 
     def to_dict(self) -> dict:
@@ -91,6 +97,7 @@ class RobotLock:
             "name": self.name,
             "dataset": self.dataset,
             "robot_type": self.robot_type,
+            "robot": self.robot,
             "data_sha256": self.data_sha256,
             "params": self.params.to_dict(),
             "result": self.result.to_dict(),
@@ -114,6 +121,7 @@ class RobotLock:
             result=result,
             created_at=str(d["created_at"]),
             antares_version=str(d.get("antares_version", "")),
+            robot=str(d.get("robot") or DEFAULT_ROBOT),
         )
 
     def default_path(self, lock_dir: Path = LOCK_DIR) -> Path:
