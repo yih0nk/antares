@@ -732,5 +732,16 @@ back in raw units), `export` (in the sidecar) and the drift and DR refits
 
 ## Status
 
-Weekend hackathon project. Data loading, replay, calibration, robot locks
-and the web viewer work end to end on the SO-101 and SO-100 demo datasets.
+Started as a weekend hackathon project. On the SO-101 and SO-100 demo
+datasets, everything above works end to end from the CLI, the API and the
+viewer: replay, shared and per-joint calibration, sensor calibration, robot
+locks and MJCF export, drift scans and the pre-deploy gate with its cause
+diagnosis, data-derived DR ranges, contact events, sim-only lag
+compensation, the robot-specificity study and the fleet scan.
+
+Not yet measured on hardware: everything is judged against logged
+trajectories, so lag compensation and DR are validated in the sim only.
+Open questions: the fits are seed-sensitive and `kp`/`kv` are not
+identifiable from pick-and-place logs (see "Is a lock specific to its
+arm?"), and the elbow error is step-shaped, which the six servo
+parameters do not model.
