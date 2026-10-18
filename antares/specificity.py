@@ -101,14 +101,23 @@ CONTINUOUS: tuple[str, ...] = tuple(n for n in DIMS if SPACE[n][2] != "int")
 _GRIPPER = 5
 
 
-def residuals(params, episodes: Sequence[Episode], simulate: SimulateFn, exclude: Sequence[int] = (_GRIPPER,)):
+def _unscored(simulate: SimulateFn) -> tuple[int, ...]:
+    """Gripper columns of the robot ``simulate`` runs (index 5 on the SO arms)."""
+    robot = getattr(simulate, "robot", None)
+    return (_GRIPPER,) if robot is None else tuple(robot.gripper_indices)
+
+
+def residuals(params, episodes: Sequence[Episode], simulate: SimulateFn, exclude: Sequence[int] | None = None):
     """Sim minus real, in degrees, for every frame and scored joint, flattened.
 
     ``sqrt(mean(r**2))`` equals the ``overall_deg`` the calibrator minimizes
-    (frame-weighted RMS over the scored joints).
+    (frame-weighted RMS over the scored joints). ``exclude`` defaults to the
+    gripper columns of the robot ``simulate`` is tagged with.
     """
     if not episodes:
         raise ValueError("no episodes to score")
+    if exclude is None:
+        exclude = _unscored(simulate)
     parts = []
     for ep in episodes:
         real_q, sim_q = simulate(params, ep)
