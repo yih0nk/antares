@@ -591,3 +591,11 @@ def test_replay_applies_command_map(arm):
     assert not np.allclose(out[:, 1], base[:, 1])
     # the measured state is untouched by the command map
     np.testing.assert_array_equal(shifted.real_q(ep), arm.real_q(ep))
+
+
+def test_command_map_invert():
+    from antares.sim import CommandMap
+
+    cm = CommandMap(gain=[1.0, 0.9, 1.1, 1.0, 1.0, 1.0], bias=[0.0, -3.0, 2.5, 0.0, 1.0, 0.0])
+    u = np.linspace(-50, 50, 12).reshape(2, 6)
+    np.testing.assert_allclose(cm.invert(cm.apply(u)), u)

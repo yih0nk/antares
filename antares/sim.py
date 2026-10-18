@@ -256,6 +256,10 @@ class CommandMap:
         """Correct raw command units. (6,) or (T,6)."""
         return np.asarray(u, dtype=np.float64) * self.gain + self.bias
 
+    def invert(self, u: np.ndarray) -> np.ndarray:
+        """Corrected units -> raw command units (inverse of :meth:`apply`)."""
+        return (np.asarray(u, dtype=np.float64) - self.bias) / self.gain
+
     def to_dict(self) -> dict[str, Any]:
         return {"gain": self.gain.tolist(), "bias": self.bias.tolist()}
 
