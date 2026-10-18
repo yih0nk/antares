@@ -39,6 +39,9 @@ def make_episodes(arm: Arm, true_map: CommandMap, n: int, T: int, fps: float, no
                 f = rng.uniform(0.1, 0.7)
                 action[:, j] += rng.uniform(-20, 20) * np.sin(2 * np.pi * f * t + rng.uniform(0, 2 * np.pi))
         action[:, 5] = 30 + np.abs(action[:, 5])
+        # teleop pauses: hold the command still now and then, as operators do
+        for start in range(40, T - 30, 90):
+            action[start : start + 30] = action[start]
         q0 = arm.unit_map.to_rad(true_map.apply(action[0]))
         seed_ep = Episode(i, fps, JOINTS, arm.unit_map.to_units(np.tile(q0, (T, 1))), action)
         sim_q = arm.replay(seed_ep)
@@ -55,6 +58,7 @@ def main() -> None:
     ap.add_argument("--noise", type=float, default=0.2, help="state noise, dataset units")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--no-mismatch", action="store_true", help="control: the hidden arm has an identity map")
+    ap.add_argument("--mode", choices=("sim", "kinematic"), default="sim")
     args = ap.parse_args()
     true_map = CommandMap.identity() if args.no_mismatch else TRUE_MAP
 
@@ -64,9 +68,11 @@ def main() -> None:
     train, eval_ = split_episodes(eps, args.episodes - 4, 4, seed=args.seed)
 
     t0 = time.perf_counter()
-    out = calibrate_with_sensor(train, eval_, max_evaluations=args.max_evaluations, seed=args.seed)
+    out = calibrate_with_sensor(train, eval_, max_evaluations=args.max_evaluations, seed=args.seed,
+                                mode=args.mode)
     only, final = out.dynamics_only, out.result
-    print(f"{len(train)} train / {len(eval_)} eval episodes, {time.perf_counter() - t0:.0f}s")
+    print(f"mode {args.mode}, {'no mismatch' if args.no_mismatch else 'hidden mismatch'}: "
+          f"{len(train)} train / {len(eval_)} eval episodes, {time.perf_counter() - t0:.0f}s")
     print(f"held-out RMSE: default {final.baseline_eval_score:.3f}  dynamics only {only.eval_score:.3f}  "
           f"with sensor {final.eval_score:.3f} deg")
     print("true params  ", truth.to_dict())
