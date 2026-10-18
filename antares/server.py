@@ -21,7 +21,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Literal
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Query
@@ -752,6 +752,7 @@ def run_calibration(
     on_progress: Callable[[Any], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
     fit_sensor: bool = False,
+    sensor_mode: str = "sim",
 ) -> tuple[Any, dict, Path]:
     """Calibrate on ``ds``, save a lock, return (CalibrationResult, lock dict, path).
 
@@ -760,7 +761,9 @@ def run_calibration(
 
     With ``fit_sensor`` the arm's command map is fitted alongside the
     dynamics (see :mod:`antares.sensor`) and stored in the lock, together
-    with the dynamics-only fit for comparison.
+    with the dynamics-only fit for comparison. ``sensor_mode`` is ``"sim"``
+    (fit through the sim, alternating) or ``"kinematic"`` (pre-fit from
+    still frames, then frozen).
     """
     from antares.calibrate import calibrate, split_episodes
 
@@ -785,11 +788,12 @@ def run_calibration(
             seed=seed,
             on_progress=on_progress,
             should_stop=should_stop,
+            mode=sensor_mode,
             **extra,
         )
         lock = build_lock(
             ds, train, out.result, name,
-            command_map=out.command_map.to_dict(),
+            command_map={**out.command_map.to_dict(), "mode": sensor_mode},
             dynamics_only=out.dynamics_only.to_dict(),
         )
         return out.result, lock.to_dict(), save_lock(lock)
@@ -827,6 +831,7 @@ def _job_worker(job: Job, req: "CalibrateRequest") -> None:
             on_progress=on_progress,
             should_stop=job.stop.is_set,
             fit_sensor=req.fit_sensor,
+            sensor_mode=req.sensor_mode,
         )
         result_d = result.to_dict()
         job.push({"type": "done", "lock": lock, "result": result_d})
@@ -1259,6 +1264,7 @@ class CalibrateRequest(BaseModel):
     per_joint: bool = False
     per_joint_max_evaluations: int = Field(600, ge=1)
     fit_sensor: bool = False
+    sensor_mode: Literal["sim", "kinematic"] = "sim"
 
 
 @app.post("/api/calibrate")

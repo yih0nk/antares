@@ -1366,7 +1366,7 @@ def test_calibrate_with_fit_sensor_saves_command_map(client, fakes, monkeypatch)
 
     def fake_calibrate_with_sensor(train, eval, **kw):
         calls.update(kw)
-        res = fake_calibrate(train, eval, **kw)
+        res = fake_calibrate(train, eval, **{k: v for k, v in kw.items() if k != "mode"})
         return types.SimpleNamespace(
             result=res,
             command_map=FakeCommandMap(np.ones(6), np.full(6, -2.0)),
@@ -1377,11 +1377,11 @@ def test_calibrate_with_fit_sensor_saves_command_map(client, fakes, monkeypatch)
                         _module("antares.sensor", calibrate_with_sensor=fake_calibrate_with_sensor))
     result, lock, path = server.run_calibration(
         server.get_dataset(FAKE_DS2), n_train=4, n_eval=2, name="unit-b", fit_sensor=True)
-    assert calls["max_evaluations"] == 150
-    assert lock["command_map"] == SHIFT_MAP
+    assert calls["max_evaluations"] == 150 and calls["mode"] == "sim"
+    assert lock["command_map"] == {**SHIFT_MAP, "mode": "sim"}
     assert lock["dynamics_only"]["eval_score"] == 2.0
     saved = json.loads(path.read_text())
-    assert saved["command_map"] == SHIFT_MAP
+    assert saved["command_map"]["bias"] == SHIFT_MAP["bias"]
     replay = client.get("/api/replay", params={"dataset": FAKE_DS2, "episode": 0, "lock": "unit-b"}).json()
     assert replay["command_map"] == SHIFT_MAP
 
@@ -1394,9 +1394,11 @@ def test_calibrate_request_forwards_fit_sensor(client, fakes, monkeypatch):
         raise HTTPException(status_code=400, detail="stop here")
 
     monkeypatch.setattr(server, "run_calibration", spy)
-    job = client.post("/api/calibrate", json={"dataset": FAKE_DS, "fit_sensor": True}).json()["job_id"]
+    assert client.post("/api/calibrate", json={"dataset": FAKE_DS, "sensor_mode": "bogus"}).status_code == 422
+    job = client.post("/api/calibrate", json={"dataset": FAKE_DS, "fit_sensor": True,
+                                              "sensor_mode": "kinematic"}).json()["job_id"]
     for _ in range(100):
         if client.get(f"/api/calibrate/{job}").json()["status"] != "running":
             break
         time.sleep(0.01)
-    assert seen["fit_sensor"] is True
+    assert seen["fit_sensor"] is True and seen["sensor_mode"] == "kinematic"
