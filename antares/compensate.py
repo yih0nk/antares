@@ -336,7 +336,11 @@ def compensate_episode(
 
     q_des = arm.real_q(episode)
     q0 = q_des[0]
-    ctrl_raw = np.clip(arm.unit_map.to_rad(episode.action), lo, hi)
+    action = episode.action
+    cmap = getattr(arm, "command_map", None)
+    if cmap is not None:  # the lock's sensor calibration, if any
+        action = cmap.apply(action)
+    ctrl_raw = np.clip(arm.unit_map.to_rad(action), lo, hi)
     q_sim_raw = arm.rollout(ctrl_raw, q0, fps)
 
     ctrl_shift = np.clip(shift_compensate(q_des, L), lo, hi)

@@ -526,6 +526,9 @@ def cmd_compensate(args: argparse.Namespace) -> int:
 
         um = server.get_arm().unit_map
         cmds = um.to_units(np.radians(np.asarray(out["ctrl_comp"], dtype=np.float64)))
+        cmap = server.command_map_from_lock(lock) if lock else None
+        if cmap is not None:  # back to the raw units the arm is commanded in
+            cmds = cmap.invert(cmds)
         np.save(args.out, cmds)
         print(f"saved {args.method} commands ({cmds.shape[0]}x{cmds.shape[1]}, dataset units) -> {args.out}")
     return 0

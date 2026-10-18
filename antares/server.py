@@ -1071,8 +1071,9 @@ def compensate_episode_dict(
     ep = find_episode(ds, episode)
     if params is None:
         params = default_params()
+    cmap = command_map_from_lock(load_lock_dict(lock)) if lock else None
     arm = get_arm()
-    with _ARM_LOCK:
+    with _ARM_LOCK, _command_map(arm, cmap):
         vmax = max_joint_velocity(ds.episodes, arm)
         rep = compensate_episode(arm, ep, params, method=method, real_vmax_deg_s=vmax)
         comp_poses = np.asarray(arm.fk(rep.q_sim_comp))
@@ -1116,7 +1117,7 @@ def compensate_heldout(ds: Dataset, lock_dict: dict, method: str = "ilc") -> dic
         raise HTTPException(status_code=400, detail=str(e))
     params = params_from_dict(lock_dict["params"])
     arm = get_arm()
-    with _ARM_LOCK:
+    with _ARM_LOCK, _command_map(arm, command_map_from_lock(lock_dict)):
         summary = compensate_episodes(arm, episodes, params, method=method)
     out = summary.to_dict()
     out.update(dataset=ds.repo_id, lock=lock_dict.get("name"), method=method, params=params.to_dict(),
