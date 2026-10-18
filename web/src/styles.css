@@ -40,7 +40,7 @@ body {
 .shell {
   display: grid;
   grid-template-columns: 1fr 320px;
-  grid-template-rows: 56px 1fr 190px;
+  grid-template-rows: 56px 1fr 214px;
   grid-template-areas:
     "top top"
     "viewer panel"
@@ -239,7 +239,8 @@ body {
 
 .timeline {
   grid-area: timeline;
-  padding: 12px 20px 14px;
+  /* Extra room below the residual strip so it never sits on the window edge. */
+  padding: 12px 20px 30px;
   border-top: 1px solid var(--border);
   display: flex;
   flex-direction: column;
@@ -762,7 +763,7 @@ body {
 @media (max-width: 800px) {
   .shell {
     grid-template-columns: 1fr;
-    grid-template-rows: 56px 50vh 210px auto;
+    grid-template-rows: 56px 50vh 234px auto;
     grid-template-areas: "top" "viewer" "timeline" "panel";
     height: auto;
     min-height: 100%;
