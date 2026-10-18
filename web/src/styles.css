@@ -2813,3 +2813,43 @@ strong {
 .save-lock-row .input[aria-invalid="true"] {
   border-color: var(--critical);
 }
+
+/* ---- run a check (fleet row detail) ---- */
+.check-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  margin-top: var(--s3);
+  padding-top: var(--s3);
+  border-top: 1px solid var(--border);
+  cursor: default;
+}
+
+.check-panel .section-hint {
+  margin: 0;
+}
+
+.check-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--s2);
+}
+
+.check-controls .select-wrap {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.check-result {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+}
+
+.check-verdict {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s2);
+}
