@@ -3063,8 +3063,21 @@ BACKGROUND_FRAMES = 60
 
 
 def _video_error(e: Exception) -> HTTPException:
-    """Map a missing video dependency / camera to a client-readable error."""
-    return HTTPException(status_code=400 if "camera" in str(e) else 501, detail=str(e))
+    """Map a video error to a status the client can act on: 501 only when
+    decoding is impossible here (PyAV missing), 404 for an episode, file or
+    frames the dataset does not have, 400 for a camera it does not have, and
+    500 (with the message) when a file could not be decoded."""
+    from antares import video
+
+    if isinstance(e, video.VideoUnsupported):
+        status = 501
+    elif isinstance(e, video.VideoNotFound):
+        status = 404
+    elif isinstance(e, video.VideoUnavailable) and not isinstance(e, video.VideoDecodeError):
+        status = 400
+    else:
+        status = 500
+    return HTTPException(status_code=status, detail=str(e))
 
 
 def _camera_arm():
@@ -3137,8 +3150,17 @@ def run_camera_fit(
     seed: int = 0,
     on_progress: Callable[[Any], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
+    on_second_pass: Callable[[str], None] | None = None,
 ):
-    """Fit one camera and save it next to the lock. Returns ``(fit, path)``."""
+    """Fit one camera and save it next to the lock. Returns ``(fit, path)``.
+
+    When another fixed camera of the dataset with the same image size is
+    already fitted (most likely the same webcam model), a second pass holds
+    the field of view near that camera's, and the pass with the better
+    held-out overlap is kept: from silhouettes alone a narrower view from
+    further away lines up the base but leaves the gripper off.
+    ``on_second_pass`` hears the sibling camera's name when that pass starts.
+    """
     from antares.camera import fit_camera, save_camera_fit
     from antares.sim import Arm
 
@@ -3146,19 +3168,48 @@ def run_camera_fit(
     _lock_path(lock_name)
     # A fit runs for a minute; it gets its own Arm so overlay requests
     # (which share ``_camera_arm``) are not blocked behind it.
-    fit = fit_camera(
-        ds,
-        camera,
+    arm = Arm()
+    common = dict(
         n_frames=n_frames,
         n_episodes=n_episodes,
         n_starts=n_starts,
         seed=seed,
-        arm=Arm(),
+        arm=arm,
         on_progress=on_progress,
         should_stop=should_stop,
     )
+    fit = fit_camera(ds, camera, **common)
+    prior = sibling_fovy(ds.repo_id, camera, (fit.width, fit.height))
+    if prior is not None and not fit.cancelled:
+        fovy, sibling = prior
+        if on_second_pass is not None:
+            on_second_pass(sibling)
+        banded = fit_camera(ds, camera, fovy_range=(fovy - SIBLING_FOVY_BAND, fovy + SIBLING_FOVY_BAND), **common)
+        if not banded.cancelled and _heldout(banded.to_dict()) > _heldout(fit.to_dict()):
+            fit = banded
     path = save_camera_fit(fit, lock_name, LOCK_DIR)
     return fit, path
+
+
+# Half-width (degrees) of the field-of-view band a sibling camera's fit sets.
+SIBLING_FOVY_BAND = 2.0
+
+
+def sibling_fovy(dataset: str, camera: str, size: tuple[int, int] | None = None) -> tuple[float, str] | None:
+    """``(fovy, camera)`` of the best-fitted other camera of ``dataset`` (over
+    all its locks), of image ``size`` when given; None when there is none."""
+    from antares.video import camera_name
+
+    name = camera_name(camera)
+    others = [
+        (n, f)
+        for n, f in dataset_camera_fit_dicts(dataset).items()
+        if n != name and f.get("fovy") and (size is None or (int(f.get("width") or 0), int(f.get("height") or 0)) == size)
+    ]
+    if not others:
+        return None
+    n, f = max(others, key=lambda nf: _heldout(nf[1]))
+    return float(f["fovy"]), n
 
 
 def _camera_job_worker(job: Job, req: "CameraFitRequest") -> None:
@@ -3167,6 +3218,9 @@ def _camera_job_worker(job: Job, req: "CameraFitRequest") -> None:
 
         def on_progress(ev) -> None:
             job.push({"type": "progress", **ev.to_dict()})
+
+        def on_second_pass(sibling: str) -> None:
+            job.push({"type": "pass", "pass": 2, "sibling": sibling})
 
         fit, path = run_camera_fit(
             ds,
@@ -3178,6 +3232,7 @@ def _camera_job_worker(job: Job, req: "CameraFitRequest") -> None:
             seed=req.seed,
             on_progress=on_progress,
             should_stop=job.stop.is_set,
+            on_second_pass=on_second_pass,
         )
         summary = {**fit.summary(), "lock": req.lock, "path": str(path)}
         job.push({"type": "done", "fit": summary})
@@ -3264,6 +3319,48 @@ def camera_fits(lock: str = Query(...)) -> dict:
     return {"lock": lock, "cameras": {name: {k: v for k, v in f.items() if k not in ("fit_ious", "heldout_ious", "appearance")} for name, f in fits.items()}}
 
 
+def dataset_camera_fit_dicts(dataset: str) -> dict[str, dict]:
+    """The best saved fit of each of ``dataset``'s cameras over all its locks.
+
+    A camera's pose belongs to the recording, not to the dynamics a lock
+    fitted, so a fit saved under one lock lines up the video for any lock
+    of the same dataset (the per-joint, sensor or a freshly calibrated one).
+    Each fit carries the ``lock`` it was saved under.
+    """
+    best: dict[str, dict] = {}
+    for lock in list_lock_dicts():
+        if lock.get("dataset") != dataset or not lock.get("name"):
+            continue
+        try:
+            fits = load_camera_fit_dicts(str(lock["name"]))
+        except HTTPException:
+            continue
+        for name, fit in fits.items():
+            if fit.get("dataset") not in (None, "", dataset) or fit.get("cancelled"):
+                continue
+            if name not in best or _heldout(fit) > _heldout(best[name]):
+                best[name] = {**_fit_summary(fit), "lock": str(lock["name"])}
+    return best
+
+
+def _heldout(fit: dict) -> float:
+    try:
+        v = float(fit.get("heldout_iou"))
+    except (TypeError, ValueError):
+        return -1.0
+    return v if np.isfinite(v) else -1.0
+
+
+def _fit_summary(fit: dict) -> dict:
+    return {k: v for k, v in fit.items() if k not in ("fit_ious", "heldout_ious", "appearance")}
+
+
+@app.get("/api/camera/dataset")
+def camera_fits_for_dataset(dataset: str = Query(...)) -> dict:
+    """Best saved camera fit per camera of a dataset, whichever lock holds it."""
+    return {"dataset": dataset, "cameras": dataset_camera_fit_dicts(dataset)}
+
+
 @app.get("/api/camera/overlay")
 def camera_overlay_get(
     dataset: str = Query(...),
@@ -3280,6 +3377,25 @@ def camera_overlay_get(
         raise
     except Exception as e:  # noqa: BLE001 - decoding / segmentation errors
         raise _video_error(e)
+
+
+@app.get("/api/camera/clip")
+def camera_clip_get(
+    dataset: str = Query(...),
+    camera: str = Query(...),
+    episode: int = Query(...),
+    format: Literal["mp4", "webm"] = Query("mp4"),
+) -> FileResponse:
+    """One episode of a camera as a clip starting at the episode's frame 0,
+    for the viewer's video underlay (encoded once, then cached)."""
+    from antares import video
+
+    ds = get_dataset(dataset)
+    try:
+        path = video.episode_clip(ds.repo_id, camera, episode, ds, fmt=format)
+    except Exception as e:  # noqa: BLE001 - missing PyAV / camera / decoding errors
+        raise _video_error(e)
+    return FileResponse(path, media_type=f"video/{format}")
 
 
 # ==========================================================================
