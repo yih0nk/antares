@@ -128,6 +128,35 @@ def test_live_ticks_publish_three_angles(tmp_path):
     assert msgs[-1]["lock"] == msgs[-1]["default"]  # same params, same ghost
 
 
+def test_viewer_residual_strip_works_on_a_servo(tmp_path):
+    """The servo has no gripper; the viewer's residual strip still loads."""
+    from antares import server
+
+    csv = sb.simulate_run(tmp_path / "a.csv", seed=1)
+    out, _, _ = sb.import_runs([csv], "a", tmp_path / "ds")
+    ds = server.get_dataset(str(out))
+    res = server.residual_episode(ds, ds.episodes[0].index)
+    assert res["dataset"] == ds.repo_id
+
+
+def test_live_finds_the_pot_next_to_a_pipeline_lock(tmp_path, monkeypatch):
+    """pipeline.sh calibrates inside the recordings folder, so the lock names
+    its dataset relatively; `bench live --lock <dir>/locks/x.lock.json` run
+    from elsewhere still finds the pot conversion."""
+    from types import SimpleNamespace
+
+    from antares import servo_live
+
+    csv = sb.simulate_run(tmp_path / "a.csv", pot_scale=0.3, pot_offset=-50.0, seed=1)
+    sb.import_runs([csv], "a", tmp_path / "ds_a")
+    (tmp_path / "locks").mkdir()
+    lock_file = tmp_path / "locks" / "servo_a.lock.json"
+    lock_file.write_text("{}")
+    monkeypatch.chdir(tmp_path / "locks")
+    pot = servo_live.pot_for_lock(SimpleNamespace(dataset="ds_a"), None, lock_file)
+    assert pot.scale == pytest.approx(0.3, rel=0.02)
+
+
 # --------------------------------------------------------------------------
 # Locks, the demo and the live view around the hardware
 # --------------------------------------------------------------------------

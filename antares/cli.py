@@ -1910,6 +1910,9 @@ def cmd_camera_fit(args: argparse.Namespace) -> int:
         fit, path = server.run_camera_fit(
             ds, args.camera, lock, n_frames=args.frames, n_episodes=args.episodes,
             n_starts=args.starts, seed=args.seed, on_progress=on_progress,
+            on_second_pass=lambda sibling: print(
+                f"  second pass: field of view held near the {sibling} camera's (kept if it scores better on held-out frames)"
+            ),
         )
     except Exception as e:  # noqa: BLE001
         print(f"error: {e}", file=sys.stderr)

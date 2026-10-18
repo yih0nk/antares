@@ -152,9 +152,10 @@ def dataset_candidates(lock, dataset: str | None = None, lock_path: str | Path |
     """Where the lock's dataset may be, in the order tried.
 
     ``calibrate`` records the dataset path as typed, relative to where it
-    ran, and saves the lock under ``locks/`` there; so a relative
-    ``lock.dataset`` is tried against the lock file's directory's parent
-    first, then against the current directory.
+    ran, and saves the lock under ``locks/`` there (bench/pipeline.sh runs
+    inside the recordings folder: ``<dir>/locks/x.lock.json`` next to
+    ``<dir>/ds_a``); so a relative ``lock.dataset`` is tried against the lock
+    file's directory's parent first, then against the current directory.
     """
     if dataset:
         return [Path(dataset)]

@@ -1,4 +1,4 @@
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Grid, OrbitControls } from "@react-three/drei";
 import {
@@ -32,8 +32,9 @@ import {
 } from "./api";
 import * as THREE from "three";
 import { Arm, compMaterial, ghostMaterial, policyDefaultMaterial, policyLockMaterial, realMaterial, type Playhead } from "./Arm";
-import { CameraView } from "./CameraView";
+import { CameraView, useCameras } from "./CameraView";
 import { SceneGeometry } from "./Scene";
+import { MatchCamera, useUnderlay, VideoBackdrop, type Underlay } from "./VideoUnderlay";
 import { ObjectMarker } from "./Objects";
 import { CrossHeatmap, JointTrace, ResidualStrip, Sparkline } from "./Charts";
 import { AddDataset } from "./AddDataset";
@@ -263,6 +264,7 @@ function Scene({
   ghostMat = ghostMaterial,
   children,
   follow,
+  underlay,
 }: {
   geometry: Geometry | null;
   realPoses: number[][][] | null;
@@ -283,22 +285,27 @@ function Scene({
   children?: ReactNode;
   // Follow another pane's playhead (scaled by fps) instead of running its own clock.
   follow?: { lead: Playhead; leadFps: number };
+  // The dataset video drawn behind a transparent canvas; a fitted camera pins the view to it.
+  underlay?: Underlay | null;
 }) {
+  const pinned = underlay?.fit ?? null;
   return (
     <Canvas shadows camera={{ position: CAMERA_POSITION, fov: 38, near: 0.01, far: 20 }}>
-      <FitCamera />
-      <color attach="background" args={["#0b0d12"]} />
+      {pinned ? <MatchCamera fit={pinned} /> : <FitCamera />}
+      {!underlay && <color attach="background" args={["#0b0d12"]} />}
       <ambientLight intensity={0.55} />
       <directionalLight position={[0.8, 1.6, 0.6]} intensity={1.3} castShadow shadow-mapSize={[1024, 1024]} />
       <directionalLight position={[-1, 0.6, -0.8]} intensity={0.35} />
-      <Grid
-        infiniteGrid
-        cellSize={0.05}
-        sectionSize={0.25}
-        cellColor="#1c2230"
-        sectionColor="#2a3346"
-        fadeDistance={3}
-      />
+      {!underlay && (
+        <Grid
+          infiniteGrid
+          cellSize={0.05}
+          sectionSize={0.25}
+          cellColor="#1c2230"
+          sectionColor="#2a3346"
+          fadeDistance={3}
+        />
+      )}
       {geometry && (
         <Suspense fallback={null}>
           {/* MuJoCo is z-up; three.js is y-up. Keyed by model so a robot switch swaps the meshes cleanly. */}
@@ -337,7 +344,7 @@ function Scene({
       ) : (
         <Driver playhead={playhead} playing={playing} fps={fps} frames={frames} speed={speed} onFrame={onFrame} />
       )}
-      <OrbitControls makeDefault target={CAMERA_TARGET} />
+      {!pinned && <OrbitControls makeDefault target={CAMERA_TARGET} />}
     </Canvas>
   );
 }
@@ -926,6 +933,14 @@ export default function App() {
     : `lock ${ghost}`;
   // Camera fits live with a lock: the ghost's, or the dataset's first saved one.
   const cameraLock = ghost !== DEFAULT && ghost !== LIVE && ghost !== MANUAL ? ghost : dsLocks[0]?.name ?? null;
+  // The dataset's video behind the main pane, pinned to the lock's fitted camera when it has one.
+  const [videoOn, setVideoOn] = useState(false);
+  const [videoError, setVideoError] = useState<string | null>(null);
+  const [fitsRev, setFitsRev] = useState(0);
+  const cameras = useCameras(dataset);
+  const video = useUnderlay(dataset, cameras, episode, cameraLock, videoOn, fitsRev, running);
+  const underlay = video.underlay;
+  const videoAvail = cameras.length > 0;
 
   const compareFrames = compareBase?.real_poses.length ?? 0;
   // ---- scene fit saved for the camera lock -----------------------------------
@@ -1142,30 +1157,40 @@ export default function App() {
       <main className="viewer">
         <div className="panes">
           <div className="pane">
-            <Scene
-              geometry={geometry}
-              realPoses={baseline?.real_poses ?? null}
-              simPoses={replay?.sim_poses ?? null}
-              compPoses={compPoses}
-              hotSpans={hotSpans}
-              clip={clip}
-              show={show}
-              playhead={playhead}
-              playing={playing}
-              fps={fps}
-              frames={frames}
-              speed={speed}
-              onFrame={setFrame}
+            <div
+              className={underlay ? "underlay-frame" : "pane-fill"}
+              style={underlay ? ({ "--aspect": underlay.camera.width / Math.max(1, underlay.camera.height) } as CSSProperties) : undefined}
             >
-              {geometry && (
-                <>
-                  <Arm geometry={geometry} poses={polPoses("default")} clip={`${clip}#policy`} playhead={playhead} material={policyDefaultMaterial} />
-                  <Arm geometry={geometry} poses={polPoses("lock")} clip={`${clip}#policy`} playhead={playhead} material={policyLockMaterial} />
-                </>
+              {underlay && (
+                <VideoBackdrop underlay={underlay} playhead={playhead} playing={playing} speed={speed} onError={setVideoError} />
               )}
-              <SceneGeometry scene={scene} />
-              <ObjectMarker track={track} playhead={playhead} />
-            </Scene>
+              <Scene
+                geometry={geometry}
+                realPoses={baseline?.real_poses ?? null}
+                simPoses={replay?.sim_poses ?? null}
+                compPoses={compPoses}
+                hotSpans={hotSpans}
+                clip={clip}
+                show={show}
+                playhead={playhead}
+                playing={playing}
+                fps={fps}
+                frames={frames}
+                speed={speed}
+                onFrame={setFrame}
+                underlay={underlay}
+              >
+                {geometry && (
+                  <>
+                    <Arm geometry={geometry} poses={polPoses("default")} clip={`${clip}#policy`} playhead={playhead} material={policyDefaultMaterial} />
+                    <Arm geometry={geometry} poses={polPoses("lock")} clip={`${clip}#policy`} playhead={playhead} material={policyLockMaterial} />
+                  </>
+                )}
+                {/* The fitted table plane is opaque and would hide the footage; the video shows the real table. */}
+                {!underlay && <SceneGeometry scene={scene} />}
+                <ObjectMarker track={track} playhead={playhead} />
+              </Scene>
+            </div>
             {compare != null && <div className="pane-label">episode {episode ?? "--"} · {deg(ghostGap?.overall_deg)}</div>}
           </div>
           {compare != null && (
@@ -1239,7 +1264,47 @@ export default function App() {
               {polViewerNote && <span className="muted small">{polViewerNote}</span>}
             </>
           )}
-          {scene && (
+          {underlay && (
+            <span className="muted small">
+              {videoError
+                ? videoError
+                : underlay.fit
+                  ? `video from the ${underlay.camera.name} camera, view pinned to its fitted pose${underlay.fit.lock && underlay.fit.lock !== cameraLock ? ` (fitted with lock ${underlay.fit.lock})` : ""}, held-out overlap ${(underlay.fit.heldout_iou * 100).toFixed(0)}%`
+                  : !underlay.camera.fixed
+                    ? `video from the ${underlay.camera.name} camera as a plain backdrop: it moves with the arm, so the 3D view cannot be lined up with it`
+                    : video.lineUp?.status === "running" || video.lineUp?.status === "done"
+                      ? (
+                        <>
+                          lining the 3D view up with the {underlay.camera.name} camera
+                          {video.lineUp.sibling && video.lineUp.status !== "done" ? `, second pass with the ${video.lineUp.sibling} camera's field of view` : ""}
+                          {video.lineUp.status === "done"
+                            ? " (saved)"
+                            : video.lineUp.last
+                            ? ` (${
+                                video.lineUp.last.stage === "start"
+                                  ? `try ${video.lineUp.last.start + 1} of ${video.lineUp.last.n_starts}`
+                                  : video.lineUp.last.stage === "sample"
+                                    ? "first guesses"
+                                    : video.lineUp.last.stage === "refine"
+                                      ? "refining"
+                                      : "checking"
+                              }, overlap ${(video.lineUp.last.best_iou * 100).toFixed(0)}%)`
+                            : "…"}{" "}
+                          <button className="link" onClick={video.stopLineUp} disabled={!video.lineUp.jobId || video.lineUp.status === "done"}>
+                            stop
+                          </button>
+                        </>
+                      )
+                      : video.lineUp?.status === "error"
+                        ? `could not line the 3D view up with the ${underlay.camera.name} camera: ${video.lineUp.error}`
+                        : !cameraLock
+                          ? `video from the ${underlay.camera.name} camera as a plain backdrop: calibrate first, then the view lines up with the video`
+                          : running
+                            ? `video from the ${underlay.camera.name} camera as a plain backdrop: the view lines up with it once calibration finishes`
+                            : `video from the ${underlay.camera.name} camera as a plain backdrop: no fitted camera yet, fit it under Camera to line the arm up`}
+            </span>
+          )}
+          {scene && !underlay && (
             <span className="muted small">
               table at {(scene.table.z * 1000).toFixed(0)} mm, workspace box from the logs
             </span>
@@ -1268,6 +1333,36 @@ export default function App() {
             >
               Side by side
             </button>
+          </div>
+          <div className="segmented video-controls" role="group" aria-label="Video underlay">
+            <button
+              className={videoOn && videoAvail ? "on" : ""}
+              onClick={() => setVideoOn((v) => !v)}
+              disabled={!videoAvail}
+              title={videoAvail ? "Show the dataset's video behind the arms" : "This dataset has no camera video"}
+            >
+              Video
+            </button>
+            {videoOn && cameras.length > 1 && (
+              <select className="picker" value={video.camera} onChange={(e) => video.setCamera(e.target.value)} aria-label="Camera">
+                {cameras.map((c) => (
+                  <option key={c.name} value={c.name}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+            )}
+            {videoOn && videoAvail && (
+              <span className="video-delay" title="Frames the video lags the joint log (antares camera-delay measures it)">
+                <button onClick={() => video.setDelay((d) => d - 1)} aria-label="Video earlier">
+                  −
+                </button>
+                <span>delay {video.delay}</span>
+                <button onClick={() => video.setDelay((d) => d + 1)} aria-label="Video later">
+                  +
+                </button>
+              </span>
+            )}
           </div>
           <div className="segmented" role="group" aria-label="Arms shown">
             {SHOW.map((v) => (
@@ -1572,6 +1667,7 @@ export default function App() {
 
         <CameraView
           dataset={dataset}
+          cameras={cameras}
           episode={episode}
           frame={frame}
           playing={playing}
@@ -1583,6 +1679,8 @@ export default function App() {
           onObjectsChange={setObjects}
           track={track}
           onError={setError}
+          onFitSaved={() => setFitsRev((r) => r + 1)}
+          fitsRev={video.fitsRev}
         />
 
         <section>
@@ -1930,7 +2028,7 @@ export default function App() {
             {(frame / fps).toFixed(2)}s / {(frames / fps).toFixed(2)}s
           </span>
           <span className="muted small trace-label">
-            {joint}: <i className="swatch real" /> real <i className="swatch sim" /> sim
+            {jointNames[jIndex] ?? joint}: <i className="swatch real" /> real <i className="swatch sim" /> sim
           </span>
           <span className="muted small trace-label">
             |real − sim| <i className="swatch contact" /> contact <i className="swatch anomaly" /> anomaly{" "}
