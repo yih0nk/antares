@@ -18,6 +18,7 @@ import re
 import tempfile
 import threading
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -157,6 +158,32 @@ def params_from_dict(d: dict):
     return SimParams.from_dict(d)
 
 
+def command_map_from_lock(lock: dict):
+    """The lock's CommandMap, or None for a lock fitted without one."""
+    d = lock.get("command_map")
+    if d is None:
+        return None
+    from antares.sim import CommandMap
+
+    return CommandMap.from_dict(d)
+
+
+@contextmanager
+def _command_map(arm, cmap):
+    """Use ``cmap`` on the shared ``arm`` for the block, then restore identity
+    so callers that never set one keep the plain mapping."""
+    if cmap is None:
+        yield
+        return
+    from antares.sim import CommandMap
+
+    arm.command_map = cmap
+    try:
+        yield
+    finally:
+        arm.command_map = CommandMap.identity()
+
+
 def mesh_dir() -> Path:
     if MESH_DIR is not None:
         return Path(MESH_DIR)
@@ -169,8 +196,11 @@ def _rounded(a: np.ndarray) -> list:
     return np.round(np.asarray(a, dtype=np.float64), ROUND).tolist()
 
 
-def replay_episode(ds: Dataset, episode: int, params=None) -> dict:
-    """Real FK + sim replay for one episode. Angles in degrees, poses (T,nbody,7)."""
+def replay_episode(ds: Dataset, episode: int, params=None, command_map=None) -> dict:
+    """Real FK + sim replay for one episode. Angles in degrees, poses (T,nbody,7).
+
+    ``command_map`` (a CommandMap, or None for identity) corrects the commands.
+    """
     from antares.gap import tracking_error
     from antares.sim import JOINTS
 
@@ -181,7 +211,8 @@ def replay_episode(ds: Dataset, episode: int, params=None) -> dict:
     with _ARM_LOCK:
         arm.apply(params)
         real_q = np.asarray(arm.real_q(ep))
-        sim_q = np.asarray(arm.replay(ep))
+        with _command_map(arm, command_map):
+            sim_q = np.asarray(arm.replay(ep))
         real_poses = np.asarray(arm.fk(real_q))
         sim_poses = np.asarray(arm.fk(sim_q))
         body_names = list(arm.body_names)
@@ -193,6 +224,7 @@ def replay_episode(ds: Dataset, episode: int, params=None) -> dict:
         "joints": list(JOINTS),
         "body_names": body_names,
         "params": params.to_dict(),
+        "command_map": None if command_map is None else command_map.to_dict(),
         "real_q": _rounded(np.degrees(real_q)),
         "sim_q": _rounded(np.degrees(sim_q)),
         "real_poses": _rounded(real_poses),
@@ -201,8 +233,9 @@ def replay_episode(ds: Dataset, episode: int, params=None) -> dict:
     }
 
 
-def score_episodes(params, episodes) -> Any:
-    """Aggregate GapReport of ``params`` over ``episodes`` using the shared Arm."""
+def score_episodes(params, episodes, command_map=None) -> Any:
+    """Aggregate GapReport of ``params`` (and ``command_map``) over ``episodes``
+    using the shared Arm."""
     from antares.gap import aggregate, tracking_error
     from antares.sim import JOINTS
 
@@ -212,7 +245,8 @@ def score_episodes(params, episodes) -> Any:
         arm.apply(params)
         for ep in episodes:
             real_q = np.asarray(arm.real_q(ep))
-            sim_q = np.asarray(arm.replay(ep))
+            with _command_map(arm, command_map):
+                sim_q = np.asarray(arm.replay(ep))
             reports.append(tracking_error(real_q, sim_q, joint_names=JOINTS))
     return aggregate(reports)
 

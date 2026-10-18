@@ -48,8 +48,28 @@ class FakeParams:
         return cls()
 
 
+class FakeCommandMap:
+    def __init__(self, gain, bias):
+        self.gain, self.bias = np.asarray(gain, float), np.asarray(bias, float)
+
+    @classmethod
+    def identity(cls):
+        return cls(np.ones(6), np.zeros(6))
+
+    @classmethod
+    def from_dict(cls, d):
+        return cls.identity() if d is None else cls(d["gain"], d["bias"])
+
+    def to_dict(self):
+        return {"gain": self.gain.tolist(), "bias": self.bias.tolist()}
+
+    def apply(self, u):
+        return np.asarray(u) * self.gain + self.bias
+
+
 class FakeArm:
     body_names = BODIES
+    command_map = None
 
     def __init__(self, params=None, unit_map=None):
         self.params = params or FakeParams()
@@ -64,7 +84,8 @@ class FakeArm:
 
     def replay(self, ep):
         # error that shrinks as kp grows, so calibrated params "help"
-        return np.radians(ep.action) + 0.1 / self.params.kp
+        action = ep.action if self.command_map is None else self.command_map.apply(ep.action)
+        return np.radians(action) + 0.1 / self.params.kp
 
     def fk(self, q):
         T = len(q)
@@ -291,7 +312,7 @@ def make_dataset(repo_id: str, n_episodes: int = 6, T: int = 20, offset: float =
 @pytest.fixture
 def fakes(monkeypatch, tmp_path):
     """Stub the sibling modules, inject a dataset, and point locks at tmp."""
-    sim = _module("antares.sim", JOINTS=JOINTS, SimParams=FakeParams, Arm=FakeArm,
+    sim = _module("antares.sim", JOINTS=JOINTS, SimParams=FakeParams, Arm=FakeArm, CommandMap=FakeCommandMap,
                   MODEL_PATH=tmp_path / "so101.xml",
                   model_geometry=lambda model=None: {"bodies": [], "geoms": [], "joints": []})
     gap = _module("antares.gap", GapReport=FakeGap, tracking_error=fake_tracking_error,
@@ -329,12 +350,15 @@ def client():
     return TestClient(server.app)
 
 
-def write_lock(tmp_path, name, kp=50.0, dataset=FAKE_DS):
+def write_lock(tmp_path, name, kp=50.0, dataset=FAKE_DS, command_map=None):
     d = tmp_path / "locks"
     d.mkdir(exist_ok=True)
     lock = FakeLock(name, dataset, "so101_follower", "abc", FakeParams(kp=kp),
                     FakeResult(FakeParams(kp=kp), FakeParams()), "2026-10-17T00:00:00+00:00", "0.0.1")
-    (d / f"{name}{LOCK_SUFFIX}").write_text(json.dumps(lock.to_dict()))
+    body = lock.to_dict()
+    if command_map is not None:
+        body["command_map"] = command_map
+    (d / f"{name}{LOCK_SUFFIX}").write_text(json.dumps(body))
     return lock
 
 
