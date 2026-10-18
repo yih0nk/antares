@@ -744,5 +744,33 @@
     ],
     "train_score": 0.7704073321186796
   },
-  "robot_type": "so100"
+  "robot": "so101",
+  "robot_type": "so100",
+  "scene": {
+    "backdrops": {
+      "top": "scene/svla_so100_pickplace_top_backdrop.jpg"
+    },
+    "created_at": "2026-10-18T01:29:33Z",
+    "horizontal": true,
+    "n_grasps": 89,
+    "n_releases": 89,
+    "normal": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "object_half_height": 0.015,
+    "table_z": -0.010632685411911647,
+    "tilt_deg": 1.441917254920773,
+    "workspace_max": [
+      0.33447786088628606,
+      0.1502010010110153,
+      0.12947587146430448
+    ],
+    "workspace_min": [
+      0.06877247612219402,
+      -0.16017208811473255,
+      -0.005700803194939652
+    ]
+  }
 }
