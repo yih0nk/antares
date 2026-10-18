@@ -1380,3 +1380,18 @@ def test_task_then_export_with_task(monkeypatch, tmp_path, capsys):
 
     assert cli.main(["export", "unit_a", "-o", str(out), "--task", "nope"]) == 1
     assert "antares task" in capsys.readouterr().err
+
+
+def test_noise_prints_table_and_saves(monkeypatch, capsys, tmp_path):
+    from antares import server
+    from test_noise import parked_episode
+
+    rng = np.random.default_rng(0)
+    eps = tuple(parked_episode(i, rng) for i in range(3))
+    monkeypatch.setattr(server, "LOCK_DIR", tmp_path)
+    monkeypatch.setattr(server, "_DATASETS", {"fake/robot": Dataset("fake/robot", "so101", 30.0, eps[0].joint_names, eps)})
+    assert cli.main(["noise", "fake/robot"]) == 0
+    out = capsys.readouterr().out
+    assert "lag-1 corr" in out and "elbow_flex" in out
+    saved = json.loads((tmp_path / "robot.noise.json").read_text())
+    assert saved["name"] == "robot" and len(saved["scale_rad"]) == 6

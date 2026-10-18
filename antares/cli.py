@@ -835,6 +835,30 @@ def cmd_events(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_noise(args: argparse.Namespace) -> int:
+    import math
+
+    from antares import server
+    from antares.noise import estimate
+    from antares.sim import JOINTS
+
+    ds = server.get_dataset(args.repo_id)
+    name = args.name or server._slug(ds.repo_id)
+    model = estimate(list(ds.episodes), name=name, dataset=ds.repo_id)
+    print(f"{ds.repo_id}: joint-reading noise while each joint is parked")
+    deg = lambda v, nd=3: "-" if not math.isfinite(v) else f"{math.degrees(v):.{nd}f}"  # noqa: E731
+    rows = [
+        [j, str(int(model.n_frames[i])), deg(model.scale[i]),
+         "-" if not math.isfinite(model.acf1[i]) else f"{model.acf1[i]:.2f}", deg(model.quantum[i], 4)]
+        for i, j in enumerate(JOINTS)
+    ]
+    print(_table(["joint", "parked frames", "std (deg)", "lag-1 corr", "step (deg)"], rows))
+    if not args.no_save:
+        path = model.save(args.out or model.default_path(server.LOCK_DIR))
+        print(f"saved noise model {model.name} -> {path}")
+    return 0
+
+
 def cmd_task(args: argparse.Namespace) -> int:
     from antares import server
     from antares.task import TaskDistribution
@@ -1716,6 +1740,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--min-frames", type=int, default=5, help="shortest event kept")
     p.set_defaults(func=cmd_events)
 
+
+    p = sub.add_parser("noise", help="measure joint-reading noise while the arm is parked")
+    p.add_argument("repo_id")
+    p.add_argument("--name", default=None, help="noise model name (default: dataset slug)")
+    p.add_argument("--out", default=None, help="output path (default: locks/<name>.noise.json)")
+    p.add_argument("--no-save", action="store_true")
+    p.set_defaults(func=cmd_noise)
 
     p = sub.add_parser("task", help="where objects were picked and placed, from the gripper and FK")
     p.add_argument("repo_id")
