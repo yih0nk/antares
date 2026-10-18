@@ -75,3 +75,14 @@ def test_grasp_without_release(tip, unit_map):
     (g,) = find_grasps(cut, dataset_thresholds([ep]), tip, unit_map)
     assert g.release_frame is None and g.release_xyz is None
     assert g.to_dict()["release_xyz"] is None
+
+
+def test_held_and_missed_grasps(tip, unit_map):
+    held = pick_place_episode(0, held_jaw=25.0)
+    missed = pick_place_episode(1, held_jaw=SHUT + 0.5)
+    thr = dataset_thresholds([held, missed])
+    (g,) = find_grasps(held, thr, tip, unit_map)
+    assert g.held and g.jaw_gap == pytest.approx(25.0 - SHUT)
+    assert g.jaw_deg == pytest.approx(np.degrees(unit_map.to_rad(np.array([0, 0, 0, 0, 0, 25.0]))[5]))
+    (m,) = find_grasps(missed, thr, tip, unit_map)
+    assert not m.held and m.jaw_gap == pytest.approx(0.5)

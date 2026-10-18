@@ -12,6 +12,11 @@ Grasps and releases come from :func:`antares.events.gripper_transitions`
 (the same hysteresis on the gripper command the contact detector uses). The
 tip is the MJCF's ``gripperframe`` site, between the jaws.
 
+Whether a grasp caught anything is read from the jaw: with an object between
+them the jaws stop short of the closed command, so the measured gripper sits
+well above the command; on a miss they close all the way. The jaw angle it
+stops at is a proxy for the object's width.
+
 Pure kinematics: no dynamics and no lock are needed, only the dataset-unit
 -> radian map.
 """
@@ -30,6 +35,14 @@ from antares.sim import GRIPPER_INDEX, UnitMap, load_model
 
 #: MJCF site at the gripper tip, between the jaws.
 TIP_SITE = "gripperframe"
+
+#: Measured jaw this far above the closed command (dataset units, 0..100)
+#: means something is between the jaws.
+HELD_GAP = 5.0
+
+#: The jaw is still closing for this long after the command flips; the stop
+#: position is read after it.
+SETTLE_S = 0.3
 
 
 class Tip:
@@ -64,6 +77,9 @@ class Grasp:
     xyz: tuple[float, float, float]  # tip position at ``frame``, metres
     release_frame: int | None  # next flip back to open
     release_xyz: tuple[float, float, float] | None
+    jaw_gap: float  # median measured - commanded gripper while closed, dataset units
+    jaw_deg: float  # median measured jaw angle while closed, degrees
+    held: bool  # jaw_gap >= the held threshold: an object stopped the jaw
 
     def to_dict(self) -> dict:
         return {
@@ -72,6 +88,9 @@ class Grasp:
             "xyz": list(self.xyz),
             "release_frame": self.release_frame,
             "release_xyz": None if self.release_xyz is None else list(self.release_xyz),
+            "jaw_gap": self.jaw_gap,
+            "jaw_deg": self.jaw_deg,
+            "held": self.held,
         }
 
 
@@ -90,14 +109,27 @@ def find_grasps(
     thr: GripperThresholds,
     tip: Tip,
     unit_map: UnitMap,
+    held_gap: float = HELD_GAP,
 ) -> list[Grasp]:
-    """Every grasp in ``episode``, paired with the release that follows it."""
-    grasps, releases = gripper_transitions(episode.action[:, GRIPPER_INDEX], thr)
+    """Every grasp in ``episode``, paired with the release that follows it.
+
+    The jaw is read over the closed stretch (grasp to release, or to the end
+    of the episode) after :data:`SETTLE_S`; a stretch shorter than that
+    uses its last frame.
+    """
+    cmd = episode.action[:, GRIPPER_INDEX]
+    jaw = episode.state[:, GRIPPER_INDEX]
+    grasps, releases = gripper_transitions(cmd, thr)
     q = unit_map.to_rad(episode.state)
+    settle = int(round(SETTLE_S * episode.fps))
     out = []
     for g in grasps:
         later = releases[releases > g]
         r = int(later[0]) if later.size else None
+        end = r if r is not None else len(episode)
+        start = min(g + settle, end - 1)
+        gap = float(np.median(jaw[start:end] - cmd[start:end]))
+        jaw_rad = float(np.median(q[start:end, GRIPPER_INDEX]))
         out.append(
             Grasp(
                 episode=int(episode.index),
@@ -105,6 +137,9 @@ def find_grasps(
                 xyz=tuple(float(v) for v in tip(q[g])),
                 release_frame=r,
                 release_xyz=None if r is None else tuple(float(v) for v in tip(q[r])),
+                jaw_gap=gap,
+                jaw_deg=float(np.degrees(jaw_rad)),
+                held=gap >= held_gap,
             )
         )
     return out
