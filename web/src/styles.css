@@ -474,6 +474,100 @@ body {
   background: var(--sim);
 }
 
+/* Per-joint rows: default error to ghost error as two dots on one track. */
+.db-row {
+  display: grid;
+  grid-template-columns: 92px 1fr 40px 38px;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px;
+  margin: 0 -6px;
+  background: none;
+  border: 0;
+  border-radius: 5px;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.db-row:hover,
+.db-row.sel {
+  background: #1a1f2b;
+}
+
+.db-row.unscored {
+  color: var(--muted);
+}
+
+.db-track {
+  position: relative;
+  height: 12px;
+}
+
+.db-track::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 5px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--bg);
+}
+
+.db-span {
+  position: absolute;
+  top: 5px;
+  height: 2px;
+  background: #3a4256;
+  transition: left 0.4s ease, width 0.4s ease;
+}
+
+.db-dot {
+  position: absolute;
+  top: 1px;
+  width: 10px;
+  height: 10px;
+  margin-left: -5px;
+  border-radius: 50%;
+  transition: left 0.4s ease;
+}
+
+.db-dot.base {
+  background: #59627a;
+}
+
+.db-dot.ghost {
+  background: var(--sim);
+}
+
+.db-row.unscored .db-dot.ghost {
+  background: var(--muted);
+}
+
+.db-dot.inline {
+  position: static;
+  display: inline-block;
+  margin: 0 2px 0 6px;
+  vertical-align: -1px;
+}
+
+.db-change {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 11px;
+  text-align: right;
+}
+
+.db-change.good {
+  color: #6fd39a;
+}
+
+.db-change.bad {
+  color: #ff8fa3;
+}
+
 .bar-val {
   font-family: "JetBrains Mono", monospace;
   text-align: right;
