@@ -82,6 +82,10 @@ MIN_GAP_DEG = 0.05
 #: Below this share of the excess error recovered, the drift is reported as
 #: something the dynamics parameters cannot explain.
 EXPLAINED_FRACTION = 0.5
+#: With no change kept, a lock this close to its reference (degrees, or this
+#: share of the reference) is reported as unchanged rather than unexplained.
+UNCHANGED_EXCESS_DEG = 0.1
+UNCHANGED_EXCESS_FRACTION = 0.15
 #: Smallest refit budget: enough for the latency scan and a little more.
 MIN_EVALUATIONS = 10
 #: A factor this close to 1 is "no change" (it would print as +0%).
@@ -223,6 +227,18 @@ class Diagnosis:
         return self.stale_deg - self.reference_deg
 
     @property
+    def unchanged(self) -> bool:
+        """True when the search kept no change and the lock is still about as
+        good as when it was fitted (within :data:`UNCHANGED_EXCESS_DEG`, or
+        :data:`UNCHANGED_EXCESS_FRACTION` of its reference)."""
+        if self.excess_deg is None:
+            return False
+        if not all(_is_neutral(c.name, c.value) for c in self.changes):
+            return False
+        tol = max(UNCHANGED_EXCESS_DEG, UNCHANGED_EXCESS_FRACTION * self.reference_deg)
+        return self.excess_deg <= tol
+
+    @property
     def recovered(self) -> float | None:
         """Share of the excess error the refit removes (1.0 = all of it);
         None when the lock has no reference to measure the excess against."""
@@ -265,6 +281,12 @@ class Diagnosis:
         )
         if self.recovered is None:
             return f"{head}; the lock carries no held-out score, so the drift cannot be judged"
+        if self.unchanged:
+            return (
+                f"{head}; no change found: no parameter change improves the fit "
+                f"by {STEP_GAIN_DEG:g} deg, and the lock is {abs(self.excess_deg):.3f} deg "
+                f"{'above' if self.excess_deg >= 0 else 'below'} its own reference"
+            )
         if not self.explained:
             return (
                 f"{head}; not explained by the sim's dynamics parameters "
@@ -289,6 +311,7 @@ class Diagnosis:
             "excess_deg": _json_float(self.excess_deg),
             "recovered": _json_float(self.recovered),
             "explained": bool(self.explained),
+            "unchanged": bool(self.unchanged),
             "causes": [c.name for c in self.causes],
             "changes": [c.to_dict() for c in self.changes],
             "per_joint_stale": {k: _json_float(v) for k, v in self.per_joint_stale.items()},
@@ -500,6 +523,8 @@ __all__ = [
     "PENALTY",
     "STEP_GAIN_DEG",
     "complexity",
+    "UNCHANGED_EXCESS_DEG",
+    "UNCHANGED_EXCESS_FRACTION",
     "Diagnosis",
     "ParamChange",
     "apply_change",

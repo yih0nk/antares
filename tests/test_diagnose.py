@@ -151,6 +151,8 @@ def test_unchanged_arm_names_nothing():
     assert d.gap_deg == pytest.approx(0.0, abs=1e-9)
     assert d.causes == []
     assert all(c.recovers_deg == 0.0 for c in d.changes)
+    assert d.unchanged and "no change found" in d.summary()
+    assert d.to_dict()["unchanged"] is True
 
 
 def test_lag_and_a_weaker_gain_together_are_both_named():
@@ -160,6 +162,7 @@ def test_lag_and_a_weaker_gain_together_are_both_named():
     names = [c.name for c in d.causes]
     assert "latency_frames" in names and {c.name: c for c in d.changes}["latency_frames"].value == 2
     assert set(names) & {"kp", "kv", "damping"}  # the gain change is named too
+    assert not d.unchanged
 
 
 def test_a_change_too_small_to_matter_is_not_kept():
@@ -167,7 +170,7 @@ def test_a_change_too_small_to_matter_is_not_kept():
     eps = make_episodes(TRUE.replace(kp=TRUE.kp * 0.998), seed=6)
     d = diagnose(eps, lock_of(), simulate=toy_simulate)
     assert all(c.value == (0 if c.name == "latency_frames" else 1.0) for c in d.changes), d.changes
-    assert d.causes == []
+    assert d.unchanged and d.causes == []
 
 
 def test_drift_outside_the_dynamics_is_not_explained():
