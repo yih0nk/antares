@@ -646,6 +646,8 @@ def _change(param: str, values: list[Any]) -> str:
         return "-"
     first, last = xs[0], xs[-1]
     if param == "latency_frames":
+        if last == first:
+            return "unchanged"
         return f"{last - first:+g} frame{'s' if abs(last - first) != 1 else ''}"
     if first <= 0:
         return f"{last - first:+.4g}"
