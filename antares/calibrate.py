@@ -130,6 +130,17 @@ PER_JOINT_SPACE: dict[str, tuple[float, float, str]] = {
     "forcerange": (0.5, 30.0, "log"),
 }
 
+#: Optional shared dimension for the arm's gravity load (see
+#: :attr:`antares.sim.SimParams.gravity_scale`), searched only when
+#: ``calibrate(fit_gravity=True)``. 0 is a weightless arm, 2 a doubled load.
+GRAVITY_SPACE: dict[str, tuple[float, float, str]] = {"gravity_scale": (0.0, 2.0, "linear")}
+
+#: Optional servo deadband (rad; see :attr:`antares.sim.SimParams.deadband`),
+#: searched only when ``calibrate(fit_deadband=True)``: shared in the shared
+#: stage, per joint in the per-joint stage. 3 degrees is well past the
+#: STS3215's spec'd deadzone plus gear backlash (about 0.5 degrees).
+DEADBAND_SPACE: dict[str, tuple[float, float, str]] = {"deadband": (0.0, math.radians(3.0), "linear")}
+
 DIMS: tuple[str, ...] = tuple(SPACE)
 N_DIMS = len(DIMS)
 
@@ -223,6 +234,15 @@ class SearchSpace:
 
 SHARED = SearchSpace(SPACE, per_joint=False)
 PER_JOINT = SearchSpace(PER_JOINT_SPACE, per_joint=True)
+
+
+def spaces(fit_gravity: bool = False, fit_deadband: bool = False) -> tuple[SearchSpace, SearchSpace]:
+    """``(shared, per_joint)`` search spaces with the optional terms added."""
+    shared = {**SPACE, **(GRAVITY_SPACE if fit_gravity else {}), **(DEADBAND_SPACE if fit_deadband else {})}
+    per_joint = {**PER_JOINT_SPACE, **(DEADBAND_SPACE if fit_deadband else {})}
+    if not fit_gravity and not fit_deadband:
+        return SHARED, PER_JOINT
+    return SearchSpace(shared, per_joint=False), SearchSpace(per_joint, per_joint=True)
 
 
 def encode(params: SimParams, space: SearchSpace = SHARED) -> np.ndarray:
@@ -680,6 +700,8 @@ def calibrate(
     per_joint_popsize: int | None = None,
     n_seeds: int = 1,
     seeds: Sequence[int] | None = None,
+    fit_gravity: bool = False,
+    fit_deadband: bool = False,
 ) -> CalibrationResult:
     """Fit :class:`SimParams` to ``train`` episodes; report on ``eval`` episodes.
 
@@ -690,6 +712,11 @@ def calibrate(
     ``per_joint_max_evaluations`` evaluations, warm-started from the shared
     optimum with step size ``per_joint_sigma0``; ``per_joint_popsize`` of
     None takes CMA-ES's default for that dimensionality.
+
+    ``fit_gravity=True`` adds ``gravity_scale`` to the shared stage (see
+    :func:`spaces`); the per-joint stage keeps the shared value.
+    ``fit_deadband=True`` adds the servo ``deadband``: one value in the
+    shared stage, one per joint in the per-joint stage.
 
     With ``n_seeds > 1`` (or an explicit ``seeds`` list) the shared stage
     runs once per seed (``seed``, ``seed + 100``, ``seed + 200``, ...), each
@@ -744,6 +771,8 @@ def calibrate(
     )
     fit.record(start, start_report, start_score, SHARED.name)
 
+    shared, per_joint_space = spaces(fit_gravity, fit_deadband)
+
     def held_out(params: SimParams, report: Any, value: float) -> tuple[Any, float]:
         """Held-out score; the training score stands in without eval episodes."""
         return _safe_score(params, eval, simulate) if eval else (report, value)
@@ -759,7 +788,7 @@ def calibrate(
             fit.seed_index = i
             if i > 0:
                 fit.reset_best(start, start_report, start_score)
-            finished = fit.run_stage(SHARED, start, max_evaluations, sigma0, popsize, s)
+            finished = fit.run_stage(shared, start, max_evaluations, sigma0, popsize, s)
             candidates.append((fit.best_params, fit.best_report, fit.best_score))
             candidate_eval.append(held_out(fit.best_params, fit.best_report, fit.best_score))
             if not finished:
@@ -782,7 +811,7 @@ def calibrate(
         # Refine from the shared optimum; a fresh seed so the two stages do
         # not share a random stream.
         fit.run_stage(
-            PER_JOINT,
+            per_joint_space,
             fit.best_params,
             per_joint_max_evaluations,
             per_joint_sigma0,
@@ -858,6 +887,9 @@ __all__ = [
     "PINNED_RATIO",
     "PINNED_LATENCY_FRAMES",
     "SearchSpace",
+    "GRAVITY_SPACE",
+    "DEADBAND_SPACE",
+    "spaces",
     "SHARED",
     "PER_JOINT",
     "SimulateFn",

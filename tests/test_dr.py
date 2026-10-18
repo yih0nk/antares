@@ -236,6 +236,20 @@ def test_sample_is_log_uniform():
     assert np.mean(kp < 10) == pytest.approx(0.5, abs=0.03)
 
 
+def test_sample_keeps_the_nominal_unsearched_fields():
+    # gravity_scale, deadband and forcerange are not DR dimensions: a draw
+    # takes them from the lock (the nominal), not from SimParams' defaults.
+    nominal = SimParams(kp=100.0, forcerange=2.5, gravity_scale=1.4, deadband=(0.0, 0.0, 0.01, 0.0, 0.0, 0.0))
+    dr = uniform_ranges(nominal, 0.3)
+    draws = sample(dr, 0, 5)
+    assert len({p.kp for p in draws}) == 5
+    for p in draws:
+        assert 70.0 <= p.kp <= 130.0
+        assert p.forcerange == 2.5 and p.gravity_scale == 1.4
+        assert p.per_joint("deadband").tolist() == [0.0, 0.0, 0.01, 0.0, 0.0, 0.0]
+    assert sample(uniform_ranges(SimParams(), 0.3), 0, 1)[0].to_dict().keys() == SimParams().to_dict().keys()
+
+
 def test_uniform_ranges_pm30():
     nominal = SimParams(kp=100.0, kv=2.0, damping=0.5, armature=0.02, frictionloss=0.05, latency_frames=4)
     dr = uniform_ranges(nominal, 0.3)

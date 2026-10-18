@@ -352,6 +352,10 @@ def sample(ranges: DRRanges, rng: np.random.Generator | int | None, n: int) -> l
     Sets are drawn one at a time, so ``sample(r, rng, n)[:k]`` equals
     ``sample(r, rng_copy, k)``: drawing in a loop or in a batch gives the
     same sequence for the same generator state.
+
+    Only :data:`DIMS` are drawn; every other field (``forcerange``,
+    ``gravity_scale``, ``deadband``) comes from ``ranges.nominal``, so a lock
+    fitted with them keeps them in every draw.
     """
     rng = np.random.default_rng(rng)
     if n < 0:
@@ -365,7 +369,7 @@ def sample(ranges: DRRanges, rng: np.random.Generator | int | None, n: int) -> l
                 kwargs[dim] = int(rng.integers(int(r.lo), int(r.hi) + 1))
             else:
                 kwargs[dim] = float(10 ** rng.uniform(math.log10(r.lo), math.log10(r.hi)))
-        out.append(SimParams(**kwargs))
+        out.append(ranges.nominal.replace(**kwargs))
     return out
 
 

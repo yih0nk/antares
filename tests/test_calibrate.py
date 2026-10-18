@@ -150,7 +150,8 @@ def test_decode_rejects_wrong_dim():
 def test_search_spaces():
     assert SHARED.name == "shared" and SHARED.dims == DIMS and SHARED.n_dims == 6
     assert PER_JOINT.name == "per_joint"
-    assert set(PER_JOINT_SPACE) == set(SimParams.field_names())  # every field, incl. forcerange
+    # every per-joint field, incl. forcerange; gravity_scale and deadband are opt-in
+    assert set(PER_JOINT_SPACE) == set(SimParams.field_names()) - {"gravity_scale", "deadband"}
     assert PER_JOINT.n_dims == 7 * 6 == len(PER_JOINT.dims)
     assert PER_JOINT.dims[:2] == ("kp.shoulder_pan", "kp.shoulder_lift")
     assert PER_JOINT.dims[-1] == "forcerange.gripper"
@@ -164,7 +165,7 @@ def test_per_joint_encode_decode_round_trip():
     x = PER_JOINT.encode(TRUE_PER_JOINT)
     assert x.shape == (42,) and np.all(x >= 0) and np.all(x <= 1)
     back = PER_JOINT.decode(x)
-    assert back.has_per_joint and all(back.is_per_joint(n) for n in SimParams.field_names())
+    assert back.has_per_joint and all(back.is_per_joint(n) for n in PER_JOINT.fields)
     assert back.latency_frames == (2, 2, 4, 2, 2, 2)
     for name in SimParams.field_names():
         np.testing.assert_allclose(back.per_joint(name), TRUE_PER_JOINT.per_joint(name), rtol=1e-9)
@@ -590,6 +591,74 @@ def test_calibrate_with_real_arm_smoke():
     res = calibrate(eps[:1], eps[1:], max_evaluations=6, popsize=3, on_progress=events.append)
     assert res.n_evaluations == 6 and len(events) == 7
     assert math.isfinite(res.eval_score) and math.isfinite(res.baseline_eval_score)
+
+
+def test_fit_gravity_adds_one_shared_dimension():
+    import antares.calibrate as cal
+    from antares.calibrate import GRAVITY_SPACE, spaces
+
+    shared, per_joint = spaces(fit_gravity=True)
+    assert shared.name == "shared" and per_joint == PER_JOINT
+    assert shared.dims == DIMS + ("gravity_scale",)
+    p = shared.decode(shared.encode(SimParams(gravity_scale=0.4)))
+    assert p.gravity_scale == pytest.approx(0.4)
+    assert GRAVITY_SPACE["gravity_scale"][:2] == (0.0, 2.0)
+    assert not hasattr(cal, "SHARED_GRAVITY")  # spaces() is the one source of the optional spaces
+
+
+def test_calibrate_fit_gravity_searches_gravity_scale():
+    eps = make_episodes(2)
+    seen = set()
+
+    def sim(params, ep):
+        seen.add(params.gravity_scale)
+        real, simq = fake_simulate(params, ep)
+        return real, simq + (params.gravity_scale - 0.5)  # best at 0.5
+
+    off = calibrate(eps[:1], eps[1:], simulate=sim, max_evaluations=12, popsize=4)
+    assert seen == {1.0} and "gravity_scale" not in off.params.to_dict()
+    res = calibrate(eps[:1], eps[1:], simulate=sim, max_evaluations=60, popsize=6, fit_gravity=True)
+    assert len(seen) > 1
+    assert res.params.gravity_scale == pytest.approx(0.5, abs=0.15)
+    assert res.space == "shared" and "gravity_scale" in res.to_dict()["params"]
+
+
+def test_spaces_add_optional_terms():
+    from antares.calibrate import DEADBAND_SPACE, spaces
+
+    assert spaces() == (SHARED, PER_JOINT)
+    shared, pj = spaces(fit_deadband=True)
+    assert shared.dims == DIMS + ("deadband",)
+    assert "deadband" in pj.fields and pj.n_dims == PER_JOINT.n_dims + 6
+    shared, pj = spaces(fit_gravity=True, fit_deadband=True)
+    assert shared.dims == DIMS + ("gravity_scale", "deadband")
+    assert "gravity_scale" not in pj.fields
+    assert DEADBAND_SPACE["deadband"][0] == 0.0
+
+
+def test_calibrate_fit_deadband_per_joint_stage():
+    # Three joints want a 0.02 rad band and the others none, so the shared
+    # stage can only compromise and the per-joint stage has something to win.
+    # The residual depends on the deadband alone: with the toy servo in the
+    # loop, a CMA-ES step in the other 42 per-joint dims costs far more than
+    # any deadband gain and the stage never beats the shared optimum.
+    eps = make_episodes(2)
+    target = np.array([0.02, 0.02, 0.02, 0.0, 0.0, 0.0])
+
+    def sim(params, ep):
+        return ep.state, ep.state + (params.per_joint("deadband") - target)
+
+    res = calibrate(eps[:1], eps[1:], simulate=sim, max_evaluations=40, popsize=6,
+                    fit_deadband=True, per_joint=True, per_joint_max_evaluations=200)
+    assert [s["name"] for s in res.stages] == ["shared", "per_joint"]
+    shared = res.stages[0]["params"]["deadband"]
+    assert isinstance(shared, float) and 0.0 < shared < 0.02  # one compromise value
+    assert res.space == "per_joint" and res.params.is_per_joint("deadband")
+    assert len(res.to_dict()["params"]["deadband"]) == 6
+    assert res.train_score < res.stages[0]["train_score"]
+    band = res.params.per_joint("deadband")
+    # the gripper is left out of the score, so its band is unconstrained
+    np.testing.assert_allclose(band[:5], target[:5], atol=0.003)
 
 
 @pytest.mark.slow

@@ -35,6 +35,48 @@
   "data_sha256": "04e2f5678b93efcf9dd4b986e23225e4077c19496453b99c39742abe44ffe032",
   "dataset": "lerobot/svla_so100_pickplace",
   "name": "svla_so100_pickplace",
+  "objects": {
+    "camera": "top",
+    "created_at": "2026-10-18T04:37:52Z",
+    "description": "a red object, about 3.9 x 3.5 cm on a dark table",
+    "end_mean": [
+      0.0734,
+      -0.1189,
+      0.0044
+    ],
+    "end_std": [
+      0.0047,
+      0.0038,
+      0.0
+    ],
+    "footprint_m": [
+      0.0387,
+      0.0353
+    ],
+    "half_height": 0.015,
+    "mass_iqr_kg": 6.913154800378357,
+    "mass_kg": null,
+    "measured_mass_kg": 5.844057535848974,
+    "n_episodes": 50,
+    "n_tracked": 50,
+    "payload_verdict": "below the noise: the extra deflection is smaller than half its spread across episodes (IQR up to 5.0x the median)",
+    "rgb": [
+      254,
+      156,
+      132
+    ],
+    "start_mean": [
+      0.2713,
+      0.0289,
+      0.0044
+    ],
+    "start_std": [
+      0.0382,
+      0.085,
+      0.0
+    ],
+    "vision_vs_fk_m": 0.0136
+  },
   "params": {
     "armature": 0.013003020923684898,
     "damping": 0.12786550407287567,
@@ -744,5 +786,33 @@
     ],
     "train_score": 0.7704073321186796
   },
-  "robot_type": "so100"
+  "robot": "so101",
+  "robot_type": "so100",
+  "scene": {
+    "backdrops": {
+      "top": "scene/svla_so100_pickplace_top_backdrop.jpg"
+    },
+    "created_at": "2026-10-18T01:29:33Z",
+    "horizontal": true,
+    "n_grasps": 89,
+    "n_releases": 89,
+    "normal": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "object_half_height": 0.015,
+    "table_z": -0.010632685411911647,
+    "tilt_deg": 1.441917254920773,
+    "workspace_max": [
+      0.33447786088628606,
+      0.1502010010110153,
+      0.12947587146430448
+    ],
+    "workspace_min": [
+      0.06877247612219402,
+      -0.16017208811473255,
+      -0.005700803194939652
+    ]
+  }
 }

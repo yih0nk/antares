@@ -132,6 +132,14 @@ body {
   background: var(--comp);
 }
 
+.swatch.pol-default {
+  background: #aeb4c2;
+}
+
+.swatch.pol-lock {
+  background: #6fe07a;
+}
+
 .swatch.contact {
   background: var(--contact);
   opacity: 0.6;
@@ -528,6 +536,16 @@ body {
   grid-column: 1 / -1;
 }
 
+/* A second, smaller headline number (the policy section); the hero stays `.score`. */
+.subscore {
+  line-height: 1.35;
+}
+
+.subscore .big {
+  font-size: 22px;
+  color: #9fd8a8;
+}
+
 .params {
   width: 100%;
   border-collapse: collapse;
@@ -647,6 +665,23 @@ body {
   stroke-width: 1;
   stroke-dasharray: 4 3;
   opacity: 0.85;
+}
+
+/* the tracked object: solid box where the camera sees it, dashed where the
+   position comes from FK (held) or is carried forward (hidden) */
+.cam-obj {
+  fill: none;
+  stroke-width: 2;
+}
+
+.cam-obj.held,
+.cam-obj.hidden {
+  stroke-dasharray: 5 4;
+  opacity: 0.8;
+}
+
+.cam-obj-dot {
+  stroke: none;
 }
 
 .cam-empty {
@@ -1352,4 +1387,35 @@ body {
   .detail-grid {
     grid-template-columns: 1fr;
   }
+}
+
+/* ---- scene: real | sim view ---- */
+
+.cam-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+}
+
+.cam-pair .cam-view {
+  aspect-ratio: inherit;
+}
+
+.cam-tag {
+  position: absolute;
+  left: 6px;
+  top: 6px;
+  background: rgba(11, 13, 18, 0.7);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.scene-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 10px;
+}
+
+.scene-stats .mono {
+  font-size: 13px;
 }
