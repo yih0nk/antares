@@ -27,6 +27,7 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Callable, Mapping, Sequence
+import dataclasses
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -164,6 +165,11 @@ class SearchSpace:
     per_joint: bool = False
     #: Column names, one per joint (the robot's; default the SO arms' six).
     joints: tuple[str, ...] = JOINTS
+    #: Shared fields searched as one multiplier of ``reference``'s per-joint
+    #: values (bounds :data:`RELATIVE_BOUNDS`) instead of one absolute value,
+    #: so a robot whose joints differ by x100 keeps their proportions.
+    relative: tuple[str, ...] = ()
+    reference: SimParams | None = None
 
     @property
     def name(self) -> str:
@@ -190,10 +196,17 @@ class SearchSpace:
         when a per-joint parameter is passed; per-joint spaces broadcast
         scalars.
         """
+        missing = {f: factors.get(f).neutral for f in self.fields
+                   if f not in SimParams.field_names() and f not in dict(params.extra)}
+        if missing:  # an added factor the start doesn't set starts at its neutral value
+            params = params.replace(**missing)
         out = []
         for f in self.fields:
             b = self.bounds[f]
-            if self.per_joint:
+            if f in self.relative:
+                ratio = np.asarray(params.per_joint(f, len(self.joints))) / self._ref(f)
+                out.append(_to_unit(float(np.exp(np.mean(np.log(ratio)))), *RELATIVE_BOUNDS))
+            elif self.per_joint:
                 out.extend(_to_unit(v, *b) for v in params.per_joint(f, len(self.joints)))
             elif params.is_per_joint(f):
                 out.append(float(np.mean([_to_unit(v, *b) for v in params.per_joint(f)])))
@@ -214,9 +227,35 @@ class SearchSpace:
                 kwargs[f] = tuple(_from_unit(v, *b) for v in x[i * nj : (i + 1) * nj])
         else:
             for i, f in enumerate(self.fields):
-                kwargs[f] = _from_unit(x[i], *self.bounds[f])
+                if f in self.relative:
+                    m = _from_unit(x[i], *RELATIVE_BOUNDS)
+                    lo, hi, _ = self.bounds[f]
+                    kwargs[f] = tuple(float(v) for v in np.clip(self._ref(f) * m, lo, hi))
+                else:
+                    kwargs[f] = _from_unit(x[i], *self.bounds[f])
         return (base or SimParams()).replace(**kwargs)
 
+    def _ref(self, f: str) -> np.ndarray:
+        assert self.reference is not None, "a relative field needs a reference"
+        return np.asarray(self.reference.per_joint(f, len(self.joints)), dtype=np.float64)
+
+    def relative_to(self, start: SimParams) -> SearchSpace:
+        """This shared space with every field whose ``start`` values differ
+        across joints, all inside the bounds, searched relative to ``start``."""
+        if self.per_joint:
+            return self
+        rel = []
+        for f, (lo, hi, scale) in self.bounds.items():
+            if scale == "int" or not start.is_per_joint(f):
+                continue
+            v = np.asarray(start.per_joint(f, len(self.joints)), dtype=np.float64)
+            if np.ptp(v) > 0 and v.min() >= lo and v.max() <= hi:
+                rel.append(f)
+        return dataclasses.replace(self, relative=tuple(rel), reference=start) if rel else self
+
+
+#: Multiplier range of a relative field (see :attr:`SearchSpace.relative`).
+RELATIVE_BOUNDS: tuple[float, float, str] = (0.1, 10.0, "log")
 
 SHARED = SearchSpace(SPACE, per_joint=False)
 PER_JOINT = SearchSpace(PER_JOINT_SPACE, per_joint=True)
@@ -670,6 +709,9 @@ class _Fit:
             opts["popsize"] = int(popsize)
 
         x0 = np.clip(space.encode(start), 1e-3, 1 - 1e-3)
+        n = space.n_dims
+        if n == 1:  # CMA-ES needs two dims; the second is ignored
+            x0 = np.append(x0, 0.5)
         es = cma.CMAEvolutionStrategy(x0, sigma0, opts)
         first_eval = self.evaluations
         cancelled = False
@@ -678,7 +720,7 @@ class _Fit:
             self.generation += 1
             solutions = es.ask()
             budget = max_evaluations - (self.evaluations - first_eval)
-            candidates = [space.decode(x, base=start) for x in solutions[:budget]]
+            candidates = [space.decode(np.asarray(x)[:n], base=start) for x in solutions[:budget]]
 
             values: list[float] = []
             for i, (params, (report, value)) in enumerate(
@@ -789,6 +831,8 @@ def calibrate(
         fit_factors,
         per_joint_factors,
     )
+    if not so_arm:
+        shared_space = shared_space.relative_to(start)
 
     # Evaluation 0: the starting point.
     start_report, start_score = _safe_score(start, train, simulate)
