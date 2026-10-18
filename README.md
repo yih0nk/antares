@@ -1605,7 +1605,7 @@ On the two demo datasets (gripper tip in the base frame):
 
 | | picks | carried | missed | idle | pick x, y (cm) | place x, y, z (cm) | jaw on the cube |
 |---|---|---|---|---|---|---|---|
-| SO-101 | 51 in 50 episodes | 48 | 0 | 27 | 3..24, -14..13 | 2.8, -15.4, 7.0 (±1) | -2.3° |
+| SO-101 | 51 in 50 episodes | 50 | 0 | 27 | 3..24, -14..13 | 2.8, -15.3, 7.0 (±1) | -2.3° |
 | SO-100 | 50 in 49 episodes | 49 | 1 | 49 | 19..33, -8..14 | 8.4, -12.4, 8.0 (±1) | +5.8° |
 
 Picks spread over a 20 x 27 cm area on SO-101 and land in one spot about
@@ -1910,6 +1910,138 @@ SO-101 backdrops carry a ghost of its rest pose and the SO-100's the base;
 the object half-height is a guess; the workspace is where the fingertips
 went, not the table's extent; the grasp label is the command, not contact.
 
+## Objects from the video and the residual
+
+With the camera and the table plane fitted, anything that sits on the
+table and shows up in the camera can be put in 3D: its pixel ray hits the
+plane at the object's height. `antares objects-fit` finds the one object
+a pick-and-place dataset moves, follows it through every frame of every
+episode, checks the camera against the kinematics, and tries to weigh it
+from how the arm sags while carrying it.
+
+```sh
+.venv/bin/antares objects-fit lerobot/svla_so101_pickplace --lock svla_so101_pickplace   # -> locks/<lock>.objects.json
+.venv/bin/antares payload lerobot/svla_so101_pickplace --lock svla_so101_pickplace       # the per-episode mass table
+```
+
+How it works (`antares/objects.py`, `antares/payload.py`):
+
+1. **Foreground.** Per frame, the camera's background model gives the
+   moving pixels; the sim arm's silhouette at the logged joint angles,
+   dilated by 14 px (hull slack, the real gripper reaching lower), is
+   subtracted. What is left is what the arm moved: the object, its shadow,
+   bits of the real arm the hulls miss (the SO-100's white parts, since it
+   is simulated with the SO-101 model).
+2. **Colour prior.** The object sits still before the grasp, so the
+   largest blob of the first frames of each episode is the object; its Lab
+   colour (median over episodes, spread floored) is the prior. Pixels off
+   that colour are dropped (shadows, the white arm parts), and a blob has
+   to be within 0.15-4x the prior's area (the SO-101's red cables are the
+   right colour but too small).
+3. **Tracking.** While the gripper holds something (the picks from
+   `antares.task`, now also ending when the jaw shuts the rest of the way
+   on nothing because the object slipped out) the object is between the
+   jaws and mostly hidden: its position is the FK fingertip (`held`).
+   Otherwise the blob nearest the last sighting is the object (`vision`);
+   right after a release the search starts from where the jaws opened and
+   is wider, since the object drops or slides. Not seen: `hidden`, last
+   position carried forward.
+4. **Pixel to metres.** The ray through the blob centroid meets the plane
+   `z = table + 15 mm` (the scene's assumed half-height). The blob's
+   pixels back-projected onto that plane give the footprint (oriented
+   extent, median over the at-rest frames). About 6-9 s per episode.
+
+The check that is built in: if the camera, the table and the tracking are
+right, the gripper closes where the object was seen. Per episode, the
+distance between the vision start pose (median before the grasp) and the
+FK fingertip at the grasp:
+
+| dataset | camera | object | footprint (IQR) | start poses: std, range (cm) | end poses: std (cm) | vision vs FK: median, IQR, worst | fixed offset (vision - FK) | spread about it |
+|---|---|---|---|---|---|---|---|---|
+| svla_so101_pickplace | `up` | a red 2x4-stud brick on a white table, carried into a shallow orange-rimmed tray | 3.9 x 1.8 cm (0.4 / 0.3) | 8.4 x 11.4; x 1..25, y -16..14 | 0.7 x 1.7 at (2.0, -15.9) | 2.1 / 0.7 / 3.4 cm | (+0.7, +0.2) cm | 1.8 cm |
+| svla_so100_pickplace | `top` | a red cube on a black table, dropped into a white box | 3.9 x 3.5 cm (0.1 / 0.2) | 3.8 x 8.5; x 20..33, y -9..15 | 0.5 x 0.4 at (7.3, -11.9) | 1.4 / 0.7 / 2.5 cm | (+1.1, -0.3) cm | 0.8 cm |
+
+50 of 50 episodes tracked on each. The vision start poses cover the same
+area as `antares task`'s FK picks (SO-101: x 3..24, y -14..13; SO-100: x
+19..33, y -8..14) and the two agree to about 2 cm, of which roughly 1 cm
+is a fixed offset along +x: the camera puts the object a little further
+out than the kinematics put the jaws (the blob centroid takes in the
+object's front face from an oblique camera, and the camera fit is loose
+along its optical axis). The end poses are tight (the container), and sit
+7.6-7.9 cm from the FK release point: the object is let go 7-8 cm up and
+drops, so that number is the drop height, not an error. A 2x4 brick is
+3.2 x 1.6 cm and the SO-100 cube looks like 3.5 cm: the oblique `up`
+camera adds the brick's front face to its footprint, the top-down `top`
+camera gets the cube right.
+
+**Cross-camera check (SO-101).** With `up` and `side` both fitted, the
+object at rest is triangulated from the two pixel rays over 36 frames.
+The rays pass within 0.5 cm of each other, but meet 3.0 cm from `up`'s
+plane point and 2.6 cm *below* the object plane (1 cm below the table),
+and `side`'s own plane intersection is 6.4 cm off in xy. The `side` fit
+(IoU 0.58, the arm leaving the frame) is loose in depth, so the
+single-camera plane intersection, validated by the FK agreement above, is
+the better estimate; triangulation here measures the camera fits, not the
+object.
+
+**Payload mass from the residual.** A position servo settles short of its
+command by load / gain, so a mass `m` at the fingertip adds a deflection
+`-m g Jz / kp` on each load-bearing joint (`Jz`: fingertip height per
+radian from the site Jacobian; `kp`: the lock's gain, N*m/rad). Lifting
+also reverses the motion, and a deadband flips the tracking error with
+direction, so the residual step across the *pick* (`P + D`) and across the
+*release* (`-P + D`, the same down-then-up motion with the load leaving)
+are measured separately: half the difference is the payload, half the sum
+the motion term. Windows of 0.6 s either side of each event, medians,
+`shoulder_lift` and `elbow_flex`.
+
+| dataset | lock kp | shoulder: extra deflection (IQR), motion term | elbow: extra deflection (IQR), motion term | mass per encoder step | noise floor | combined mass (IQR) | verdict |
+|---|---|---|---|---|---|---|---|
+| svla_so101_pickplace | 10.5 | +0.69° (0.58), +0.38° | -0.27° (0.89), -0.18° | 13 g | 41-58 g | 22 g (69) over 50 picks | below the noise |
+| svla_so100_pickplace | 1427 | +0.63° (0.52), +0.47° | +0.22° (1.10), +0.02° | 1.5 kg | 4-7 kg | 5.8 kg (6.9) over 49 picks | below the noise |
+
+So: no. The residual does step across a pick, by about 0.6-0.7° on the
+shoulder, repeatably (IQR 0.5°), but the same step shows on an arm whose
+lock says `kp = 1427` and on one whose lock says `kp = 10.5`, so it is not
+a stiffness-limited sag; the elbow's step has the opposite sign on the
+SO-101; and the per-episode spread is 1.3-5x the median. The method's
+resolution with the SO-101 lock is 13 g per encoder step and its noise
+floor 40-60 g, both above a 30 g printed object; with the SO-100 lock the
+resolution is 1.5 kg. The deflection is reported, the mass is marked as
+not measured, and the export falls back to the assumed 30 g.
+Assumptions, stated: quasi-static windows; torque = `kp (cmd - q)` with
+the lock's `kp` (the mass scales 1:1 with it, and pick-and-place logs do
+not pin `kp` down, see [Is a lock specific to its arm?](#is-a-lock-specific-to-its-arm));
+a point mass at the `gripperframe` site; the sim's link masses are the
+real ones; the gripper joint excluded; the motion term the same at pick
+and release.
+
+Outputs: `locks/<lock>.objects.json` (prior, per-episode summaries, the
+start/end pose clouds, footprint, agreement numbers, cross-camera check,
+the payload estimate), `locks/objects/<lock>_<camera>_tracks.npz` (the
+per-frame tracks) and a compact `objects` entry in the lock (old locks
+load with none). `antares export` then puts the object in `scene.xml` as a
+free box with the vision footprint, the estimated mass (the assumed 30 g
+when the estimate is below the noise, and the comment says so) at the mean
+vision start pose, coloured like the object, with the start/end
+distributions in `objects.json` next to it; the objects fit wins over
+`--task`'s cube when both exist, and the task is still written with its
+picks taken from vision (`"source": "vision"`;
+`TaskDistribution.with_vision_picks`). The API: `POST /api/objects/fit
+{dataset, lock, camera?}` (a job, progress per episode), `GET
+/api/objects?lock=`, and `GET /api/objects/track?dataset=&episode=&lock=`
+for the per-frame positions, source and pixel boxes. The UI's Objects
+block under Scene has the fit button, footprint, mass verdict and the
+vision-vs-FK number; the overlay viewer draws the object's box on the
+frame (solid where seen, dashed while held or hidden) and the 3D viewer a
+small box of the object's colour following the playhead.
+
+Caveats: the object's height is the scene's assumed 15 mm half-height
+(the camera cannot see it from above), so the end poses in a raised
+container would be off; one object per dataset; a second object of the
+same colour would be confused with it; the SO-100's end poses rely on the
+cube being visible inside its box from above.
+
 ## Layout
 
 | Path | What |
@@ -1958,6 +2090,8 @@ went, not the table's extent; the grasp label is the command, not contact.
 | `antares/noise.py` | Joint-reading noise model measured while parked (`antares noise`) |
 
 | `antares/scene.py` | Table, workspace and backdrops from the logs; sim-view composite (`locks/*.scene.json`, `locks/scene/`) |
+| `antares/objects.py` | The manipulated object found and tracked in the video, vision vs FK, cross-camera check (`antares objects-fit`, `locks/*.objects.json`, `locks/objects/`) |
+| `antares/payload.py` | Payload mass from the residual while the object is carried (`antares payload`) |
 | `locks/` | Committed locks for the demo arms; `locks/fleet/` for the fleet scan |
 | `web/` | React + three.js viewer |
 

@@ -12,6 +12,8 @@ import {
   type Geometry,
   type JobEvent,
   type LockSummary,
+  type ObjectsFit,
+  type ObjectTrack,
   type Params,
   type ParamValue,
   type PolicyEvalEvent,
@@ -29,6 +31,7 @@ import {
 import { Arm, compMaterial, ghostMaterial, policyDefaultMaterial, policyLockMaterial, realMaterial, type Playhead } from "./Arm";
 import { CameraView } from "./CameraView";
 import { SceneGeometry } from "./Scene";
+import { ObjectMarker } from "./Objects";
 import { CrossHeatmap, JointTrace, ResidualStrip, Sparkline } from "./Charts";
 import { AddDataset } from "./AddDataset";
 import { FleetView } from "./Fleet";
@@ -192,6 +195,10 @@ export default function App() {
   const [polViewer, setPolViewer] = useState<PolicyViewer | null>(null);
   const [polViewerNote, setPolViewerNote] = useState<string | null>(null);
   const [polViewerBusy, setPolViewerBusy] = useState(false);
+
+  // The manipulated object fitted for the camera lock, and this episode's track.
+  const [objects, setObjects] = useState<ObjectsFit | null>(null);
+  const [track, setTrack] = useState<ObjectTrack | null>(null);
 
   const playhead = useMemo<Playhead>(() => ({ frame: 0 }), []);
 
@@ -645,6 +652,38 @@ export default function App() {
     showPolicy && polViewer && polViewer.episode === episode && !polBusy ? polViewer.sims[name]?.poses ?? null : null;
   const lastEpoch = polJob?.progress[polJob.progress.length - 1];
 
+  // ---- objects fit saved for the camera lock ---------------------------------
+  useEffect(() => {
+    if (!cameraLock) {
+      setObjects(null);
+      return;
+    }
+    let live = true;
+    api.objects(cameraLock).then(
+      (r) => live && setObjects(r.objects),
+      () => live && setObjects(null),
+    );
+    return () => {
+      live = false;
+    };
+  }, [cameraLock]);
+
+  // ---- the object's per-frame track for this episode -------------------------
+  // Fetched once per episode (the saved track, or a few seconds of tracking
+  // on the server the first time); the viewer reads it at the playhead.
+  useEffect(() => {
+    setTrack(null);
+    if (!dataset || episode == null || !cameraLock || !objects || objects.lock !== cameraLock) return;
+    let live = true;
+    api.objectsTrack(dataset, episode, cameraLock).then(
+      (t) => live && setTrack(t),
+      () => live && setTrack(null),
+    );
+    return () => {
+      live = false;
+    };
+  }, [dataset, episode, cameraLock, objects]);
+
   const seek = (f: number) => {
     playhead.frame = f;
     setFrame(Math.floor(f));
@@ -731,6 +770,7 @@ export default function App() {
                 <Arm geometry={geometry} poses={polPoses("default")} clip={`${clip}#policy`} playhead={playhead} material={policyDefaultMaterial} />
                 <Arm geometry={geometry} poses={polPoses("lock")} clip={`${clip}#policy`} playhead={playhead} material={policyLockMaterial} />
                 <SceneGeometry scene={scene} />
+                <ObjectMarker track={track} playhead={playhead} />
               </group>
             </Suspense>
           )}
@@ -767,6 +807,12 @@ export default function App() {
           {scene && (
             <span className="muted small">
               table at {(scene.table.z * 1000).toFixed(0)} mm, workspace box from the logs
+            </span>
+          )}
+          {track && (
+            <span className="muted small">
+              <i className="swatch" style={{ background: `rgb(${track.rgb.join(",")})` }} /> object from the video
+              {track.source[Math.min(track.source.length - 1, frame)] === "held" ? " (held: fingertip from FK)" : ""}
             </span>
           )}
           {inEvent && (
@@ -948,6 +994,9 @@ export default function App() {
           busy={running}
           scene={scene}
           onSceneChange={setScene}
+          objects={objects}
+          onObjectsChange={setObjects}
+          track={track}
           onError={setError}
         />
 

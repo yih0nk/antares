@@ -35,7 +35,7 @@ Pure kinematics: no dynamics and no lock are needed, only the dataset-unit
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, ClassVar
 
@@ -190,7 +190,8 @@ def find_grasps(
 
     The release is the next open flip of the command or, for a held grasp,
     the first frame the jaw opens ``held_gap`` past where the object held
-    it, whichever comes first.
+    it or shuts halfway from that level back to its empty level (the
+    object slipped out of a barely opened jaw), whichever comes first.
 
     The jaw is read over :data:`JAW_WINDOW_S` starting :data:`SETTLE_S`
     after the close, cut short by the release or the end of the episode,
@@ -219,10 +220,13 @@ def find_grasps(
         jaw_rad = float(np.median(q[start:stop, GRIPPER_INDEX]))
         if gap >= held_gap:
             # Letting go opens the jaw past where the object held it, even
-            # when the leader opens too little to cross the thresholds.
-            opened = np.flatnonzero(jaw[start:end] > hold + held_gap)
-            if opened.size:
-                r = start + int(opened[0])
+            # when the leader opens too little to cross the thresholds; or
+            # the object slips out and the jaw shuts the rest of the way
+            # on nothing (halfway from the held level back to empty).
+            seg = jaw[start:end]
+            left = np.flatnonzero((seg > hold + held_gap) | (seg < empty.jaw + 0.5 * gap))
+            if left.size:
+                r = start + int(left[0])
         out.append(
             Grasp(
                 episode=int(episode.index),
@@ -280,12 +284,28 @@ class TaskDistribution(JsonFile):
     start_q: np.ndarray  # (E, 6) rad
     episodes: list[int]
     empty: EmptyLevel = EmptyLevel(float("nan"), float("nan"))
+    #: Where the pick positions come from: ``"fk"`` (the gripper tip at the
+    #: grasp, the default) or ``"vision"`` (the object seen on the table
+    #: before the grasp, :meth:`with_vision_picks`).
+    source: str = "fk"
     created_at: str = field(default_factory=now_iso)
     antares_version: str = __version__
 
     @property
     def file_stem(self) -> str:
         return slug(self.name)
+
+    def with_vision_picks(self, start_poses: Mapping[int, Sequence[float]]) -> TaskDistribution:
+        """A copy whose held grasps take their pick position from ``start_poses``
+        (episode -> the object's vision start pose, metres), ``source =
+        "vision"``. Grasps in episodes without a vision pose keep the FK tip."""
+        grasps = []
+        for g in self.grasps:
+            p = start_poses.get(g.episode)
+            if g.held and p is not None:
+                g = replace(g, xyz=tuple(float(v) for v in p))
+            grasps.append(g)
+        return replace(self, grasps=grasps, source="vision")
 
     @classmethod
     def from_episodes(
@@ -405,6 +425,7 @@ class TaskDistribution(JsonFile):
             "grasps": [g.to_dict() for g in self.grasps],
             "start_q": self.start_q.tolist(),
             "episodes": self.episodes,
+            "source": self.source,
             "summary": self.summary(),
             "created_at": self.created_at,
             "antares_version": self.antares_version,
@@ -443,6 +464,7 @@ class TaskDistribution(JsonFile):
             start_q=np.asarray(d["start_q"], dtype=np.float64).reshape(-1, 6),
             episodes=[int(i) for i in d["episodes"]],
             empty=EmptyLevel(float(e.get("jaw", float("nan"))), float(e.get("cmd", float("nan")))),
+            source=str(d.get("source", "fk")),
             created_at=str(d.get("created_at", "")),
             antares_version=str(d.get("antares_version", "")),
         )

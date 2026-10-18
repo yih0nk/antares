@@ -2072,6 +2072,148 @@ def cmd_policy_evaluate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cm(v, fmt="{:+.1f}") -> str:
+    return "-" if v is None else ", ".join(fmt.format(100 * x) for x in v)
+
+
+def _payload_lines(est: dict) -> list[str]:
+    """The payload summary as printed by ``objects-fit`` and ``payload``."""
+    lines = [f"payload from the residual: {est.get('verdict', '')}"]
+    rows = []
+    for j in ("shoulder_lift", "elbow_flex"):
+        pd, md, mj = est["payload_deg"].get(j), est["motion_deg"].get(j), est["mass_by_joint"].get(j)
+        if not pd:
+            continue
+        step, floor = est.get("mass_per_step_kg", {}).get(j), est.get("mass_noise_floor_kg", {}).get(j)
+        rows.append([
+            j, f"{est['kp'][j]:.1f}", f"{(est.get('lever_m') or {}).get(j) or float('nan'):.3f}",
+            f"{pd['median']:+.3f} ({pd['iqr']:.3f})", f"{md['median']:+.3f} ({md['iqr']:.3f})",
+            f"{1000 * mj['median']:+.0f} ({1000 * mj['iqr']:.0f})" if mj else "-",
+            f"{1000 * step:.0f}" if step is not None else "-", f"{1000 * floor:.0f}" if floor is not None else "-",
+        ])
+    if rows:
+        lines.append(_table(["joint", "kp (N*m/rad)", "lever (m)", "extra deflection deg (IQR)", "motion term deg (IQR)",
+                             "mass g (IQR)", "g per encoder step", "noise floor g"], rows))
+    m = est.get("mass")
+    if m:
+        lines.append(f"combined over {m['n']} picks: median {1000 * m['median']:+.0f} g, IQR {1000 * m['iqr']:.0f} g "
+                     f"(q1 {1000 * m['q1']:+.0f}, q3 {1000 * m['q3']:+.0f})")
+    return lines
+
+
+def cmd_objects_fit(args: argparse.Namespace) -> int:
+    from antares import server
+
+    lock = args.lock or server._slug(args.repo_id)
+    try:
+        ds = server.get_dataset(args.repo_id)
+    except Exception as e:  # noqa: BLE001
+        print(f"error: {getattr(e, 'detail', e)}", file=sys.stderr)
+        return 1
+    eps = [int(x) for x in args.episodes.split(",")] if args.episodes else None
+
+    def on_progress(ev: dict) -> None:
+        if ev.get("stage") == "prior":
+            pr = ev["prior"]
+            print(f"  object colour from the first frames: rgb {pr['rgb']}, {pr['area_px']:.0f} px at rest ({pr['n_samples']} samples)")
+        elif ev.get("stage") == "track":
+            t = ev["track"]
+            d = t.get("vision_vs_fk_m")
+            print(f"  episode {t['episode']:3d}: seen in {t['n_visible']}/{t['n_frames']} frames, picks {t['picks']}, "
+                  f"vision vs FK {'-' if d is None else f'{100 * d:.1f} cm'} {t['note']}  [{ev['elapsed_s']:.0f}s]")
+        elif ev.get("stage") == "cross":
+            print("  cross-camera check done")
+        elif ev.get("stage") == "payload" and ev["i"] % 10 == 0:
+            print(f"  payload: {ev['i']}/{ev['n']} episodes replayed")
+
+    print(f"tracking the object in {ds.repo_id} for lock {lock}" + (f" (camera {args.camera})" if args.camera else ""))
+    try:
+        fit, tracks, path = server.run_objects_fit(ds, lock, args.camera or None, episodes=eps, payload=not args.no_payload, on_progress=on_progress)
+    except Exception as e:  # noqa: BLE001
+        print(f"error: {getattr(e, 'detail', e)}", file=sys.stderr)
+        return 1
+    print(f"objects for lock {lock} from {ds.repo_id} (camera {fit.camera}): {fit.n_tracked} of {fit.n_episodes} episodes tracked in {fit.elapsed_s:.0f}s")
+    print(f"  {fit.description}")
+    fp = fit.footprint_m
+    if fp and fp["long"] and fp["short"]:
+        print(f"  footprint {100 * fp['long']['median']:.1f} x {100 * fp['short']['median']:.1f} cm "
+              f"(IQR {100 * fp['long']['iqr']:.1f} / {100 * fp['short']['iqr']:.1f} cm over {fp['long']['n']} episodes; "
+              f"height {200 * fit.object_half_height:.1f} cm assumed)")
+    rows = []
+    for label, c in (("start (vision)", fit.start), ("end (vision)", fit.end)):
+        if c:
+            rows.append([label, str(c["n"]), _cm(c["mean"]), _cm(c["std"], "{:.1f}"), _cm(c["min"]), _cm(c["max"])])
+    if rows:
+        print("  object centre on the table plane, base frame, cm (x, y, z):")
+        print("  " + _table(["", "n", "mean", "std", "min", "max"], rows).replace("\n", "\n  "))
+    v = fit.vision_vs_fk_m
+    if v:
+        print(f"  vision start pose vs FK fingertip at the grasp: median {100 * v['median']:.1f} cm, "
+              f"IQR {100 * v['iqr']:.1f} cm, worst {100 * v['max']:.1f} cm over {v['n']} episodes")
+        if fit.vision_vs_fk_offset_m and fit.vision_vs_fk_centred_m:
+            print(f"    of which a fixed offset (vision - FK) of {_cm(fit.vision_vs_fk_offset_m)} cm; "
+                  f"{100 * fit.vision_vs_fk_centred_m['median']:.1f} cm median spread around it")
+    e = fit.end_vs_fk_m
+    if e:
+        print(f"  vision end pose vs FK fingertip at the release: median {100 * e['median']:.1f} cm (the object drops after the release)")
+    cc = fit.cross_camera
+    if cc:
+        if cc.get("n"):
+            t, h = cc["triangulated_vs_plane_m"], cc["triangulated_height_above_plane_m"]
+            print(f"  cross-camera ({cc['primary']} x {cc['other']}): triangulated point vs plane intersection median "
+                  f"{100 * t['median']:.1f} cm (IQR {100 * t['iqr']:.1f}) over {cc['n']} frames; "
+                  f"triangulated height above the plane median {100 * h['median']:+.1f} cm; ray gap median {100 * cc['ray_gap_m']['median']:.1f} cm")
+        else:
+            print(f"  cross-camera: {cc.get('note', 'not run')}")
+    if fit.payload:
+        for line in _payload_lines(fit.payload):
+            print("  " + line.replace("\n", "\n  "))
+    bad = [t["episode"] for t in fit.tracks if t.get("start_pose") is None]
+    if bad:
+        print(f"  episodes where the object was not found before the grasp: {_episode_list(bad)}")
+    print(f"saved {path}")
+    return 0
+
+
+def cmd_payload(args: argparse.Namespace) -> int:
+    from antares import server
+    from antares.payload import estimate_payload
+    from antares.sim import Arm
+
+    lock_name = args.lock or server._slug(args.repo_id)
+    try:
+        ds = server.get_dataset(args.repo_id)
+        lock = server.load_lock(lock_name)
+    except Exception as e:  # noqa: BLE001
+        print(f"error: {getattr(e, 'detail', e)}", file=sys.stderr)
+        return 1
+    arm = Arm(lock.params, robot=lock.robot)
+    eps = [int(x) for x in args.episodes.split(",")] if args.episodes else None
+    est = estimate_payload(ds, arm, lock_name, episodes=eps, window_s=args.window)
+    print(f"payload for lock {lock_name} on {ds.repo_id}: {est.n_ok} of {est.n_episodes} carried picks measured "
+          f"(windows of {est.window_s:g} s either side of each pick and release)")
+    rows = []
+    for e in est.episodes:
+        sl, el = e.joints.get("shoulder_lift"), e.joints.get("elbow_flex")
+        rows.append([
+            str(e.episode), f"{e.grasp}-{e.release}",
+            f"{sl.payload_deg:+.3f}" if sl else "-", f"{el.payload_deg:+.3f}" if el else "-",
+            f"{1000 * sl.mass_kg:+.0f}" if sl and sl.mass_kg == sl.mass_kg else "-",
+            f"{1000 * el.mass_kg:+.0f}" if el and el.mass_kg == el.mass_kg else "-",
+            f"{1000 * e.mass_kg:+.0f}" if e.ok else e.note,
+        ])
+    print(_table(["episode", "carry frames", "shoulder deg", "elbow deg", "shoulder g", "elbow g", "mass g"], rows))
+    for line in _payload_lines(est.to_dict()):
+        print(line)
+    print("assumptions: " + "; ".join(est.assumptions))
+    if args.out:
+        from pathlib import Path
+
+        Path(args.out).write_text(__import__("json").dumps(est.to_dict(), indent=2) + "\n")
+        print(f"saved {args.out}")
+    return 0
+
+
 def cmd_camera_list(args: argparse.Namespace) -> int:
     from antares import server
 
@@ -2741,6 +2883,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     e.add_argument("--no-save", action="store_true", help="do not write locks/<lock>.policy.<mode>.json")
     e.set_defaults(func=cmd_policy_evaluate)
+
+
+    p = sub.add_parser("objects-fit", help="find and track the manipulated object in a dataset's video; mass from the residual")
+    p.add_argument("repo_id", help="Hub dataset id or a LeRobot dataset directory on disk")
+    p.add_argument("--lock", default=None, help="lock with a camera fit and a scene fit (default: dataset slug)")
+    p.add_argument("--camera", default=None, help="camera to track in (default: the lock's best-fitted camera)")
+    p.add_argument("--episodes", default=None, help="comma-separated episode indices (default: all)")
+    p.add_argument("--no-payload", action="store_true", help="skip the residual-based mass estimate")
+    p.set_defaults(func=cmd_objects_fit)
+
+    p = sub.add_parser("payload", help="payload mass per episode from the residual while the object is carried")
+    p.add_argument("repo_id", help="Hub dataset id or a LeRobot dataset directory on disk")
+    p.add_argument("--lock", default=None, help="lock whose calibrated sim replays the episodes (default: dataset slug)")
+    p.add_argument("--episodes", default=None, help="comma-separated episode indices (default: all)")
+    p.add_argument("--window", type=float, default=0.6, help="seconds of residual either side of each pick/release")
+    p.add_argument("--out", default=None, help="also save the estimate as JSON here")
+    p.set_defaults(func=cmd_payload)
 
     return parser
 

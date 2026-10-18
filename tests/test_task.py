@@ -196,8 +196,10 @@ def test_thresholds_catch_a_shallow_close(tip, unit_map):
 
 
 def test_held_read_before_the_operator_lets_go(tip, unit_map):
-    """No release is detected (the leader only opens a little), so the closed
-    stretch runs to the end; the jaw must still be read while it holds."""
+    """The leader only opens a little (the thresholds never see a release)
+    and the cube slips out, so the jaw shuts the rest of the way on
+    nothing: the jaw is read while it still holds, and the release is the
+    frame the jaw dropped back toward its empty level."""
     ep = pick_place_episode(0)
     st, act = ep.state.copy(), ep.action.copy()
     act[80:, 5] = SHUT + 5.0  # a shallow open the thresholds do not see
@@ -207,7 +209,8 @@ def test_held_read_before_the_operator_lets_go(tip, unit_map):
     thr = dataset_thresholds([ep])
     (g,) = find_grasps(ep, thr, tip, unit_map, empty_level([ep], thr))
     assert g.held and g.jaw_gap == pytest.approx(25.0 - SHUT)
-    assert g.release_frame is None  # the jaw dropped to the command, it never opened past the cube
+    assert g.release_frame == 80  # the jaw shut past the held level: the cube is gone
+    assert g.carried
 
 
 def test_release_found_from_the_jaw_opening(tip, unit_map):

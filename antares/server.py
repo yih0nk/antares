@@ -3497,6 +3497,193 @@ def policy_viewer_get(
     return policy_viewer(ds, lock_dict, policy, _check_policy_mode(mode), episode, _csv(robots) or None)
 
 
+# Objects (antares.objects / antares.payload)
+#
+# The manipulated object found in the video, tracked through every episode
+# (vision on the table plane, FK while held), its start/end pose
+# distribution against the task's FK picks, and the payload mass estimated
+# from the residual while it is carried. The fit is a job (progress per
+# episode); the per-frame track of one episode feeds the overlay and the
+# 3D viewer.
+# ==========================================================================
+
+_TRACKS: dict[tuple[str, str, int], Any] = {}
+_TRACKS_LOCK = threading.Lock()
+
+
+def load_objects_dict(lock_name: str) -> dict | None:
+    """``<lock>.objects.json`` for a lock, or None when no objects fit was run."""
+    from antares.objects import load_object_fit
+
+    _lock_path(lock_name)  # validates the name
+    fit = load_object_fit(lock_name, LOCK_DIR)
+    return fit.to_dict() if fit is not None else None
+
+
+def _objects_camera(lock_name: str, camera: str | None) -> tuple[str, dict]:
+    """The camera to track in: the one asked for, else the lock's best-fitted one."""
+    fits = load_camera_fit_dicts(lock_name)
+    if not fits:
+        raise HTTPException(status_code=400, detail=f"lock {lock_name!r} has no camera fit; run camera-fit first")
+    if camera is not None:
+        name = camera.removeprefix("observation.images.")
+        if name not in fits:
+            raise HTTPException(status_code=404, detail=f"lock {lock_name!r} has no camera fit for {name!r}; fitted: {sorted(fits)}")
+        return name, fits
+    best = max(fits, key=lambda n: float(fits[n].get("fit_iou") or 0.0))
+    return best, fits
+
+
+def run_objects_fit(
+    ds: Dataset,
+    lock_name: str,
+    camera: str | None = None,
+    *,
+    episodes: list[int] | None = None,
+    payload: bool = True,
+    on_progress: Callable[[dict], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
+):
+    """Track the object in ``ds`` for ``lock_name`` and save the fit (JSON,
+    tracks ``.npz``, the lock's ``objects`` field). Returns ``(fit, tracks, path)``.
+
+    Needs the lock's camera fit and scene fit (the table plane). With two
+    fitted cameras the cross-camera triangulation check runs too; with
+    ``payload`` the residual-based mass estimate is attached.
+    """
+    from antares.objects import cross_camera_check, fit_objects, save_object_fit
+    from antares.payload import estimate_payload
+    from antares.project import Camera
+    from antares.scene import load_scene_fit
+    from antares.sim import Arm
+
+    lock_name = resolve_lock_ref(lock_name)
+    lock = load_lock(lock_name)
+    scene = load_scene_fit(lock_name, LOCK_DIR)
+    if scene is None:
+        raise HTTPException(status_code=400, detail=f"lock {lock_name!r} has no scene fit (the table plane); run scene-fit first")
+    name, fits = _objects_camera(lock_name, camera)
+    cam = Camera.from_dict(fits[name])
+    try:
+        bgm = camera_background(ds, name)
+    except Exception as e:  # noqa: BLE001
+        raise _video_error(e)
+    arm = Arm(lock.params, robot=lock.robot)
+    bd = scene.backdrops.get(name)
+    fit, tracks = fit_objects(
+        ds, arm, lock_name, name, cam, bgm, scene.table.z,
+        object_half_height=scene.table.object_half_height,
+        table_rgb=bd.table_rgb if bd is not None else None,
+        episodes=episodes,
+        on_progress=on_progress,
+        should_stop=should_stop,
+    )
+    others = [n for n in fits if n != name]
+    if others and not (should_stop and should_stop()):
+        try:
+            cams = {n: Camera.from_dict(fits[n]) for n in (name, others[0])}
+            bgs = {n: camera_background(ds, n) for n in cams}
+            fit.cross_camera = cross_camera_check(ds, arm, cams, bgs, scene.table.z + scene.table.object_half_height, name)
+        except Exception as e:  # noqa: BLE001 - the check is optional
+            fit.cross_camera = {"n": 0, "note": f"{type(e).__name__}: {e}"}
+        if on_progress is not None:
+            on_progress({"stage": "cross", "cross_camera": fit.cross_camera})
+    if payload and not (should_stop and should_stop()):
+        picks = {t.episode: [(g, r) for g, r in t.picks if r < len(t.frames)] for t in tracks}
+        est = estimate_payload(ds, arm, lock_name, picks=picks, episodes=[t.episode for t in tracks], on_progress=on_progress, should_stop=should_stop)
+        fit.payload = est.to_dict()
+    path = save_object_fit(fit, lock_name, LOCK_DIR, tracks)
+    with _TRACKS_LOCK:
+        for t in tracks:
+            _TRACKS[(ds.repo_id, lock_name, t.episode)] = t
+    return fit, tracks, path
+
+
+def _objects_job_worker(job: Job, req: "ObjectsFitRequest") -> None:
+    try:
+        ds = get_dataset(req.dataset)
+
+        def on_progress(ev: dict) -> None:
+            job.push({"type": "progress", **ev})
+
+        fit, tracks, path = run_objects_fit(
+            ds, req.lock, req.camera, episodes=req.episodes, payload=req.payload,
+            on_progress=on_progress, should_stop=job.stop.is_set,
+        )
+        summary = {**{k: v for k, v in fit.to_dict().items() if k != "tracks"}, "path": str(path)}
+        job.push({"type": "done", "fit": summary})
+        job.finish("done", result=summary)
+    except Exception as e:  # noqa: BLE001 - report to the client
+        job_fail(job, e)
+
+
+def objects_track(ds: Dataset, episode: int, lock_name: str) -> dict:
+    """The per-frame object track of one episode: from the saved ``.npz``,
+    else tracked now (a few seconds) and kept in memory."""
+    from antares.objects import load_object_fit, load_track
+
+    lock_name = resolve_lock_ref(lock_name)
+    ep = find_episode(ds, episode)
+    fit = load_object_fit(lock_name, LOCK_DIR)
+    if fit is None:
+        raise HTTPException(status_code=404, detail=f"lock {lock_name!r} has no objects fit; run objects-fit first")
+    key = (ds.repo_id, lock_name, ep.index)
+    with _TRACKS_LOCK:
+        track = _TRACKS.get(key)
+    if track is None:
+        track = load_track(fit, ep.index, LOCK_DIR)
+    if track is None:
+        _, tracks, _ = run_objects_fit(ds, lock_name, fit.camera, episodes=[ep.index], payload=False)
+        track = next((t for t in tracks if t.episode == ep.index), None)
+        if track is None:
+            raise HTTPException(status_code=404, detail=f"episode {episode} could not be tracked")
+    with _TRACKS_LOCK:
+        _TRACKS[key] = track
+    return {
+        "dataset": ds.repo_id,
+        "lock": lock_name,
+        "camera": fit.camera,
+        "rgb": list(fit.prior.rgb),
+        "footprint_m": None if fit.footprint is None else list(fit.footprint),
+        "half_height": fit.object_half_height,
+        **track.to_dict(),
+    }
+
+
+class ObjectsFitRequest(BaseModel):
+    dataset: str
+    lock: str
+    camera: str | None = None
+    episodes: list[int] | None = None
+    payload: bool = True
+
+
+@app.post("/api/objects/fit")
+def objects_fit_start(req: ObjectsFitRequest) -> dict:
+    _lock_path(resolve_lock_ref(req.lock))  # validate early
+    job = start_job("objects", req.dataset, _objects_job_worker, req)
+    return {"job_id": job.id}
+
+
+@app.get("/api/objects")
+def objects_get(lock: str = Query(...)) -> dict:
+    d = load_objects_dict(lock)
+    if d is not None:
+        d = {k: v for k, v in d.items() if k != "tracks"} | {"tracks": [t for t in d["tracks"]]}
+    return {"lock": lock, "objects": d}
+
+
+@app.get("/api/objects/track")
+def objects_track_get(dataset: str = Query(...), episode: int = Query(...), lock: str = Query(...)) -> dict:
+    ds = get_dataset(dataset)
+    try:
+        return objects_track(ds, episode, lock)
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001 - decoding / tracking errors
+        raise _video_error(e)
+
+
 # Built frontend, mounted after the API routes so `antares serve` alone demos.
 if WEB_DIST.is_dir():
     app.mount("/", StaticFiles(directory=str(WEB_DIST), html=True), name="web")
