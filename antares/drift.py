@@ -474,13 +474,14 @@ def trended_params(params: Any) -> list[str]:
 
 
 def _param_value(params: Any, name: str) -> float | None:
-    """One number per window: a per-joint value is averaged over the joints,
-    so a window whose refit kept per-joint values and one that collapsed them
-    to a shared value land on the same scale."""
+    """One number per window (:meth:`SimParams.scalar`: a per-joint value is
+    its mean over the joints), so a window whose refit kept per-joint values
+    and one that collapsed them to a shared value land on the same scale.
+    None for a non-numeric parameter."""
     v = params.to_dict().get(name, getattr(params, name, None))
     if not _numeric(v):
         return None
-    return float(np.mean(v)) if isinstance(v, (list, tuple)) else float(v)
+    return params.scalar(name)
 
 
 def compute_trends(

@@ -492,7 +492,10 @@ def cmd_dr(args: argparse.Namespace) -> int:
     def on_fit(i, result) -> None:
         p = result.params
 
-        def fmt(v, spec):  # a per-joint value prints as its range over the joints
+        def fmt(v, spec):
+            # Deliberately a range, not SimParams.scalar's mean: this line
+            # shows how far the joints spread within one fit; the derived DR
+            # ranges below are from the joint means.
             return f"{min(v):{spec}}-{max(v):{spec}}" if isinstance(v, tuple) else f"{v:{spec}}"
 
         print(

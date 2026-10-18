@@ -211,12 +211,6 @@ def dims_of(params: SimParams) -> tuple[str, ...]:
     return tuple(space_of(params))
 
 
-def _scalar(v: Any) -> float:
-    """A per-joint value (a per-joint lock) as one number: its mean over the
-    joints, since a DR range is one interval per parameter for the whole arm."""
-    return float(np.mean(v)) if isinstance(v, (tuple, list)) else float(v)
-
-
 def _range_from_values(name: str, nominal: float, values: Sequence[float], percentiles, scale: str) -> ParamRange:
     vals = np.asarray(values, dtype=np.float64)
     if scale == "int":
@@ -278,8 +272,8 @@ class DRRanges(JsonFile):
         ranges = {
             dim: _range_from_values(
                 dim,
-                _scalar(getattr(nominal, dim)),
-                [_scalar(getattr(f.params, dim)) for f in fits],
+                nominal.scalar(dim),  # a per-joint value as its joint mean: a DR range is one interval per parameter
+                [f.params.scalar(dim) for f in fits],
                 percentiles,
                 scale,
             )
@@ -359,7 +353,7 @@ def uniform_ranges(nominal: Any, frac: float = 0.3, name: str | None = None) -> 
     nominal = _as_params(nominal)
     ranges = {}
     for dim, (_, _, scale) in space_of(nominal).items():
-        v = _scalar(getattr(nominal, dim))
+        v = nominal.scalar(dim)
         lo, hi = v * (1 - frac), v * (1 + frac)
         if scale == "int":
             lo, hi = max(0, int(round(lo))), int(round(hi))

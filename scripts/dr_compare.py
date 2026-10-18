@@ -45,7 +45,7 @@ def main() -> None:
 
     pm30 = uniform_ranges(lock.params, 0.3)
     fixed = dict(pm30.ranges)
-    lat = int(round(float(np.mean(lock.params.latency_frames))))  # per-joint locks: the joint mean
+    lat = int(round(lock.params.scalar("latency_frames")))  # per-joint locks: the joint mean
     fixed["latency_frames"] = ParamRange(nominal=lat, lo=lat, hi=lat, scale="int")
     pm30_fixed = DRRanges(name="pm30_fixed_latency", nominal=pm30.nominal, ranges=fixed)
 
