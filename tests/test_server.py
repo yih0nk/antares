@@ -51,7 +51,7 @@ class FakeParams:
 class FakeArm:
     body_names = BODIES
 
-    def __init__(self, params=None, unit_map=None):
+    def __init__(self, params=None, unit_map=None, robot=None):
         self.params = params or FakeParams()
         self.applied: list = []
 
@@ -307,7 +307,8 @@ def fakes(monkeypatch, tmp_path):
     for m in (sim, gap, cal, lock, comp):
         monkeypatch.setitem(sys.modules, m.__name__, m)
 
-    monkeypatch.setattr(server, "_arm", FakeArm())
+    monkeypatch.setattr(server, "_ARMS", {"so101": FakeArm()})
+    monkeypatch.setattr(server, "_ARM_LOCKS", {})
     monkeypatch.setattr(server, "LOCK_DIR", tmp_path / "locks")
     monkeypatch.setattr(server, "LOCK_SUFFIX", LOCK_SUFFIX)
     monkeypatch.setattr(server, "MESH_DIR", None)
@@ -321,6 +322,8 @@ def fakes(monkeypatch, tmp_path):
 
     import antares.data
     monkeypatch.setattr(antares.data, "load_dataset", no_network)
+    monkeypatch.setattr(server, "fetch_hub_info", no_network)
+    monkeypatch.setattr(server, "UPLOAD_DIR", tmp_path / "uploads")
     return tmp_path
 
 
@@ -450,7 +453,7 @@ def test_replay_real_sim_integration(monkeypatch):
     ds = Dataset(repo_id="synthetic/arm", robot_type="so101_follower", fps=30.0,
                  joint_names=JOINTS, episodes=(ep,))
     monkeypatch.setattr(server, "_DATASETS", {ds.repo_id: ds})
-    monkeypatch.setattr(server, "_arm", None)  # force a real Arm
+    monkeypatch.setattr(server, "_ARMS", {})  # force a real Arm
     out = TestClient(server.app).get("/api/replay", params={"dataset": ds.repo_id, "episode": 0}).json()
     nbody = len(out["body_names"])
     assert out["joints"] == list(sim.JOINTS)
@@ -467,7 +470,7 @@ def test_replay_shape(client, fakes):
     r = client.get("/api/replay", params={"dataset": FAKE_DS, "episode": 2})
     assert r.status_code == 200, r.text
     out = r.json()
-    assert out["dataset"] == FAKE_DS and out["episode"] == 2
+    assert out["dataset"] == FAKE_DS and out["episode"] == 2 and out["robot"] == "so101"
     assert out["fps"] == 30.0
     assert out["joints"] == list(JOINTS)
     assert out["body_names"] == BODIES
@@ -574,7 +577,7 @@ def test_compensate_heldout_helper(fakes):
     assert out["rms"]["ilc"] < out["rms"]["raw"]
     assert out["lock"] == "unit-a" and out["params"]["kp"] == 50.0 and out["validation"] == "sim-only"
     assert out["ilc_iterations"] == [4, 4]
-    assert server._arm.params.kp == 50.0
+    assert server._ARMS["so101"].params.kp == 50.0
 
     lock["result"]["eval_episodes"] = []
     with pytest.raises(HTTPException) as e:
@@ -602,7 +605,7 @@ def test_compensate_real_sim_integration(monkeypatch):
     ds = Dataset(repo_id="synthetic/arm", robot_type="so101_follower", fps=30.0,
                  joint_names=JOINTS, episodes=(ep,))
     monkeypatch.setattr(server, "_DATASETS", {ds.repo_id: ds})
-    monkeypatch.setattr(server, "_arm", None)  # force a real Arm
+    monkeypatch.setattr(server, "_ARMS", {})  # force a real Arm
     params = sim.SimParams(kp=90.0, kv=1.5, damping=0.05, armature=0.02, frictionloss=0.025, latency_frames=4)
     out = server.compensate_episode_dict(ds, 0, params, method="ilc", lock=None)
     json.dumps(out)
@@ -938,12 +941,12 @@ def test_fleet_endpoints(client, fakes, monkeypatch):
 
 def test_arm_lock_serialises_sim_access(client, fakes):
     import threading
-    arm = server._arm
+    arm = server._ARMS["so101"]
     seen = []
     orig_apply = arm.apply
 
     def apply(params):
-        assert server._ARM_LOCK.locked()
+        assert server.arm_lock("so101").locked()
         seen.append(params)
         orig_apply(params)
 
@@ -1147,11 +1150,11 @@ def test_check_rejects_bad_input(client, fakes):
 
 def test_check_holds_arm_lock(client, fakes):
     write_lock(fakes, "unit-a", kp=50.0)
-    arm = server._arm
+    arm = server._ARMS["so101"]
     orig = arm.replay
 
     def replay(ep):
-        assert server._ARM_LOCK.locked()
+        assert server.arm_lock("so101").locked()
         return orig(ep)
 
     arm.replay = replay

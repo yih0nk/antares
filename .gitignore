@@ -19,3 +19,8 @@ web/dist/
 
 # harness worktrees for parallel agents
 .claude/worktrees/
+
+# uploaded datasets (POST /api/datasets/upload)
+uploads/
+# a symlinked node_modules (worktrees) is a file, not a dir
+web/node_modules

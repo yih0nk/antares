@@ -151,6 +151,7 @@ def validate_dataset_info(
     """
     robot_type = str(info.get("robot_type") or "")
     fps = float(info.get("fps") or 0)
+    episodes_known = info.get("total_episodes") is not None
     n_episodes = int(info.get("total_episodes") or 0)
     n_frames = int(info.get("total_frames") or 0)
     version = str(info.get("codebase_version") or "")
@@ -204,7 +205,9 @@ def validate_dataset_info(
     elif fps not in ALLOWED_FPS:
         v.reasons.append(f"fps {fps:g} not in {sorted(int(f) for f in ALLOWED_FPS)}")
 
-    if n_episodes < min_episodes:
+    if not episodes_known:
+        v.warnings.append("total_episodes missing from meta/info.json; the episode count is checked after loading")
+    elif n_episodes < min_episodes:
         v.reasons.append(f"{n_episodes} episodes < {min_episodes}")
     elif n_episodes < recommended_episodes:
         v.warnings.append(
