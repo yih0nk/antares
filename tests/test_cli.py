@@ -1356,3 +1356,27 @@ def test_task_prints_clouds_and_saves(monkeypatch, capsys, tmp_path):
     assert "episodes with a missed grasp: 1" in out
     saved = json.loads(out_path.read_text())
     assert saved["name"] == "robot" and saved["summary"]["held"] == 2
+
+
+def test_task_then_export_with_task(monkeypatch, tmp_path, capsys):
+    import mujoco
+
+    from antares import server
+    from test_task import pick_place_episode
+
+    monkeypatch.setattr(server, "LOCK_DIR", tmp_path / "locks")
+    monkeypatch.setattr(server, "LOCK_SUFFIX", ".lock.json")
+    _real_lock().save(tmp_path / "locks" / "unit_a.lock.json")
+    eps = (pick_place_episode(0), pick_place_episode(1))
+    monkeypatch.setattr(server, "_DATASETS", {"fake/robot": Dataset("fake/robot", "so101", 30.0, eps[0].joint_names, eps)})
+
+    assert cli.main(["task", "fake/robot"]) == 0
+    assert (tmp_path / "locks" / "robot.task.json").is_file()
+    out = tmp_path / "out"
+    assert cli.main(["export", "unit_a", "-o", str(out), "--task", "robot", "--no-bundle"]) == 0
+    text = capsys.readouterr().out
+    assert "cube and place marker" in text and "task.json" in text
+    assert mujoco.MjModel.from_xml_path(str(out / "scene.xml")).nq == 13
+
+    assert cli.main(["export", "unit_a", "-o", str(out), "--task", "nope"]) == 1
+    assert "antares task" in capsys.readouterr().err

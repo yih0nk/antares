@@ -861,7 +861,7 @@ def cmd_task(args: argparse.Namespace) -> int:
     if s["missed_episodes"]:
         print(f"episodes with a missed grasp: {_episode_list(s['missed_episodes'])}")
     if not args.no_save:
-        path = td.save(args.out)
+        path = td.save(args.out or td.default_path(server.LOCK_DIR))
         print(f"saved task {td.name} -> {path}")
     return 0
 
@@ -1229,22 +1229,38 @@ def cmd_export(args: argparse.Namespace) -> int:
     from fastapi import HTTPException
 
     from antares import server
-    from antares.export import SCENE_FILENAME, export_scene, sidecar_path
+    from antares.export import SCENE_FILENAME, TASK_FILENAME, export_scene, sidecar_path
     from antares.lock import RobotLock
+    from antares.task import TASK_SUFFIX
 
     try:
         lock = RobotLock.from_dict(server.load_lock_dict(args.name))
     except HTTPException as e:
         print(f"error: {e.detail}", file=sys.stderr)
         return 1
+    task = None
+    if args.task:
+        from antares.task import TaskDistribution
+
+        task_path = Path(args.task)
+        if not task_path.is_file():
+            task_path = server.LOCK_DIR / f"{args.task}{TASK_SUFFIX}"
+        if not task_path.is_file():
+            print(f"error: no task file {args.task} (run `antares task` first)", file=sys.stderr)
+            return 1
+        task = TaskDistribution.load(task_path)
     out_dir = Path(args.output) if args.output else Path("export") / lock.name
-    scene = export_scene(lock, out_dir, bundle_assets=not args.no_bundle)
+    scene = export_scene(
+        lock, out_dir, bundle_assets=not args.no_bundle, task=task, object_size=args.object_size
+    )
     arm = out_dir / f"{lock.name}.xml"
     p = lock.params
     print(f"exported lock {lock.name} ({lock.dataset}) -> {out_dir}/")
     print(f"  {arm.name:<40} calibrated arm MJCF")
     print(f"  {sidecar_path(arm).name:<40} params incl. latency_frames={p.latency_frames}, unit map")
-    print(f"  {SCENE_FILENAME:<40} arm + floor/light")
+    print(f"  {SCENE_FILENAME:<40} arm + floor/light" + (" + cube and place marker" if task else ""))
+    if task is not None:
+        print(f"  {TASK_FILENAME:<40} pick/place/start-pose distribution ({task.name})")
     if args.no_bundle:
         print("  meshdir points at the antares package assets (absolute path)")
     else:
@@ -1780,6 +1796,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="do not copy the STL meshes; point meshdir at the package assets instead",
     )
+    p.add_argument("--task", default=None,
+                   help="task name or .task.json path (from `antares task`): add a cube and place marker")
+    p.add_argument("--object-size", type=float, default=0.03, help="cube edge length in metres (with --task)")
     p.set_defaults(func=cmd_export)
 
 
