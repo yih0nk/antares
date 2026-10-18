@@ -840,6 +840,11 @@ export const api = {
   cameras: (dataset: string) => fetch(`/api/camera/cameras?${q({ dataset })}`).then((r) => json<CameraInfo[]>(r)),
   cameraFits: (lock: string) =>
     fetch(`/api/camera?${q({ lock })}`).then((r) => json<{ lock: string; cameras: Record<string, CameraFit> }>(r)),
+  // The best saved fit of each camera over all of the dataset's locks, with the lock it is saved under.
+  cameraFitsForDataset: (dataset: string) =>
+    fetch(`/api/camera/dataset?${q({ dataset })}`).then((r) =>
+      json<{ dataset: string; cameras: Record<string, CameraFit & { lock: string }> }>(r),
+    ),
   cameraFit: (dataset: string, camera: string, lock: string, nFrames = 40, nEpisodes = 4) =>
     fetch("/api/camera/fit", {
       method: "POST",

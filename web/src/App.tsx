@@ -1206,7 +1206,7 @@ export default function App() {
               {videoError
                 ? videoError
                 : underlay.fit
-                  ? `video from the ${underlay.camera.name} camera, view pinned to its fitted pose (held-out overlap ${(underlay.fit.heldout_iou * 100).toFixed(0)}%)`
+                  ? `video from the ${underlay.camera.name} camera, view pinned to its fitted pose${underlay.fit.lock && underlay.fit.lock !== cameraLock ? ` (fitted with lock ${underlay.fit.lock})` : ""}, held-out overlap ${(underlay.fit.heldout_iou * 100).toFixed(0)}%`
                   : !underlay.camera.fixed
                     ? `video from the ${underlay.camera.name} camera as a plain backdrop: it moves with the arm, so the 3D view cannot be lined up with it`
                     : !cameraLock

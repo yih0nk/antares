@@ -1,20 +1,21 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useThree } from "@react-three/fiber";
 import * as THREE from "three";
 import { api, type CameraFit, type CameraInfo } from "./api";
 import type { Playhead } from "./Arm";
 
-// The dataset's own video drawn behind the 3D view. With a camera fitted for
-// the lock (the Cameras panel), the 3D camera takes the fitted pose and field
-// of view, so the real arm and the ghost land on the arm in the footage; with
-// no fit (or a wrist camera) the video is a plain backdrop and the view still
-// orbits. The video follows the playhead: it plays at the viewer's speed and
+// The dataset's own video drawn behind the 3D view. With a fitted camera (the
+// Camera panel), the 3D camera takes the fitted pose and field of view, so the
+// real arm and the ghost land on the arm in the footage; with no fit (or a
+// wrist camera) the video is a plain backdrop and the view still orbits. The video follows the playhead: it plays at the viewer's speed and
 // is re-seeked whenever it drifts, and seeks frame by frame while paused.
 
 export type Underlay = {
   camera: CameraInfo;
-  // The fitted pose for this camera, when the lock has one for this dataset.
-  fit: CameraFit | null;
+  // The fitted pose for this camera: the lock's own, else the best one saved
+  // under any lock of the dataset (the pose belongs to the recording, not to
+  // the dynamics), with the lock it was saved under.
+  fit: (CameraFit & { lock?: string }) | null;
   src: string;
   // Frames the video lags the joint log (positive: the camera is behind).
   delay: number;
@@ -26,6 +27,7 @@ export function useUnderlay(dataset: string, episode: number | null, lock: strin
   const [cameras, setCameras] = useState<CameraInfo[]>([]);
   const [camera, setCamera] = useState("");
   const [fits, setFits] = useState<Record<string, CameraFit>>({});
+  const [datasetFits, setDatasetFits] = useState<Record<string, CameraFit & { lock: string }>>({});
   const [delay, setDelay] = useState(0);
 
   useEffect(() => {
@@ -60,13 +62,39 @@ export function useUnderlay(dataset: string, episode: number | null, lock: strin
     };
   }, [on, lock, camera, fitsRev]);
 
+  useEffect(() => {
+    if (!on || !dataset) {
+      setDatasetFits({});
+      return;
+    }
+    let live = true;
+    api.cameraFitsForDataset(dataset).then(
+      (r) => live && setDatasetFits(r.cameras),
+      () => live && setDatasetFits({}),
+    );
+    return () => {
+      live = false;
+    };
+  }, [on, dataset, camera, fitsRev]);
+
   const info = cameras.find((c) => c.name === camera) ?? null;
-  const fit = info?.fixed ? fits[camera] : undefined;
+  const fixed = !!info?.fixed;
+  const own = fixed ? fits[camera] : undefined;
+  // Memoised so the pinned camera is only re-posed when the fit changes.
+  const fit = useMemo(
+    () =>
+      own && (!own.dataset || own.dataset === dataset)
+        ? { ...own, lock: lock ?? undefined }
+        : fixed
+          ? datasetFits[camera] ?? null
+          : null,
+    [own, dataset, lock, fixed, datasetFits, camera],
+  );
   const underlay: Underlay | null =
     on && info && episode != null
       ? {
           camera: info,
-          fit: fit && (!fit.dataset || fit.dataset === dataset) ? fit : null,
+          fit,
           src: api.cameraClipUrl(dataset, info.name, episode),
           delay,
         }
