@@ -2076,7 +2076,7 @@ velocity, its last 5 commands and the next 8 frames of the path; the
 learned ones are linear (21 weights shared by all joints) and trained with
 CMA-ES on closed-loop tracking error, 3 seeds each. References are 480 real
 measured episodes from the fleet datasets (48 training arms); 10 locks are
-held out (one per Hub account), and each is driven along its own dataset's
+held out, and each is driven along its own dataset's
 paths and again with 150 g at the gripper that no lock models.
 
 RMS tracking error in degrees on the 10 unseen arms (gripper excluded,
@@ -2099,17 +2099,25 @@ RMS tracking error in degrees on the 10 unseen arms (gripper excluded,
   from 2.82 to 0.74 deg.
 * The default MJCF has no latency, so controllers trained there stay near
   1.9 deg on real-like arms; +-30% around it is worse on every rollout.
+  That randomization never touches latency (30% of 0 frames is 0), so it
+  says nothing about randomizing the factor that matters most.
 * Training on the calibrated SO-101 lock gives the best learned controller
   (0.78 deg, worst arm 1.08), as good as knowing each arm's own latency.
   The `antares dr` ranges around that lock and the fleet of 48 locks do not
   improve on it here, and both are fragile under the unmodelled payload
   (worst arm 13.4 deg), where the single-lock controller holds at 3.2.
-* Knowing the whole lock is worth nine times the latency shift (ILC 0.08
-  deg), and an action chunk gives ILC the path ahead it needs, so the
-  practical next step is a deployment adapter that runs ILC on each chunk.
+* ILC in the arm's own lock reaches 0.08 deg, but it is optimized offline
+  on the exact path, in the same sim it is scored in, so it is a ceiling
+  rather than a controller to compare with the others. An action chunk
+  gives ILC the path ahead it needs, so a deployment adapter that runs ILC
+  on each chunk is the practical next step to find out how much of that
+  ceiling survives.
 
 All of it is sim-to-sim, with test arms from the same model class as the
-training arms. Rerun: `python experiments/dump_refs.py` where the Hub is
+training arms. The fleet keeps one dataset per Hub account except the two
+pinned demo datasets, so the `lerobot` account has its SO-101 arm in
+training (the lock the single-lock controllers learn on) and its SO-100 arm
+among the test arms. Rerun: `python experiments/dump_refs.py` where the Hub is
 reachable, then
 
 ```sh
