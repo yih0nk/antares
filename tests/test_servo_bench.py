@@ -111,3 +111,14 @@ def test_live_ticks_publish_three_angles(tmp_path):
     msgs = [json.loads(q.get_nowait()) for _ in range(100)]
     assert set(msgs[-1]) >= {"t", "cmd", "real", "lock", "default", "err_lock", "err_default"}
     assert msgs[-1]["lock"] == msgs[-1]["default"]  # same params, same ghost
+
+
+def test_viewer_residual_strip_works_on_a_servo(tmp_path):
+    """The servo has no gripper; the viewer's residual strip still loads."""
+    from antares import server
+
+    csv = sb.simulate_run(tmp_path / "a.csv", seed=1)
+    out, _, _ = sb.import_runs([csv], "a", tmp_path / "ds")
+    ds = server.get_dataset(str(out))
+    res = server.residual_episode(ds, ds.episodes[0].index)
+    assert res["dataset"] == ds.repo_id
