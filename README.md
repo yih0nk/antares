@@ -1008,10 +1008,14 @@ Each time the gripper command closes, forward kinematics of the measured
 joints at the MJCF's `gripperframe` site gives where the gripper tip was;
 each time it lets go gives where the object ended up. The jaw says whether
 anything was in it: with an object between them the jaws stop open by its
-width, on a miss they close all the way (the dataset's empty-closed level).
-Each close is a *pick*, a *miss* (empty, before anything was picked), or an
-*idle* close (empty, after letting go). Only picks that moved the object
-more than 3 cm give a place position.
+width, on a miss they close all the way (the dataset's empty-closed level
+of the measured jaw; the leader's closed command has a level of its own,
+since the two arms are calibrated separately, and is only ever compared
+with that). The jaw is read once it has settled, 0.3 s after the command
+closes; a close the command undoes sooner is a blip across the hysteresis
+band, not a grasp. Each close is a *pick*, a *miss* (empty, before
+anything was picked), or an *idle* close (empty, after letting go). Only
+picks that moved the object more than 3 cm give a place position.
 
 On the two demo datasets (gripper tip in the base frame):
 
@@ -1054,7 +1058,9 @@ The readings barely move: the noise is smaller than one encoder step
 habit of adding ~0.5-1° of white Gaussian noise to joint observations is
 10-30x too much for these arms. `NoiseModel.apply(q)` adds noise of the
 measured size and colour (AR(1)) to simulated readings and rounds them to
-the same steps.
+the same steps, on the same lattice: the model also keeps one real reading
+per joint (`origin_rad`) because the unit map's offset puts the dataset's
+lattice off the plain multiples of the step in radians.
 
 ## Cameras from the logs
 
