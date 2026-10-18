@@ -227,3 +227,50 @@ def test_camera_fits_for_dataset_take_the_best_fit_over_its_locks(client, tmp_pa
     assert cams["side"]["lock"] == "base"
     assert "fit_ious" not in cams["up"] and "appearance" not in cams["up"]
     assert client.get("/api/camera/dataset", params={"dataset": "nobody/ds"}).json()["cameras"] == {}
+
+
+def _sibling_setup(tmp_path, fovy=43.0, size=(640, 480)):
+    (tmp_path / "base.lock.json").write_text(json.dumps({"name": "base", "dataset": "fake/ds", "created_at": "2026-10-17T00:00:00Z"}))
+    up = {**FIT, "fovy": fovy, "width": size[0], "height": size[1], "heldout_iou": 0.83}
+    (tmp_path / "base.camera.json").write_text(json.dumps({"lock": "base", "cameras": {"up": up}}))
+
+
+def _fake_fit_camera(calls, heldout):
+    from antares.camera import CameraFit
+
+    def fake(ds, camera, *, fovy_range=None, **kw):
+        calls.append(fovy_range)
+        h = heldout(fovy_range)
+        return CameraFit.from_dict({**FIT, "camera": camera, "key": f"observation.images.{camera}", "fovy": 44.0 if fovy_range else 26.0, "heldout_iou": h})
+
+    return fake
+
+
+@pytest.mark.parametrize("banded_better", [True, False])
+def test_camera_fit_tries_a_sibling_cameras_fov(client, monkeypatch, tmp_path, banded_better):
+    import antares.camera as camera_mod
+
+    _sibling_setup(tmp_path)
+    calls, passes = [], []
+    monkeypatch.setattr(camera_mod, "fit_camera", _fake_fit_camera(calls, lambda band: (0.78 if banded_better else 0.6) if band else 0.72))
+    fit, path = server.run_camera_fit(server.get_dataset("fake/ds"), "side", "unit", on_second_pass=passes.append)
+    assert calls == [None, (41.0, 45.0)] and passes == ["up"]
+    assert fit.heldout_iou == (0.78 if banded_better else 0.72)
+    saved = json.loads(path.read_text())["cameras"]["side"]
+    assert saved["fovy"] == (44.0 if banded_better else 26.0)
+
+
+def test_camera_fit_skips_the_fov_pass_without_a_sibling_of_the_same_size(client, monkeypatch, tmp_path):
+    import antares.camera as camera_mod
+
+    calls = []
+    monkeypatch.setattr(camera_mod, "fit_camera", _fake_fit_camera(calls, lambda band: 0.7))
+    server.run_camera_fit(server.get_dataset("fake/ds"), "side", "unit")
+    assert calls == [None]  # no other camera fitted
+    _sibling_setup(tmp_path, size=(1280, 720))
+    calls.clear()
+    server.run_camera_fit(server.get_dataset("fake/ds"), "side", "unit")
+    assert calls == [None]  # the fitted camera has another image size
+    calls.clear()
+    server.run_camera_fit(server.get_dataset("fake/ds"), "up", "unit")
+    assert calls == [None]  # a camera is not its own sibling
