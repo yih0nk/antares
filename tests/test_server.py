@@ -329,6 +329,13 @@ def make_dataset(repo_id: str, n_episodes: int = 6, T: int = 20, offset: float =
 @pytest.fixture
 def fakes(monkeypatch, tmp_path):
     """Stub the sibling modules, inject a dataset, and point locks at tmp."""
+    # Modules that import names from the real antares.calibrate / antares.lock
+    # must be loaded before those are stubbed below, or their first import
+    # (which depends on which test files were collected first) fails.
+    import antares.diagnose  # noqa: F401
+    import antares.drift  # noqa: F401
+    import antares.specificity  # noqa: F401
+
     sim = _module("antares.sim", JOINTS=JOINTS, SimParams=FakeParams, Arm=FakeArm, CommandMap=FakeCommandMap,
                   MODEL_PATH=tmp_path / "so101.xml",
                   model_geometry=lambda model=None: {"bodies": [], "geoms": [], "joints": []})
