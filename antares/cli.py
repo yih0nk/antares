@@ -1278,6 +1278,43 @@ def cmd_camera_fit(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_scene_fit(args: argparse.Namespace) -> int:
+    from antares import server
+
+    lock = args.lock or server._slug(args.repo_id)
+    try:
+        ds = server.get_dataset(args.repo_id)
+        fit, path = server.run_scene_fit(ds, lock, args.camera or None)
+    except Exception as e:  # noqa: BLE001
+        print(f"error: {getattr(e, 'detail', e)}", file=sys.stderr)
+        return 1
+    t, ws = fit.table, fit.workspace
+    fz, ez = t.fingertip_z, t.episode_min_z
+    print(f"scene for lock {lock} from {ds.repo_id}: {fit.n_episodes} episodes, {fit.n_frames} frames")
+    print(f"  table z {t.z * 1000:.1f} mm{' (horizontal)' if t.horizontal else ''}: fingertips at "
+          f"{t.n_on_table} of {t.n_grasps} grasps sat at {t.z_grasp * 1000:.1f} mm "
+          f"(p10 {fz.get('p10', float('nan')) * 1000:.1f}, median {fz.get('median', float('nan')) * 1000:.1f}, "
+          f"p90 {fz.get('p90', float('nan')) * 1000:.1f}), minus object half-height {t.object_half_height * 1000:.0f} mm")
+    print(f"  cross-check: lowest fingertip over all frames {t.min_fingertip_z * 1000:.1f} mm; "
+          f"per-episode minimum median {ez.get('median', float('nan')) * 1000:.1f} mm, spread {ez.get('spread_mm', float('nan')):.1f} mm")
+    print(f"  plane through the on-table grasps tilts {t.tilt_deg:.2f} deg from horizontal")
+    print(f"  workspace {ws.size[0] * 100:.0f} x {ws.size[1] * 100:.0f} x {ws.size[2] * 100:.0f} cm: "
+          f"x [{ws.min[0]:.3f}, {ws.max[0]:.3f}] y [{ws.min[1]:.3f}, {ws.max[1]:.3f}] z [{ws.min[2]:.3f}, {ws.max[2]:.3f}] m")
+    print(f"  {len(fit.grasp_points)} grasp points, {len(fit.release_points)} release points")
+    if fit.backdrops:
+        rows = [
+            [name, f"{b.plane_in_region:.2f}", f"{b.region_in_plane:.2f}", f"{b.iou:.2f}", f"{b.region_frac:.2f}",
+             str(server.LOCK_DIR / b.path)]
+            for name, b in sorted(fit.backdrops.items())
+        ]
+        print("  table plane vs the backdrop's dominant colour region:")
+        print("  " + _table(["camera", "plane in region", "region in plane", "IoU", "region/image", "backdrop"], rows).replace("\n", "\n  "))
+    else:
+        print("  no fitted cameras for this lock, so no backdrops (run camera-fit first)")
+    print(f"saved {path}")
+    return 0
+
+
 def cmd_camera_list(args: argparse.Namespace) -> int:
     from antares import server
 
@@ -1778,6 +1815,12 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("camera-list", help="list the camera fits saved for a lock")
     p.add_argument("lock")
     p.set_defaults(func=cmd_camera_list)
+
+    p = sub.add_parser("scene-fit", help="recover the table, workspace and camera backdrops from a dataset's logs")
+    p.add_argument("repo_id", help="Hub dataset id or a LeRobot dataset directory on disk")
+    p.add_argument("--lock", default=None, help="lock to attach the scene to (default: dataset slug)")
+    p.add_argument("--camera", action="append", default=[], help="only these fitted cameras (repeatable; default all)")
+    p.set_defaults(func=cmd_scene_fit)
 
     return parser
 

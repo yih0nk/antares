@@ -2380,6 +2380,149 @@ def camera_overlay_get(
         raise _video_error(e)
 
 
+# ==========================================================================
+# Scene (antares.scene)
+#
+# The static scene recovered from the logs: table height from the fingertips
+# at grasp instants, workspace, grasp/release points, and per fitted camera
+# the clean background with the table plane checked against it. The sim view
+# composites what that camera would see in the sim, without OpenGL.
+# ==========================================================================
+
+
+def load_scene_dict(lock_name: str) -> dict | None:
+    """``<lock>.scene.json`` for a lock, or None when no scene was fitted."""
+    from antares.scene import load_scene_fit
+
+    _lock_path(lock_name)  # validates the name
+    fit = load_scene_fit(lock_name, LOCK_DIR)
+    return fit.to_dict() if fit is not None else None
+
+
+def run_scene_fit(ds: Dataset, lock_name: str, cameras: list[str] | None = None):
+    """Fit the scene for ``lock_name`` from ``ds`` and save it (JSON, backdrops,
+    the lock's ``scene`` field). Returns ``(fit, path)``.
+
+    The arm carries the lock's parameters and robot; the cameras are the
+    lock's fitted ones (or ``cameras``, a subset by name), each with the
+    background model the overlay already uses.
+    """
+    from antares.project import Camera
+    from antares.scene import fit_scene, save_scene_fit
+    from antares.sim import Arm
+
+    lock = load_lock(lock_name)
+    arm = Arm(lock.params, robot=lock.robot)
+    fits = load_camera_fit_dicts(lock_name)
+    names = [c for c in (cameras or sorted(fits)) if c in fits]
+    cams = {name: Camera.from_dict(fits[name]) for name in names}
+    backgrounds = {}
+    for name in names:
+        try:
+            backgrounds[name] = camera_background(ds, name).bg
+        except Exception as e:  # noqa: BLE001 - a camera without video still leaves the table fit
+            raise _video_error(e)
+    fit = fit_scene(ds, arm, lock_name, cams, backgrounds)
+    path = save_scene_fit(fit, lock_name, LOCK_DIR, backgrounds)
+    return fit, path
+
+
+def scene_view(ds: Dataset, camera: str, episode: int, frame: int, lock_name: str) -> dict:
+    """Real frame | sim view of the same instant from the same camera."""
+    from antares import video
+    from antares.project import Camera, iou, rasterize
+    from antares.scene import load_backdrop, load_scene_fit, sim_view
+
+    ep = find_episode(ds, episode)
+    if not 0 <= frame < len(ep):
+        raise HTTPException(status_code=404, detail=f"frame {frame} not in episode {episode} ({len(ep)} frames)")
+    name = video.camera_name(camera)
+    fits = load_camera_fit_dicts(lock_name)
+    fit = fits.get(name)
+    if fit is None:
+        raise HTTPException(status_code=404, detail=f"lock {lock_name!r} has no camera fit for {name!r}")
+    scene = load_scene_fit(lock_name, LOCK_DIR)
+    if scene is None:
+        raise HTTPException(status_code=404, detail=f"lock {lock_name!r} has no scene fit; run scene-fit first")
+    backdrop = scene.backdrops.get(name)
+    if backdrop is None:
+        raise HTTPException(status_code=404, detail=f"the scene fit of {lock_name!r} has no backdrop for {name!r}")
+    try:
+        rgb = video.frames(ds.repo_id, camera, ep.index, [frame], ds)[0]
+        bg = load_backdrop(backdrop, LOCK_DIR)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:  # noqa: BLE001
+        raise _video_error(e)
+    cam = Camera.from_dict(fit)
+    arm, hulls = _camera_arm()
+    with _CAM_LOCK:
+        poses = arm.fk(arm.unit_map.to_rad(ep.state[frame]))
+    dark = int((fit.get("appearance") or {}).get("sign", -1)) < 0
+    table_poly = np.asarray(backdrop.plane_polygon, dtype=np.float64)
+    image, polys = sim_view(bg, cam, hulls, poses, table_poly, dark_arm=dark)
+    real_mask = camera_background(ds, camera).mask(rgb)
+    sim_mask = rasterize(polys, cam.width, cam.height)
+    return {
+        "dataset": ds.repo_id,
+        "camera": name,
+        "episode": ep.index,
+        "frame": frame,
+        "lock": lock_name,
+        "width": int(cam.width),
+        "height": int(cam.height),
+        "real_image": "data:image/jpeg;base64," + base64.b64encode(video.frame_jpeg(rgb)).decode(),
+        "sim_image": "data:image/jpeg;base64," + base64.b64encode(video.frame_jpeg(image)).decode(),
+        "iou": iou(sim_mask, real_mask),
+        "table_polygon": [list(p) for p in backdrop.plane_polygon],
+        "table_z": scene.table.z,
+        "n_geoms": len(polys),
+    }
+
+
+class SceneFitRequest(BaseModel):
+    dataset: str
+    lock: str
+    cameras: list[str] | None = None
+
+
+@app.post("/api/scene/fit")
+def scene_fit_post(req: SceneFitRequest) -> dict:
+    """Fit and save the scene for a lock (synchronous: FK over the grasp
+    instants plus the cameras' background models, a few seconds)."""
+    _lock_path(req.lock)
+    ds = get_dataset(req.dataset)
+    try:
+        fit, path = run_scene_fit(ds, req.lock, req.cameras)
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {**fit.to_dict(), "path": str(path)}
+
+
+@app.get("/api/scene")
+def scene_get(lock: str = Query(...)) -> dict:
+    return {"lock": lock, "scene": load_scene_dict(lock)}
+
+
+@app.get("/api/scene/view")
+def scene_view_get(
+    dataset: str = Query(...),
+    camera: str = Query(...),
+    episode: int = Query(...),
+    frame: int = Query(0, ge=0),
+    lock: str = Query(...),
+) -> dict:
+    ds = get_dataset(dataset)
+    try:
+        return scene_view(ds, camera, episode, frame, lock)
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001 - decoding / segmentation errors
+        raise _video_error(e)
+
+
 # Built frontend, mounted after the API routes so `antares serve` alone demos.
 if WEB_DIST.is_dir():
     app.mount("/", StaticFiles(directory=str(WEB_DIST), html=True), name="web")
