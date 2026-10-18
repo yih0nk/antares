@@ -356,6 +356,7 @@ REGISTRY: dict[str, RobotModel] = {
         },
         default_params="model",
         export_class=None,
+        license="MIT",
         label="SG92R servo",
     ),
 }
