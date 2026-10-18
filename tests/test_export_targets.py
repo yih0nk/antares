@@ -266,8 +266,23 @@ def test_dr_ranges_are_emitted_when_the_dr_json_exists(tmp_path):
     assert m["latency_frames"] == [3, 4]
     assert data["dr"]["mujoco"]["kp"] == {"lo": dr["kp"].lo, "hi": dr["kp"].hi}
     assert f'"stiffness_distribution_params": ({dr["kp"].lo!r}, {dr["kp"].hi!r})' in py
-    # the committed ranges were derived around this very fit of the lock
+    # the committed ranges were rederived from the current lock: no staleness note
     assert data["dr"]["nominal_matches_lock"] is True and "rerun `antares dr`" not in py
+
+    # ranges derived around a different fit of the lock are flagged and the
+    # export says to rerun `antares dr`
+    import json
+    import shutil
+
+    stale_dir = tmp_path / "stale"
+    stale_dir.mkdir()
+    shutil.copy(LOCK_DIR / f"{SCALAR}.lock.json", stale_dir / f"{SCALAR}.lock.json")
+    stale = json.loads((LOCK_DIR / f"{SCALAR}.dr.json").read_text())
+    stale["nominal"]["kp"] = stale["nominal"]["kp"] * 9.0
+    (stale_dir / f"{SCALAR}.dr.json").write_text(json.dumps(stale))
+    ex2 = render(lock, "isaaclab", lock_dir=stale_dir)
+    data2 = _json_files(ex2)[f"{SCALAR}_isaaclab.json"]
+    assert data2["dr"]["nominal_matches_lock"] is False and "rerun `antares dr`" in ex2.files[ex2.main]
     assert "DR_RANGES = {" in py
     # every other target carries the same ranges
     for t in ("maniskill", "json"):
