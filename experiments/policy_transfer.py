@@ -93,7 +93,8 @@ class Ref:
 def load_refs(path: Path, max_len: int) -> dict[str, list[Ref]]:
     """Measured trajectories per arm, converted with the default unit map (fleet locks carry none)."""
     z = np.load(path, allow_pickle=False)
-    meta = json.loads(str(z["meta"]))
+    raw = z["meta"]
+    meta = json.loads(str(raw)) if raw.ndim == 0 else [json.loads(str(m)) for m in raw]
     unit_map = Arm().unit_map
     out: dict[str, list[Ref]] = {}
     for m in meta:
@@ -447,7 +448,8 @@ def main(argv=None) -> int:
     refs = load_refs(args.refs, args.max_len)
     arms = [a for a in fleet_arms() if a.name in refs]
     train_arms, test_arms = split_arms(arms, args.n_test, args.seed)
-    train_refs = [r for a in train_arms for r in refs[a.name]]
+    # Ten episodes per arm, so the two 50-episode datasets do not dominate.
+    train_refs = [r for a in train_arms for r in refs[a.name][:10]]
     print(f"{len(train_arms)} training arms ({len(train_refs)} reference episodes), {len(test_arms)} test arms")
     print("test arms:", ", ".join(a.name for a in test_arms))
 
