@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import json
+import time
 import sys
 import types
 from dataclasses import dataclass, field
 
 import numpy as np
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from antares import server
@@ -194,12 +196,15 @@ class FakeLock:
     result: FakeResult
     created_at: str
     antares_version: str
+    command_map: dict | None = None
+    dynamics_only: dict | None = None
 
     @classmethod
-    def create(cls, dataset, robot_type, train_episodes, result, name=None):
+    def create(cls, dataset, robot_type, train_episodes, result, name=None,
+               command_map=None, dynamics_only=None):
         return cls(name or dataset.replace("/", "__"), dataset, robot_type,
                    f"digest-of-{len(list(train_episodes))}", result.params, result,
-                   "2026-10-17T12:00:00Z", "0.0.1")
+                   "2026-10-17T12:00:00Z", "0.0.1", command_map, dynamics_only)
 
     def to_dict(self):
         return {
@@ -207,6 +212,8 @@ class FakeLock:
             "data_sha256": self.data_sha256, "params": self.params.to_dict(),
             "result": self.result.to_dict(), "created_at": self.created_at,
             "antares_version": self.antares_version,
+            **({"command_map": self.command_map} if self.command_map is not None else {}),
+            **({"dynamics_only": self.dynamics_only} if self.dynamics_only is not None else {}),
         }
 
     def save(self, path=None):
@@ -1352,3 +1359,44 @@ def test_cross_matrix_uses_command_map(client, fakes):
     m = server.cross_matrix([FAKE_DS2], ["unit-b", "unit-b-plain"], n_train=4, n_eval=2)
     mapped, plain, _ = m["scores"][0]
     assert mapped < plain
+
+
+def test_calibrate_with_fit_sensor_saves_command_map(client, fakes, monkeypatch):
+    calls = {}
+
+    def fake_calibrate_with_sensor(train, eval, **kw):
+        calls.update(kw)
+        res = fake_calibrate(train, eval, **kw)
+        return types.SimpleNamespace(
+            result=res,
+            command_map=FakeCommandMap(np.ones(6), np.full(6, -2.0)),
+            dynamics_only=FakeResult(FakeParams(kp=40.0), FakeParams(), eval_score=2.0),
+        )
+
+    monkeypatch.setitem(sys.modules, "antares.sensor",
+                        _module("antares.sensor", calibrate_with_sensor=fake_calibrate_with_sensor))
+    result, lock, path = server.run_calibration(
+        server.get_dataset(FAKE_DS2), n_train=4, n_eval=2, name="unit-b", fit_sensor=True)
+    assert calls["max_evaluations"] == 150
+    assert lock["command_map"] == SHIFT_MAP
+    assert lock["dynamics_only"]["eval_score"] == 2.0
+    saved = json.loads(path.read_text())
+    assert saved["command_map"] == SHIFT_MAP
+    replay = client.get("/api/replay", params={"dataset": FAKE_DS2, "episode": 0, "lock": "unit-b"}).json()
+    assert replay["command_map"] == SHIFT_MAP
+
+
+def test_calibrate_request_forwards_fit_sensor(client, fakes, monkeypatch):
+    seen = {}
+
+    def spy(ds, **kw):
+        seen.update(kw)
+        raise HTTPException(status_code=400, detail="stop here")
+
+    monkeypatch.setattr(server, "run_calibration", spy)
+    job = client.post("/api/calibrate", json={"dataset": FAKE_DS, "fit_sensor": True}).json()["job_id"]
+    for _ in range(100):
+        if client.get(f"/api/calibrate/{job}").json()["status"] != "running":
+            break
+        time.sleep(0.01)
+    assert seen["fit_sensor"] is True

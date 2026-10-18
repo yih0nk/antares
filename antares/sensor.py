@@ -25,6 +25,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
+from typing import Any
 
 import numpy as np
 
@@ -201,6 +202,7 @@ def calibrate_with_sensor(
     seed: int = 0,
     on_progress: Callable[[ProgressEvent], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
+    **calibrate_kwargs: Any,
 ) -> SensorCalibrationResult:
     """Fit dynamics and command map together by alternation.
 
@@ -208,7 +210,8 @@ def calibrate_with_sensor(
     as ``dynamics_only``). Each later round fits the command map with the
     current dynamics fixed, then refits the dynamics from where they were,
     under the new command map, with ``max_evaluations`` CMA-ES evaluations.
-    A final command-map fit follows the last round.
+    A final command-map fit follows the last round. ``calibrate_kwargs``
+    (e.g. ``per_joint=True``) go to every dynamics fit.
     """
     t0 = time.perf_counter()
     train, eval = list(train), list(eval)
@@ -227,7 +230,7 @@ def calibrate_with_sensor(
     ident = CommandMap.identity()
     first = calibrate(
         train, eval, simulate=with_map(ident), start=start, max_evaluations=max_evaluations,
-        seed=seed, on_progress=progress, should_stop=stop,
+        seed=seed, on_progress=progress, should_stop=stop, **calibrate_kwargs,
     )
     history = list(first.history)
     n_evals = first.n_evaluations
@@ -240,7 +243,7 @@ def calibrate_with_sensor(
         offset["n"] = n_evals
         nxt = calibrate(
             train, eval, simulate=with_map(cmap), start=params, max_evaluations=max_evaluations,
-            sigma0=0.15, seed=seed + k, on_progress=progress, should_stop=stop,
+            sigma0=0.15, seed=seed + k, on_progress=progress, should_stop=stop, **calibrate_kwargs,
         )
         history += [(i + n_evals, s) for i, s in nxt.history[1:]]
         n_evals += nxt.n_evaluations

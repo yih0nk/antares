@@ -476,8 +476,11 @@ def lock_summary(lock: dict) -> dict:
     }
 
 
-def build_lock(ds: Dataset, train: list, result, name: str | None):
-    """Make a RobotLock for a finished calibration (digest covers the train split)."""
+def build_lock(ds: Dataset, train: list, result, name: str | None, **sensor):
+    """Make a RobotLock for a finished calibration (digest covers the train split).
+
+    ``sensor`` carries ``command_map``/``dynamics_only`` for a sensor fit.
+    """
     from antares.lock import RobotLock
 
     return RobotLock.create(
@@ -486,6 +489,7 @@ def build_lock(ds: Dataset, train: list, result, name: str | None):
         train_episodes=train,
         result=result,
         name=name,
+        **sensor,
     )
 
 
@@ -747,11 +751,16 @@ def run_calibration(
     per_joint_sigma0: float | None = None,
     on_progress: Callable[[Any], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
+    fit_sensor: bool = False,
 ) -> tuple[Any, dict, Path]:
     """Calibrate on ``ds``, save a lock, return (CalibrationResult, lock dict, path).
 
     ``per_joint`` adds the per-joint refinement stage after the shared fit,
     with its own evaluation budget and (optionally) CMA-ES step size.
+
+    With ``fit_sensor`` the arm's command map is fitted alongside the
+    dynamics (see :mod:`antares.sensor`) and stored in the lock, together
+    with the dynamics-only fit for comparison.
     """
     from antares.calibrate import calibrate, split_episodes
 
@@ -765,6 +774,25 @@ def run_calibration(
         extra = {"per_joint": True, "per_joint_max_evaluations": int(per_joint_max_evaluations)}
         if per_joint_sigma0 is not None:
             extra["per_joint_sigma0"] = float(per_joint_sigma0)
+    if fit_sensor:
+        from antares.sensor import calibrate_with_sensor
+
+        out = calibrate_with_sensor(
+            train,
+            eval_,
+            start=default_params(),
+            max_evaluations=max_evaluations,
+            seed=seed,
+            on_progress=on_progress,
+            should_stop=should_stop,
+            **extra,
+        )
+        lock = build_lock(
+            ds, train, out.result, name,
+            command_map=out.command_map.to_dict(),
+            dynamics_only=out.dynamics_only.to_dict(),
+        )
+        return out.result, lock.to_dict(), save_lock(lock)
     result = calibrate(
         train,
         eval_,
@@ -798,6 +826,7 @@ def _job_worker(job: Job, req: "CalibrateRequest") -> None:
             per_joint_max_evaluations=req.per_joint_max_evaluations,
             on_progress=on_progress,
             should_stop=job.stop.is_set,
+            fit_sensor=req.fit_sensor,
         )
         result_d = result.to_dict()
         job.push({"type": "done", "lock": lock, "result": result_d})
@@ -1229,6 +1258,7 @@ class CalibrateRequest(BaseModel):
     # demo stays at ~150 evaluations.
     per_joint: bool = False
     per_joint_max_evaluations: int = Field(600, ge=1)
+    fit_sensor: bool = False
 
 
 @app.post("/api/calibrate")
