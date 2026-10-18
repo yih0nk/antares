@@ -28,11 +28,12 @@ TRUE_MAP = CommandMap(
 
 
 def toy_q(p: SimParams, cmap: CommandMap, action: np.ndarray, q0: np.ndarray) -> np.ndarray:
-    tau = 20.0 * (p.kv + p.damping) / p.kp + p.armature
-    alpha = 1.0 - math.exp(-1.0 / FPS / tau)
+    pj = p.per_joint
+    tau = 20.0 * (pj("kv") + pj("damping")) / pj("kp") + pj("armature")
+    alpha = 1.0 - np.exp(-1.0 / FPS / tau)
     ctrl = cmap.apply(action) * RAD_PER_UNIT
-    src = np.maximum(np.arange(len(action)) - p.latency_frames, 0)
-    ctrl = ctrl[src]
+    src = np.maximum(np.arange(len(action))[:, None] - pj("latency_frames")[None, :], 0)
+    ctrl = np.take_along_axis(ctrl, src, axis=0)
     q = np.empty_like(ctrl)
     q[0] = q0
     for t in range(1, len(ctrl)):
@@ -176,3 +177,13 @@ def test_calibrate_with_sensor_kinematic_mode():
         assert out.command_map.bias[j] == pytest.approx(TRUE_MAP.bias[j], abs=0.2)
     with pytest.raises(ValueError):
         calibrate_with_sensor(eps[:1], [], simulate=toy_simulate, mode="nope")
+
+
+def test_calibrate_with_sensor_per_joint():
+    eps = make_episodes(4, seed=3)
+    out = calibrate_with_sensor(eps[:3], eps[3:], simulate=toy_simulate, max_evaluations=30,
+                                per_joint=True, per_joint_max_evaluations=30)
+    # the per-joint stage ran in every dynamics fit
+    assert [st["name"] for st in out.result.stages] == ["shared", "per_joint"]
+    assert [st["name"] for st in out.dynamics_only.stages] == ["shared", "per_joint"]
+    assert out.result.eval_score < out.dynamics_only.baseline_eval_score
