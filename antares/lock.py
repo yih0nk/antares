@@ -74,6 +74,9 @@ class RobotLock:
     # Fitted fixed cameras by short name (antares.camera.CameraFit.to_dict());
     # locks saved before camera fits existed load with none.
     cameras: dict[str, Any] = field(default_factory=dict)
+    # The static scene recovered from the logs (antares.scene.SceneFit.lock_entry():
+    # table height, workspace box, backdrop paths); None until `scene-fit` runs.
+    scene: dict[str, Any] | None = None
 
     @classmethod
     def create(
@@ -120,6 +123,8 @@ class RobotLock:
             d["dynamics_only"] = self.dynamics_only
         if self.cameras:
             d["cameras"] = dict(self.cameras)
+        if self.scene is not None:
+            d["scene"] = dict(self.scene)
         return d
 
     def replace(self, **changes: Any) -> "RobotLock":
@@ -145,6 +150,7 @@ class RobotLock:
             dynamics_only=d.get("dynamics_only"),
             robot=str(d.get("robot") or DEFAULT_ROBOT),
             cameras=dict(d.get("cameras") or {}),
+            scene=dict(d["scene"]) if isinstance(d.get("scene"), dict) else None,
         )
 
     def default_path(self, lock_dir: Path = LOCK_DIR) -> Path:
