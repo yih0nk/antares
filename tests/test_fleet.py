@@ -363,6 +363,17 @@ def test_scan_calibrates_each_robot_and_tolerates_failures(tmp_path):
     assert events[-1]["summary"]["n_robots"] == 2
 
 
+def test_scan_builds_a_sim_when_none_is_passed(tmp_path, monkeypatch):
+    """`antares fleet scan` passes no simulate; the scan must build one rather
+    than fail every candidate on the baseline score."""
+    import antares.calibrate as calibrate_mod
+
+    monkeypatch.setattr(calibrate_mod, "default_simulate", lambda *a, **k: toy_simulate)
+    ds = make_dataset("alice/so101_a", seed=1)
+    rep = scan([cand("alice/so101_a")], max_evaluations=2, lock_dir=tmp_path, load=lambda rid: ds)
+    assert rep.failures == [] and [r.dataset for r in rep.robots] == ["alice/so101_a"]
+
+
 def test_scan_stops_when_the_budget_is_spent(tmp_path, monkeypatch):
     ds = make_dataset("alice/so101_a", seed=1)
     clock = {"t": 0.0}
