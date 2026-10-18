@@ -503,10 +503,12 @@ def factor_from_config(d: Mapping[str, Any]) -> tuple[Factor, Callable[[Any, np.
     if "target" in d and "apply" in d:
         raise ValueError(f"{name}: give target or apply, not both")
     per_joint = bool(d.pop("per_joint", False))
+    multiplier = False
     if "target" in d:
         fn: Callable[[Any, np.ndarray], None] = ModelFactor(
             target=str(d.pop("target")), mode=str(d.pop("mode", "scale")), per_joint=per_joint
         )
+        multiplier = fn.mode == "scale"
         origin = "model"
     elif "apply" in d:
         fn = _resolve(str(d.pop("apply")))
@@ -515,7 +517,8 @@ def factor_from_config(d: Mapping[str, Any]) -> tuple[Factor, Callable[[Any, np.
         raise ValueError(f"{name}: needs target (an MjModel field) or apply (module:function)")
     bounds = tuple(float(b) for b in d.pop("bounds"))
     scale = str(d.pop("scale", "linear"))
-    neutral = float(d.pop("neutral", 1.0 if scale == "log" else 0.0))
+    # A multiplier starts at 1 (the model as it is); an added offset at 0.
+    neutral = float(d.pop("neutral", 1.0 if scale == "log" or multiplier else 0.0))
     stages = tuple(d.pop("stages", ("per_joint",) if per_joint else ("shared",)))
     drift = d.pop("drift", None)
     factor = Factor(
@@ -571,6 +574,20 @@ def parse_selection(spec: str | None, stage: str = "shared") -> tuple[str, ...] 
     return tuple(items)
 
 
+def load_env_factors() -> list[Factor]:
+    """Factors from the TOML files in ``$ANTARES_FACTORS`` (``os.pathsep``-separated),
+    so the server and every command see the same added factors."""
+    import os
+
+    out: list[Factor] = []
+    for p in filter(None, os.environ.get("ANTARES_FACTORS", "").split(os.pathsep)):
+        out += load_factor_file(p)
+    return out
+
+
+load_env_factors()
+
+
 __all__ = [
     "BUILTIN",
     "Factor",
@@ -588,6 +605,7 @@ __all__ = [
     "factor_from_config",
     "get",
     "is_extra",
+    "load_env_factors",
     "load_factor_file",
     "log_scaled",
     "mjcf_attrs",

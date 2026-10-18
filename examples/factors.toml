@@ -1,0 +1,41 @@
+# Extra factors for `antares calibrate --factors-file examples/factors.toml --factors +gravity_scale`.
+#
+# Each [[factor]] is one thing the fit may account for. `target` names a
+# MuJoCo MjModel field the factor changes (or "opt.<field>"); `mode` is
+# "scale" (multiply the model's own value; starts at 1) or "set" (replace it).
+# For anything a field can't express, give `apply = "module:function"`
+# instead: a function (arm, values) that changes arm.model.
+#
+# `antares factors --file examples/factors.toml` shows them next to the
+# built-ins. A factor you add starts as "untested": run `antares identify`
+# or `antares specificity` on a fit before reading its value as a measurement.
+
+[[factor]]
+name = "gravity_scale"
+label = "Gravity load"
+explains = "How much of the arm's weight the servos hold: sag that grows with reach."
+target = "opt.gravity"
+mode = "scale"
+bounds = [0.5, 1.5]
+needs = "poses held at different reaches"
+
+[[factor]]
+name = "link_mass"
+label = "Link mass"
+explains = "Heavier or lighter links than the CAD model, e.g. after adding a camera mount."
+target = "body_mass"
+mode = "scale"
+bounds = [0.5, 2.0]
+scale = "log"
+needs = "fast moves and poses held at different reaches"
+
+[[factor]]
+name = "joint_stiffness"
+label = "Passive joint spring"
+explains = "A spring pulling each joint to zero, e.g. cable tension or a gravity-compensation spring."
+target = "jnt_stiffness"
+mode = "set"
+per_joint = true
+bounds = [0.0, 2.0]
+unit = "N*m/rad"
+needs = "the joint held still at several angles"
