@@ -199,11 +199,11 @@ def hub_search(
 
 
 def fetch_info(repo_id: str) -> dict[str, Any]:
-    """Download only ``meta/info.json`` (cached by huggingface_hub) and parse it."""
-    from huggingface_hub import hf_hub_download
+    """Download only ``meta/info.json`` (through :func:`antares.hub.download`,
+    so the Hub cache and offline mode apply) and parse it."""
+    from antares.hub import download
 
-    path = hf_hub_download(repo_id, "meta/info.json", repo_type="dataset")
-    return json.loads(Path(path).read_text())
+    return json.loads(download(repo_id, "meta/info.json").read_text())
 
 
 def fetch_data_files(repo_id: str, api: Any = None) -> tuple[int, int]:
@@ -524,7 +524,7 @@ def scan(
     Afterwards :func:`finalize` adds the fleet statistics, outliers and a
     partial cross matrix over up to ``cross_n`` robots (0 disables it).
     """
-    from antares.calibrate import calibrate, score, split_episodes
+    from antares.calibrate import calibrate, default_simulate, score, split_episodes
     from antares.lock import RobotLock, pinned_params, seed_info
     from antares.sim import SimParams
 
@@ -532,6 +532,10 @@ def scan(
         from antares.data import load_dataset
 
         load = load_dataset
+    if simulate is None:
+        # One SO-101 sim shared by the baseline score and every fit (score()
+        # has no default, so None here failed every candidate).
+        simulate = default_simulate()
     lock_dir = Path(lock_dir)
     report_path = Path(report_path) if report_path is not None else lock_dir / FLEET_REPORT_NAME
     emit = on_progress or (lambda ev: None)

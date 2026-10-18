@@ -343,6 +343,22 @@ class SimParams:
             return np.asarray(v, dtype=dtype)
         return np.full(N_JOINTS if n is None else n, v, dtype=dtype)
 
+    def scalar(self, name: str) -> float:
+        """``name`` as one number for the whole arm: a shared value as is, a
+        per-joint tuple as its **mean** over the joints.
+
+        This is the one reduction used wherever a per-joint lock has to be
+        read as a single value (a DR range is one interval per parameter for
+        the whole arm; a drift trend is one series per parameter), so a
+        shared lock and the per-joint lock it refined land on the same
+        scale. ``latency_frames`` comes back as a float too; round it
+        yourself if a frame count is wanted.
+        """
+        if name in STR_FIELDS:
+            raise ValueError(f"{name} is not a numeric parameter")
+        v = getattr(self, name)
+        return float(np.mean(v)) if isinstance(v, (tuple, list)) else float(v)
+
     def broadcast(self, n: int | None = None) -> SimParams:
         """Copy with every numeric field in per-joint form; replays identically."""
         core = {k: tuple(self.per_joint(k, n).tolist()) for k in self.field_names()}

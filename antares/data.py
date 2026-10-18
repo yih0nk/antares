@@ -112,11 +112,10 @@ def read_local(root: str | Path, repo_id: str = "local") -> Dataset:
 
 def load_dataset(repo_id: str, cache_dir: str | Path | None = None) -> Dataset:
     """Download (tabular files only) and read a LeRobot dataset from the Hub."""
-    from huggingface_hub import snapshot_download
+    from antares.hub import snapshot
 
-    root = snapshot_download(
+    root = snapshot(
         repo_id,
-        repo_type="dataset",
         allow_patterns=["meta/info.json", "data/**/*.parquet"],
         cache_dir=cache_dir,
     )

@@ -256,18 +256,26 @@ def last_drifted(records: list[CheckRecord]) -> CheckRecord | None:
     return None
 
 
+# The shortest span of scored checks a per-day slope is printed for.
+_MIN_TREND_DAYS = 1.0
+
+
 def summary_line(records: list[CheckRecord]) -> str:
     """One line for a CLI log, e.g.
     ``history: 7 checks since 2026-09-30, +0.021 deg/day (r² 0.41), last drifted 2026-10-10``.
 
-    The slope clause is omitted with fewer than two scored entries.
+    The slope clause is omitted with fewer than two scored entries, or when
+    they span less than a day: a per-day rate from checks minutes apart (a
+    rehearsal) extrapolates noise into thousands of degrees a day.
     """
     n = len(records)
     if n == 0:
         return "history: no checks recorded"
     t = trend(records)
     parts = [f"history: {n} check{'s' if n != 1 else ''} since {records[0].date}"]
-    if t["slope_deg_per_day"] is not None:
+    scored = [r for r in records if r.score is not None]
+    span_days = (scored[-1].time - scored[0].time).total_seconds() / _SECONDS_PER_DAY if scored else 0.0
+    if t["slope_deg_per_day"] is not None and span_days >= _MIN_TREND_DAYS:
         clause = f"{t['slope_deg_per_day']:+.3f} deg/day"
         if t["r2"] is not None:
             clause += f" (r² {t['r2']:.2f})"

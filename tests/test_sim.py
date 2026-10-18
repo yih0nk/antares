@@ -817,3 +817,16 @@ def test_sts3215_rate_limit_slows_a_big_step():
     # 10 frames (1/3 s) after the step the slow servo has moved at most 1/3 rad
     assert abs(slow[15, 0] - slow[5, 0]) <= 1.0 * 10 / FPS + 0.02
     assert abs(fast[15, 0] - fast[5, 0]) > abs(slow[15, 0] - slow[5, 0]) + 0.1
+
+
+def test_scalar_is_the_joint_mean_of_a_per_joint_value():
+    """The one reduction of a per-joint value to a number (DR ranges, drift
+    trends, scripts): the mean over the joints; a shared value as is."""
+    p = SimParams(kp=(10.0, 20.0, 30.0, 40.0, 50.0, 60.0), latency_frames=(1, 2, 2, 3, 3, 4), kv=2.5)
+    assert p.scalar("kp") == 35.0
+    assert p.scalar("latency_frames") == 2.5
+    assert p.scalar("kv") == 2.5 and isinstance(p.scalar("kv"), float)
+    assert p.scalar("gravity_scale") == 1.0
+    with pytest.raises(ValueError, match="not a numeric"):
+        p.scalar("servo")
+

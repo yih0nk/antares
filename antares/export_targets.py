@@ -990,6 +990,45 @@ RENDERERS = {
 }
 
 
+def unsupported_reason(lock: RobotLock) -> str | None:
+    """Why the framework configs cannot be written for ``lock``, or None.
+
+    They name the SO-101's six joints, limits and USD asset, so they are
+    only written for locks on the SO-101 model; other robots export as MJCF.
+    """
+    from antares.robots import get_robot
+
+    robot = get_robot(getattr(lock, "robot", None))
+    if Path(robot.model_path).resolve() == Path(MODEL_PATH).resolve() and tuple(robot.joints) == tuple(JOINTS):
+        return None
+    return (
+        f"Isaac Lab, ManiSkill, mjlab and JSON configs are written for the SO-101 model only; "
+        f"lock {lock.name} is on {robot.name}, export it as MJCF (--format mjcf)"
+    )
+
+
+#: Written next to the MJCF, instead of the framework configs, for a lock
+#: on a model they are not written for; it holds :func:`unsupported_reason`.
+NOTE_FILENAME = "TARGETS-NOT-EXPORTED.txt"
+
+
+def write_unsupported_note(lock: RobotLock, out_dir: Path | str) -> Path | None:
+    """If the framework configs cannot be written for ``lock``
+    (:func:`unsupported_reason`), write :data:`NOTE_FILENAME` under
+    ``out_dir`` saying why and return its path; else None. The MJCF and
+    scene are exported either way; this is the one place that decides to
+    ship the note instead of the configs (``antares export`` and the zip
+    download both go through it)."""
+    reason = unsupported_reason(lock)
+    if reason is None:
+        return None
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    note = out_dir / NOTE_FILENAME
+    note.write_text(reason + "\n")
+    return note
+
+
 def render(
     lock: RobotLock,
     target: str,
@@ -1007,6 +1046,9 @@ def render(
         fn = RENDERERS[target]
     except KeyError:
         raise TargetExportError(f"unknown export target {target!r}; known: {', '.join(TARGETS)}") from None
+    reason = unsupported_reason(lock)
+    if reason is not None:
+        raise TargetExportError(reason)
     return fn(lock, fps=fps, dr=dr, lock_dir=lock_dir)
 
 
@@ -1048,6 +1090,7 @@ __all__ = [
     "TARGETS",
     "TARGET_LABELS",
     "TargetExport",
+    "NOTE_FILENAME",
     "TargetExportError",
     "dataset_fps",
     "dr_dict",
@@ -1066,4 +1109,6 @@ __all__ = [
     "render_maniskill",
     "render_mjlab",
     "resolve_targets",
+    "unsupported_reason",
+    "write_unsupported_note",
 ]
