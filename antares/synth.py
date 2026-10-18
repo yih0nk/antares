@@ -13,6 +13,7 @@ with :func:`antares.data.read_local`.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -93,17 +94,19 @@ def worn(params, changes: Mapping[str, float]):
     ``worn(p, {"kp": 0.7, "frictionloss": 2.0, "latency_frames": 1})`` is a
     weaker, stickier arm that reacts one frame later.
     """
-    known = params.field_names()
+    known = params.to_dict()
     out = {}
     for name, v in changes.items():
         if name not in known:
             raise ValueError(f"unknown parameter {name!r}; expected one of {sorted(known)}")
+        current = getattr(params, name)
+        values = np.asarray(current, dtype=np.float64)
         if name == "latency_frames":
-            new = np.maximum(params.per_joint(name) + int(round(v)), 0)
+            new = np.maximum(values + int(round(v)), 0).astype(np.int64)
         else:
-            new = params.per_joint(name) * float(v)
-        out[name] = tuple(new.tolist()) if params.is_per_joint(name) else new[0].item()
-    return params.replace(**out)
+            new = values * float(v)
+        out[name] = tuple(new.tolist()) if isinstance(current, tuple) else new.item()
+    return dataclasses.replace(params, **out)
 
 
 def parse_changes(spec: str, parse: Callable[[str], float] = float) -> dict[str, float]:
