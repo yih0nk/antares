@@ -162,6 +162,8 @@ class SearchSpace:
 
     bounds: Mapping[str, tuple[float, float, str]]
     per_joint: bool = False
+    #: Column names, one per joint (the robot's; default the SO arms' six).
+    joints: tuple[str, ...] = JOINTS
 
     @property
     def name(self) -> str:
@@ -175,11 +177,11 @@ class SearchSpace:
     def dims(self) -> tuple[str, ...]:
         if not self.per_joint:
             return self.fields
-        return tuple(f"{f}.{j}" for f in self.fields for j in JOINTS)
+        return tuple(f"{f}.{j}" for f in self.fields for j in self.joints)
 
     @property
     def n_dims(self) -> int:
-        return len(self.fields) * (len(JOINTS) if self.per_joint else 1)
+        return len(self.fields) * (len(self.joints) if self.per_joint else 1)
 
     def encode(self, params: SimParams) -> np.ndarray:
         """Parameters -> search vector, clipped to the bounds.
@@ -192,7 +194,7 @@ class SearchSpace:
         for f in self.fields:
             b = self.bounds[f]
             if self.per_joint:
-                out.extend(_to_unit(v, *b) for v in params.per_joint(f))
+                out.extend(_to_unit(v, *b) for v in params.per_joint(f, len(self.joints)))
             elif params.is_per_joint(f):
                 out.append(float(np.mean([_to_unit(v, *b) for v in params.per_joint(f)])))
             else:
@@ -206,7 +208,7 @@ class SearchSpace:
             raise ValueError(f"expected {self.n_dims} dims, got {x.shape[0]}")
         kwargs: dict[str, Any] = {}
         if self.per_joint:
-            nj = len(JOINTS)
+            nj = len(self.joints)
             for i, f in enumerate(self.fields):
                 b = self.bounds[f]
                 kwargs[f] = tuple(_from_unit(v, *b) for v in x[i * nj : (i + 1) * nj])
@@ -218,6 +220,34 @@ class SearchSpace:
 
 SHARED = SearchSpace(SPACE, per_joint=False)
 PER_JOINT = SearchSpace(PER_JOINT_SPACE, per_joint=True)
+
+
+def spaces_for(
+    robot: Any | None = None,
+    fit_factors: Sequence[str] | None = None,
+    per_joint_factors: Sequence[str] | None = None,
+) -> tuple[SearchSpace, SearchSpace]:
+    """``(shared, per_joint)`` search spaces for a robot and a factor selection.
+
+    ``robot`` (a :class:`antares.robots.RobotModel`) supplies the joint
+    names and any bound overrides; ``fit_factors`` picks the shared stage's
+    factors (default: those :mod:`antares.factors` fits by default) and
+    ``per_joint_factors`` the per-joint stage's (default: the shared ones
+    plus the per-joint defaults). With nothing given these are
+    :data:`SHARED` and :data:`PER_JOINT`.
+    """
+    if robot is None and fit_factors is None and per_joint_factors is None:
+        return SHARED, PER_JOINT
+    joints = tuple(robot.joints) if robot is not None else JOINTS
+    overrides = dict(robot.bounds) if robot is not None else {}
+    shared_names = tuple(fit_factors) if fit_factors is not None else factors.names("shared")
+    if per_joint_factors is None:
+        per_joint_factors = shared_names + tuple(n for n in factors.names("per_joint") if n not in shared_names)
+    shared = SearchSpace(factors.space("shared", factors=shared_names, overrides=overrides), False, joints)
+    per_joint = SearchSpace(
+        factors.space("per_joint", per_joint=True, factors=tuple(per_joint_factors), overrides=overrides), True, joints
+    )
+    return shared, per_joint
 
 
 def encode(params: SimParams, space: SearchSpace = SHARED) -> np.ndarray:
@@ -487,16 +517,39 @@ def default_simulate(command_map: Any | None = None, robot: str | None = None) -
             real_cache[id(episode)] = hit
         return hit[1], arm.replay(episode)
 
+    return describe_simulate(simulate, arm)
+
+
+def describe_simulate(simulate: Callable[..., Any], arm: Any) -> Callable[..., Any]:
+    """Tag a simulate callable with the robot it runs, so scoring knows the
+    columns and which are grippers, and a fit knows the robot's defaults."""
+    simulate.robot = arm.robot  # type: ignore[attr-defined]
+    simulate.default_params = arm.default_params()  # type: ignore[attr-defined]
     return simulate
+
+
+def robot_of(simulate: Any) -> Any | None:
+    """The :class:`antares.robots.RobotModel` a simulate callable runs, if tagged."""
+    return getattr(simulate, "robot", None)
+
+
+def scoring_names(simulate: Any) -> dict[str, Any]:
+    """``joint_names``/``exclude`` keyword arguments for scoring ``simulate``'s
+    output: the robot's columns and grippers, or the SO arms' by default."""
+    r = robot_of(simulate)
+    if r is None:
+        return {}
+    return {"joint_names": tuple(r.joints), "exclude": tuple(r.grippers)}
 
 
 def score(params: SimParams, episodes: Sequence[Episode], simulate: SimulateFn):
     """Tracking-error report for ``params`` aggregated over ``episodes``."""
     tracking_error, aggregate = _gap_functions()
+    names = scoring_names(simulate)
     reports = []
     for ep in episodes:
         real_q, sim_q = simulate(params, ep)
-        reports.append(tracking_error(real_q, sim_q))
+        reports.append(tracking_error(real_q, sim_q, **names))
     return aggregate(reports)
 
 
@@ -671,6 +724,8 @@ def calibrate(
     per_joint_popsize: int | None = None,
     n_seeds: int = 1,
     seeds: Sequence[int] | None = None,
+    fit_factors: Sequence[str] | None = None,
+    per_joint_factors: Sequence[str] | None = None,
 ) -> CalibrationResult:
     """Fit :class:`SimParams` to ``train`` episodes; report on ``eval`` episodes.
 
@@ -702,6 +757,13 @@ def calibrate(
     is polled between evaluations; when it returns True the fit ends early
     (skipping later seeds and any later stage) and the best parameters found
     so far are returned.
+
+    ``fit_factors`` / ``per_joint_factors`` choose which factors of
+    :mod:`antares.factors` each stage searches (the rest keep ``start``'s
+    values); by default the stages search what they always have. When
+    ``simulate`` runs a robot other than the SO arms (see
+    :func:`describe_simulate`), its columns, grippers and bounds shape the
+    spaces and the score, and ``start`` defaults to its own MJCF values.
     """
     t0 = time.perf_counter()
     train = list(train)
@@ -718,8 +780,15 @@ def calibrate(
         seed_list = [seed + 100 * i for i in range(n_seeds)]
     if simulate is None:
         simulate = default_simulate()
+    robot = robot_of(simulate)
+    so_arm = robot is None or robot.default_params == "sts3215"
     if start is None:
-        start = SimParams()
+        start = SimParams() if so_arm else simulate.default_params  # type: ignore[attr-defined]
+    shared_space, per_joint_space = spaces_for(
+        None if so_arm and robot is not None and tuple(robot.joints) == JOINTS and not robot.bounds else robot,
+        fit_factors,
+        per_joint_factors,
+    )
 
     # Evaluation 0: the starting point.
     start_report, start_score = _safe_score(start, train, simulate)
@@ -733,7 +802,7 @@ def calibrate(
         best_score=start_score,
         best_report=start_report,
     )
-    fit.record(start, start_report, start_score, SHARED.name)
+    fit.record(start, start_report, start_score, shared_space.name)
 
     def held_out(params: SimParams, report: Any, value: float) -> tuple[Any, float]:
         """Held-out score; the training score stands in without eval episodes."""
@@ -750,7 +819,7 @@ def calibrate(
             fit.seed_index = i
             if i > 0:
                 fit.reset_best(start, start_report, start_score)
-            finished = fit.run_stage(SHARED, start, max_evaluations, sigma0, popsize, s)
+            finished = fit.run_stage(shared_space, start, max_evaluations, sigma0, popsize, s)
             candidates.append((fit.best_params, fit.best_report, fit.best_score))
             candidate_eval.append(held_out(fit.best_params, fit.best_report, fit.best_score))
             if not finished:
@@ -773,7 +842,7 @@ def calibrate(
         # Refine from the shared optimum; a fresh seed so the two stages do
         # not share a random stream.
         fit.run_stage(
-            PER_JOINT,
+            per_joint_space,
             fit.best_params,
             per_joint_max_evaluations,
             per_joint_sigma0,
@@ -805,7 +874,7 @@ def calibrate(
         elapsed_s=time.perf_counter() - t0,
         train_episodes=[ep.index for ep in train],
         eval_episodes=[ep.index for ep in eval],
-        space=PER_JOINT.name if best_params.has_per_joint else SHARED.name,
+        space=per_joint_space.name if best_params.has_per_joint else shared_space.name,
         stages=fit.stages,
         seeds=seeds_block,
     )
@@ -859,6 +928,10 @@ __all__ = [
     "score",
     "calibrate",
     "default_simulate",
+    "describe_simulate",
+    "robot_of",
+    "scoring_names",
+    "spaces_for",
     "param_spread_of",
     "seed_summary",
     "split_episodes",
