@@ -190,7 +190,8 @@ def find_grasps(
 
     The release is the next open flip of the command or, for a held grasp,
     the first frame the jaw opens ``held_gap`` past where the object held
-    it, whichever comes first.
+    it or shuts halfway from that level back to its empty level (the
+    object slipped out of a barely opened jaw), whichever comes first.
 
     The jaw is read over :data:`JAW_WINDOW_S` starting :data:`SETTLE_S`
     after the close, cut short by the release or the end of the episode,
@@ -219,10 +220,13 @@ def find_grasps(
         jaw_rad = float(np.median(q[start:stop, GRIPPER_INDEX]))
         if gap >= held_gap:
             # Letting go opens the jaw past where the object held it, even
-            # when the leader opens too little to cross the thresholds.
-            opened = np.flatnonzero(jaw[start:end] > hold + held_gap)
-            if opened.size:
-                r = start + int(opened[0])
+            # when the leader opens too little to cross the thresholds; or
+            # the object slips out and the jaw shuts the rest of the way
+            # on nothing (halfway from the held level back to empty).
+            seg = jaw[start:end]
+            left = np.flatnonzero((seg > hold + held_gap) | (seg < empty.jaw + 0.5 * gap))
+            if left.size:
+                r = start + int(left[0])
         out.append(
             Grasp(
                 episode=int(episode.index),

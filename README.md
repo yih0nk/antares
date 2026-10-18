@@ -1415,7 +1415,7 @@ On the two demo datasets (gripper tip in the base frame):
 
 | | picks | carried | missed | idle | pick x, y (cm) | place x, y, z (cm) | jaw on the cube |
 |---|---|---|---|---|---|---|---|
-| SO-101 | 51 in 50 episodes | 48 | 0 | 27 | 3..24, -14..13 | 2.8, -15.4, 7.0 (±1) | -2.3° |
+| SO-101 | 51 in 50 episodes | 50 | 0 | 27 | 3..24, -14..13 | 2.8, -15.3, 7.0 (±1) | -2.3° |
 | SO-100 | 50 in 49 episodes | 49 | 1 | 49 | 19..33, -8..14 | 8.4, -12.4, 8.0 (±1) | +5.8° |
 
 Picks spread over a 20 x 27 cm area on SO-101 and land in one spot about
