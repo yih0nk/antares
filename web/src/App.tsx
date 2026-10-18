@@ -30,7 +30,9 @@ import { AddDataset } from "./AddDataset";
 
 const DEFAULT = "default";
 const LIVE = "live";
-const PARAM_KEYS: (keyof Params)[] = ["kp", "kv", "damping", "armature", "frictionloss", "latency_frames", "forcerange"];
+const PARAM_KEYS: (keyof Params)[] = ["kp", "kv", "damping", "armature", "frictionloss", "latency_frames", "forcerange", "gravity_scale", "deadband"];
+// Terms a lock omits at their defaults; the row shows only when the lock carries one.
+const OPTIONAL_DEFAULTS: Partial<Record<keyof Params, number>> = { gravity_scale: 1, deadband: 0 };
 const SPEEDS = [0.25, 0.5, 1, 2];
 // CMA-ES budget for a UI run; also sizes the sparkline's x axis.
 const MAX_EVALUATIONS = 150;
@@ -131,6 +133,8 @@ export default function App() {
   const [joint, setJoint] = useState("shoulder_pan");
   const [calib, setCalib] = useState<Calibration | null>(null);
   const [perJoint, setPerJoint] = useState(false);
+  const [fitGravity, setFitGravity] = useState(false);
+  const [fitDeadband, setFitDeadband] = useState(false);
   const [residual, setResidual] = useState<Residual | null>(null);
   const [crossOpen, setCrossOpen] = useState(false);
   // Cached per (loaded datasets × saved locks); cleared when either changes.
@@ -346,6 +350,7 @@ export default function App() {
         name,
         MAX_EVALUATIONS,
         perJoint ? { maxEvaluations: PER_JOINT_EVALUATIONS } : undefined,
+        { fitGravity, fitDeadband },
       ));
     } catch (e) {
       setError(`Could not start calibration: ${(e as Error).message}`);
@@ -682,6 +687,14 @@ export default function App() {
             per-joint refinement
             <span className="muted">+{PER_JOINT_EVALUATIONS} evals</span>
           </label>
+          <label className={`toggle ${running ? "locked" : ""}`} title="Also fit gravity_scale, the arm's gravity load: how much it sags per pose, apart from how fast kp makes it track">
+            <input type="checkbox" checked={fitGravity} disabled={running} onChange={(e) => setFitGravity(e.target.checked)} />
+            fit gravity load
+          </label>
+          <label className={`toggle ${running ? "locked" : ""}`} title="Also fit the servo deadband (firmware deadzone plus gear backlash); one value per joint with per-joint refinement">
+            <input type="checkbox" checked={fitDeadband} disabled={running} onChange={(e) => setFitDeadband(e.target.checked)} />
+            fit servo deadband
+          </label>
           {calib && (
             <div className="calib-body">
               <div className="row">
@@ -778,8 +791,10 @@ export default function App() {
               </thead>
               <tbody>
                 {PARAM_KEYS.map((k) => {
-                  const d = defaultParams[k];
-                  const g = shownParams[k];
+                  const optional = OPTIONAL_DEFAULTS[k];
+                  if (optional != null && defaultParams[k] == null && shownParams[k] == null) return null;
+                  const d = defaultParams[k] ?? optional;
+                  const g = shownParams[k] ?? optional;
                   if (d == null || g == null) return null; // older locks have no forcerange
                   return (
                     <tr key={k}>

@@ -13,6 +13,11 @@ export type Params = {
   latency_frames: ParamValue;
   // Actuator force limit; searched by the per-joint stage only.
   forcerange?: ParamValue;
+  // Gravity load (fraction of the MJCF's link weights; 1 is the stock model)
+  // and servo deadband (rad). Fitted with fit_gravity / fit_deadband and
+  // omitted at their defaults, so older locks have neither.
+  gravity_scale?: ParamValue;
+  deadband?: ParamValue;
 };
 
 // Where a dataset came from: pinned demo, any Hub id, a zip/parquet upload,
@@ -349,8 +354,15 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ dataset, episode, params }),
     }).then((r) => json<Replay>(r)),
-  // `perJoint` adds the per-joint refinement stage after the shared fit.
-  calibrate: (dataset: string, name: string, maxEvaluations: number, perJoint?: { maxEvaluations: number }) =>
+  // `perJoint` adds the per-joint refinement stage after the shared fit;
+  // `terms` adds the optional gravity load and servo deadband parameters.
+  calibrate: (
+    dataset: string,
+    name: string,
+    maxEvaluations: number,
+    perJoint?: { maxEvaluations: number },
+    terms?: { fitGravity?: boolean; fitDeadband?: boolean },
+  ) =>
     fetch("/api/calibrate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -359,6 +371,8 @@ export const api = {
         name,
         max_evaluations: maxEvaluations,
         ...(perJoint ? { per_joint: true, per_joint_max_evaluations: perJoint.maxEvaluations } : {}),
+        ...(terms?.fitGravity ? { fit_gravity: true } : {}),
+        ...(terms?.fitDeadband ? { fit_deadband: true } : {}),
       }),
     }).then((r) => json<{ job_id: string }>(r)),
   cancel: (jobId: string) => fetch(`/api/calibrate/${jobId}/cancel`, { method: "POST" }).then((r) => json(r)),
