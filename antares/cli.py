@@ -1579,7 +1579,8 @@ def cmd_identify(args: argparse.Namespace) -> int:
     from antares.specificity import identifiability, latency_profile
 
     ds = server.get_dataset(args.repo_id)
-    params = server.params_from_dict(server.load_lock_dict(args.lock)["params"])
+    lock_d = server.load_lock_dict(args.lock)
+    params = server.params_from_dict(lock_d["params"])
     train, eval_ = split_episodes(ds.episodes, args.n_train, args.n_eval, seed=args.seed)
     episodes = train if args.split == "train" else eval_
     if not episodes:
@@ -1587,7 +1588,9 @@ def cmd_identify(args: argparse.Namespace) -> int:
             f"{ds.repo_id} has {len(ds.episodes)} episodes; --n-train {args.n_train} --n-eval {args.n_eval} "
             f"leaves no {args.split} split"
         )
-    simulate = default_simulate()
+    # The lock's own sim (robot, sensor and unit maps held fixed), else the dataset's robot.
+    simulate = (server.lock_simulate(lock_d) or server.simulate_for(server.dataset_robot(ds))
+                or default_simulate())
     rep = identifiability(params, episodes, simulate, delta_deg=args.delta)
     lat = latency_profile(params, episodes, simulate)
     print(f"lock {args.lock} on {ds.repo_id} ({args.split} split, {len(episodes)} episodes)")
