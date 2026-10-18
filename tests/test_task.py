@@ -166,3 +166,36 @@ def test_release_found_from_the_jaw_opening(tip, unit_map):
     (g,) = find_grasps(ep, thr, tip, unit_map, empty_level([ep], thr))
     assert g.held and g.release_frame == 80
     np.testing.assert_allclose(g.release_xyz, tip(unit_map.to_rad(np.array([*POSE_C, 0.0]))), atol=1e-9)
+
+
+def _segments_episode(index, segments):
+    state, action = [], []
+    for pose, cmd, jaw, n in segments:
+        for _ in range(n):
+            action.append([*pose, cmd])
+            state.append([*pose, jaw])
+    return Episode(index, FPS, JOINTS, np.asarray(state), np.asarray(action))
+
+
+def test_kinds_miss_pick_regrab_idle(tip, unit_map):
+    from antares.task import TaskDistribution
+
+    ep = _segments_episode(0, [
+        (POSE_A, OPEN, OPEN, 20),
+        (POSE_B, SHUT, SHUT, 20),  # miss: closes on nothing
+        (POSE_B, OPEN, OPEN, 20),
+        (POSE_B, SHUT, 25.0, 20),  # pick
+        (POSE_B, OPEN, OPEN, 20),  # let go in place: a re-grab, not carried
+        (POSE_B, SHUT, 25.0, 20),  # pick again
+        (POSE_C, SHUT, 25.0, 20),
+        (POSE_C, OPEN, OPEN, 20),  # placed
+        (POSE_A, SHUT, SHUT, 20),  # idle: shut after letting go
+    ])
+    td = TaskDistribution.from_episodes([ep], name="toy")
+    assert [g.kind for g in td.grasps] == ["miss", "pick", "pick", "idle"]
+    assert [g.carried for g in td.grasps] == [False, False, True, False]
+    assert td.picks.shape == (2, 3) and td.places.shape == (1, 3)
+    s = td.summary()
+    assert (s["held"], s["carried"], s["missed"], s["idle"]) == (2, 1, 1, 1)
+    assert s["missed_episodes"] == [0] and s["episodes_without_pick"] == []
+    assert all(d["place"] is not None for d in td.sample(20, np.random.default_rng(0)))

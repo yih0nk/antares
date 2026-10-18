@@ -1351,9 +1351,10 @@ def test_task_prints_clouds_and_saves(monkeypatch, capsys, tmp_path):
     out_path = tmp_path / "robot.task.json"
     assert cli.main(["task", "fake/robot", "--out", str(out_path)]) == 0
     out = capsys.readouterr().out
-    assert "3 grasps, 2 held, 1 closed on nothing" in out
+    assert "3 closes of the gripper: 2 picks (2 carried somewhere else), 1 missed, 0 idle" in out
     assert "pick" in out and "place" in out
     assert "episodes with a missed grasp: 1" in out
+    assert "episodes with no pick found: 1" in out
     saved = json.loads(out_path.read_text())
     assert saved["name"] == "robot" and saved["summary"]["held"] == 2
 

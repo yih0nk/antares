@@ -19,6 +19,12 @@ percentile of the measured jaw and of the closed command), and the jaw is
 read just after it settles, before the operator has a chance to let go.
 The angle it stops at is a proxy for the object's width.
 
+Each close is then one of three kinds: a *pick* (it held something), a
+*miss* (it closed on nothing before anything was picked in that episode),
+or *idle* (it closed on nothing after a pick, typically the operator
+shutting the gripper after letting go). Only picks that moved the object
+more than :data:`CARRY_M` before letting go give a place position.
+
 Pure kinematics: no dynamics and no lock are needed, only the dataset-unit
 -> radian map.
 """
@@ -27,7 +33,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -63,6 +69,10 @@ HELD_GAP = 3.0
 #: position is read over the next ``JAW_WINDOW_S`` after it.
 SETTLE_S = 0.3
 JAW_WINDOW_S = 0.5
+
+#: A held object that ends up farther than this from where it was picked
+#: was carried (a re-grab in place is not a place).
+CARRY_M = 0.03
 
 
 class Tip:
@@ -100,6 +110,8 @@ class Grasp:
     jaw_gap: float  # measured jaw above the empty-closed level just after settling, dataset units
     jaw_deg: float  # measured jaw angle just after settling, degrees
     held: bool  # jaw_gap >= the held threshold: an object stopped the jaw
+    carried: bool = False  # held, released, and moved more than CARRY_M
+    kind: str = "miss"  # "pick", "miss" or "idle"; see the module docstring
 
     def to_dict(self) -> dict:
         return {
@@ -111,6 +123,8 @@ class Grasp:
             "jaw_gap": self.jaw_gap,
             "jaw_deg": self.jaw_deg,
             "held": self.held,
+            "carried": self.carried,
+            "kind": self.kind,
         }
 
 
@@ -197,6 +211,16 @@ def find_grasps(
                 held=gap >= held_gap,
             )
         )
+    picked = False
+    for i, gr in enumerate(out):
+        carried = (
+            gr.held
+            and gr.release_xyz is not None
+            and float(np.linalg.norm(np.subtract(gr.release_xyz, gr.xyz))) > CARRY_M
+        )
+        kind = "pick" if gr.held else ("idle" if picked else "miss")
+        picked = picked or gr.held
+        out[i] = replace(gr, carried=carried, kind=kind)
     return out
 
 
@@ -273,15 +297,23 @@ class TaskDistribution:
         return np.array([g.xyz for g in self.held], dtype=np.float64).reshape(-1, 3)
 
     @property
+    def carried(self) -> list[Grasp]:
+        return [g for g in self.grasps if g.carried]
+
+    @property
     def places(self) -> np.ndarray:
-        """(N,3) release positions of the held grasps that were released."""
-        pts = [g.release_xyz for g in self.held if g.release_xyz is not None]
-        return np.array(pts, dtype=np.float64).reshape(-1, 3)
+        """(N,3) release positions of the carried picks."""
+        return np.array([g.release_xyz for g in self.carried], dtype=np.float64).reshape(-1, 3)
 
     @property
     def missed_episodes(self) -> list[int]:
-        """Episodes with at least one grasp that closed on nothing."""
-        return sorted({g.episode for g in self.grasps if not g.held})
+        """Episodes with a close on nothing before anything was picked."""
+        return sorted({g.episode for g in self.grasps if g.kind == "miss"})
+
+    @property
+    def episodes_without_pick(self) -> list[int]:
+        picked = {g.episode for g in self.held}
+        return [i for i in self.episodes if i not in picked]
 
     def summary(self) -> dict[str, Any]:
         held = self.held
@@ -289,8 +321,11 @@ class TaskDistribution:
             "episodes": len(self.episodes),
             "grasps": len(self.grasps),
             "held": len(held),
-            "missed": len(self.grasps) - len(held),
+            "carried": len(self.carried),
+            "missed": sum(g.kind == "miss" for g in self.grasps),
+            "idle": sum(g.kind == "idle" for g in self.grasps),
             "missed_episodes": self.missed_episodes,
+            "episodes_without_pick": self.episodes_without_pick,
             "pick": _stats(self.picks),
             "place": _stats(self.places),
             "jaw_deg_median": float(np.median([g.jaw_deg for g in held])) if held else None,
@@ -301,21 +336,21 @@ class TaskDistribution:
     def sample(self, n: int, rng: np.random.Generator | None = None, jitter_m: float = 0.01) -> list[dict[str, Any]]:
         """Draw ``n`` task instances for a sim environment.
 
-        Each picks one held grasp at random and returns its pick and place
-        positions, both with independent Gaussian jitter of ``jitter_m`` per
-        axis (a kernel density estimate of the logged clouds), plus a start
-        pose drawn from the logged ones. ``place`` is None for a grasp that
-        was never released.
+        Each picks one carried pick at random (any held grasp if none was
+        carried) and returns its pick and place positions, both with
+        independent Gaussian jitter of ``jitter_m`` per axis (a kernel
+        density estimate of the logged clouds), plus a start pose drawn from
+        the logged ones. ``place`` is None when the grasp was not carried.
         """
         rng = rng if rng is not None else np.random.default_rng()
-        held = self.held
-        if not held:
+        pool = self.carried or self.held
+        if not pool:
             raise ValueError("no held grasps to sample from")
         out = []
         for _ in range(int(n)):
-            g = held[int(rng.integers(len(held)))]
+            g = pool[int(rng.integers(len(pool)))]
             pick = np.asarray(g.xyz) + rng.normal(0.0, jitter_m, 3)
-            place = None if g.release_xyz is None else np.asarray(g.release_xyz) + rng.normal(0.0, jitter_m, 3)
+            place = np.asarray(g.release_xyz) + rng.normal(0.0, jitter_m, 3) if g.carried else None
             out.append(
                 {
                     "pick": pick.tolist(),
@@ -368,6 +403,8 @@ class TaskDistribution:
                     jaw_gap=float(g["jaw_gap"]),
                     jaw_deg=float(g["jaw_deg"]),
                     held=bool(g["held"]),
+                    carried=bool(g.get("carried", False)),
+                    kind=str(g.get("kind", "pick" if g["held"] else "miss")),
                 )
                 for g in d["grasps"]
             ],

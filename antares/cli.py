@@ -868,8 +868,9 @@ def cmd_task(args: argparse.Namespace) -> int:
     td = TaskDistribution.from_episodes(list(ds.episodes), name=name, dataset=ds.repo_id, held_gap=args.held_gap)
     s = td.summary()
     print(
-        f"{ds.repo_id}: {s['episodes']} episodes, {s['grasps']} grasps, {s['held']} held, "
-        f"{s['missed']} closed on nothing"
+        f"{ds.repo_id}: {s['episodes']} episodes, {s['grasps']} closes of the gripper: "
+        f"{s['held']} picks ({s['carried']} carried somewhere else), {s['missed']} missed, "
+        f"{s['idle']} idle closes after letting go"
     )
     rows = []
     for label, st in (("pick", s["pick"]), ("place", s["place"])):
@@ -884,6 +885,8 @@ def cmd_task(args: argparse.Namespace) -> int:
         print(f"jaw stops at {s['jaw_deg_median']:.1f} deg on a held object (median)")
     if s["missed_episodes"]:
         print(f"episodes with a missed grasp: {_episode_list(s['missed_episodes'])}")
+    if s["episodes_without_pick"]:
+        print(f"episodes with no pick found: {_episode_list(s['episodes_without_pick'])}")
     if not args.no_save:
         path = td.save(args.out or td.default_path(server.LOCK_DIR))
         print(f"saved task {td.name} -> {path}")
