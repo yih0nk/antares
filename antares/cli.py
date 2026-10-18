@@ -474,11 +474,91 @@ def cmd_check(args: argparse.Namespace) -> int:
             print(_diagnosis_table(diagnosis))
             print(diagnosis.summary())
 
+    if not args.no_record:
+        _record_check(res, args.lock, args.history_dir, server.LOCK_DIR, to_stderr=args.json)
+
     if res.verdict == "ok":
         return EXIT_PASS
     if res.verdict == "drifted":
         return EXIT_DRIFT
     return EXIT_USAGE
+
+
+def _history_target(lock_arg: str, history_dir: str | None, lock_dir) -> tuple[str, Path]:
+    """``(lock name, directory)`` of the history file for a ``--lock`` argument.
+
+    A ``.lock.json`` path keeps its history next to it under the file's name;
+    a bare name lives in ``lock_dir``. ``history_dir`` overrides the directory.
+    """
+    import os
+    from pathlib import Path
+
+    from antares.history import LOCK_SUFFIX
+
+    if os.path.isfile(lock_arg):
+        base = os.path.basename(lock_arg)
+        for suffix in (LOCK_SUFFIX, ".json"):
+            if base.endswith(suffix):
+                base = base[: -len(suffix)]
+                break
+        name, d = base, Path(lock_arg).resolve().parent
+    else:
+        name, d = lock_arg, Path(lock_dir)
+    return name, Path(history_dir) if history_dir else d
+
+
+def _record_check(res, lock_arg: str, history_dir: str | None, lock_dir, *, to_stderr: bool) -> None:
+    """Append ``res`` to the lock's history and print the one-line trend.
+
+    Insufficient-data checks are recorded too: a check that could not run is
+    itself a signal. A failure to write never changes the verdict.
+    """
+    from antares import history
+
+    name, d = _history_target(lock_arg, history_dir, lock_dir)
+    try:
+        history.append(res, d, name=name)
+        line = history.summary_line(history.load(name, d))
+    except (OSError, ValueError) as e:
+        print(f"warning: could not record the check: {_detail(e)}", file=sys.stderr)
+        return
+    print(line, file=sys.stderr if to_stderr else sys.stdout)
+
+
+def cmd_history(args: argparse.Namespace) -> int:
+    import json
+    from pathlib import Path
+
+    from antares import history, server
+
+    if args.last is not None and args.last < 1:
+        print("error: --last must be >= 1", file=sys.stderr)
+        return EXIT_USAGE
+    name, d = _history_target(args.lock, args.history_dir, server.LOCK_DIR)
+    try:
+        records = history.load(name, d)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return EXIT_USAGE
+    lock_file = Path(d) / f"{name}{server.LOCK_SUFFIX}"
+    if not records and not lock_file.is_file() and not Path(args.lock).is_file():
+        print(f"error: no lock named {name!r} in {d}", file=sys.stderr)
+        return EXIT_USAGE
+    shown = records[-args.last:] if args.last else records
+    if args.json:
+        out = {"lock": name, "entries": [r.to_dict() for r in shown], "trend": history.trend(records)}
+        print(json.dumps(out, indent=2))
+        return EXIT_PASS
+    if not records:
+        print(f"no checks recorded for lock {name} ({history.history_path(name, d)})")
+        return EXIT_PASS
+    rows = [
+        [r.at[:16].replace("T", " "), r.dataset, r.verdict, _fmt(r.score), _fmt(r.limit), r.worst_joint or "-"]
+        for r in shown
+    ]
+    print(_table(["date (utc)", "dataset", "verdict", "score (deg)", "limit", "worst joint"], rows))
+    print(history.summary_line(records))
+    return EXIT_PASS
 
 
 def _frac(v) -> str:
@@ -1231,7 +1311,28 @@ def build_parser() -> argparse.ArgumentParser:
                    help="on drift, refit and name the parameter change that explains it")
     p.add_argument("--explain-evaluations", type=int, default=240, metavar="N",
                    help="refit budget for --explain (default 240, at least 10)")
+    p.add_argument("--no-record", action="store_true",
+                   help="do not append this check to the lock's <name>.history.jsonl")
+    p.add_argument("--history-dir", default=None, metavar="DIR",
+                   help="directory for the history file (default: next to the lock)")
     p.set_defaults(func=cmd_check)
+
+    p = sub.add_parser(
+        "history",
+        help="checks recorded for a lock across sessions, with the trend",
+        description=(
+            "List the checks appended to <lock>.history.jsonl by `antares check` (one per run, "
+            "oldest first) and the least-squares slope of their score in degrees per day."
+        ),
+    )
+    p.add_argument("lock", help="lock name in the lock dir, or a .lock.json path")
+    p.add_argument("--last", type=int, default=None, metavar="N",
+                   help="show only the newest N checks (the trend still uses all of them)")
+    p.add_argument("--json", action="store_true",
+                   help="print {lock, entries, trend} as GET /api/history/<lock> does")
+    p.add_argument("--history-dir", default=None, metavar="DIR",
+                   help="directory of the history file (default: next to the lock)")
+    p.set_defaults(func=cmd_history)
 
 
     p = sub.add_parser("events", help="detect contact events from the real-sim residual")
