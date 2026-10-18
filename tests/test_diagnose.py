@@ -328,3 +328,59 @@ def test_real_arm_unchanged_names_nothing(arm_lock):
     # only sensor noise is left: the refit barely improves and nothing is named
     assert d.gap_deg < 0.05, d.summary()
     assert d.causes == []
+
+
+# -- real SO-101 dataset ---------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def real(arm_lock):
+    """The lock's held-out episodes from the real SO-101 dataset.
+
+    Skips when the dataset is not cached and cannot be downloaded.
+    """
+    from antares.data import load_dataset
+
+    lock, simulate = arm_lock
+    try:
+        ds = load_dataset(lock.dataset)
+    except Exception as exc:  # noqa: BLE001 - offline, no cache
+        pytest.skip(f"{lock.dataset} unavailable: {exc}")
+    held_out = [e for e in ds.episodes if e.index in set(lock.result.eval_episodes)]
+    assert len(held_out) >= 4
+    return lock, held_out, simulate
+
+
+def _lagged(ep: Episode, frames: int) -> Episode:
+    src = np.maximum(np.arange(len(ep)) - frames, 0)
+    return Episode(ep.index, ep.fps, ep.joint_names, ep.state[src], ep.action)
+
+
+def _weakened(ep: Episode, factor: float) -> Episode:
+    return Episode(ep.index, ep.fps, ep.joint_names, ep.state[0] + factor * (ep.state - ep.state[0]), ep.action)
+
+
+@pytest.mark.slow
+def test_real_unchanged_recordings_report_no_change(real):
+    lock, held_out, simulate = real
+    d = diagnose(held_out, lock, simulate=simulate)
+    assert d.causes == [], d.summary()
+    assert d.unchanged, d.summary()
+
+
+@pytest.mark.slow
+def test_real_extra_lag_is_named_as_lag(real):
+    """On the real arm a higher kv can mimic a frame of lag; the lag must win."""
+    lock, held_out, simulate = real
+    d = diagnose([_lagged(e, 2) for e in held_out], lock, simulate=simulate)
+    assert d.explained, d.summary()
+    assert d.causes[0].name == "latency_frames" and d.causes[0].value == 2, d.summary()
+    kv = {c.name: c for c in d.changes}["kv"]
+    assert 0.5 < kv.value < 2.0, d.summary()  # no large velocity-gain swing standing in for it
+
+
+@pytest.mark.slow
+def test_real_scaled_motion_is_not_explained(real):
+    lock, held_out, simulate = real
+    d = diagnose([_weakened(e, 0.9) for e in held_out], lock, simulate=simulate)
+    assert not d.explained and d.causes == [], d.summary()
