@@ -1,0 +1,3 @@
+The SG92R bench model (sg92r.xml and the box meshes in assets/) was written
+for antares and is released under the same MIT licence as antares itself
+(see pyproject.toml). It contains no third-party model files.

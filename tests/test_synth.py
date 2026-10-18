@@ -85,3 +85,23 @@ def test_worn_keeps_per_joint_shape():
     assert synth.worn(p, {"latency_frames": -1}).latency_frames == (0, 1, 2, 3, 4, 0)
     assert synth.worn(p.replace(latency_frames=(1, 2, 3, 4, 5, 1)), {"latency_frames": -3}).latency_frames \
         == (0, 1, 2, 3, 4, 0)
+
+
+def test_synthesize_stamps_the_arms_robot_type_and_joints():
+    """synth --lock records through the lock's own Arm; the recording says
+    which robot it is from, so a replay resolves to that model, not the SO-101."""
+    from antares.robots import get_robot
+    from antares.sim import Arm
+
+    assert synth.robot_type_for(get_robot("so100")) == "so100_follower"
+    assert synth.robot_type_for(get_robot("so101_deg")) == "so101_follower"
+    assert synth.robot_type_for(get_robot("koch")) == "koch"
+
+    arm = Arm(robot="so100")
+    ds = synth.synthesize(SimParams(), n_episodes=1, n_frames=20, arm=arm)
+    assert ds.robot_type == "so100_follower"
+    assert ds.joint_names == tuple(arm.robot.joints)
+    assert all(ep.joint_names == ds.joint_names for ep in ds.episodes)
+    assert synth.synthesize(SimParams(), n_episodes=1, n_frames=20, robot_type="custom").robot_type == "custom"
+    assert synth.synthesize(SimParams(), n_episodes=1, n_frames=20).robot_type == "so101_follower"
+

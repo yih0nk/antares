@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 
@@ -55,6 +56,10 @@ def _params_table(params: dict, joints: list[str] | None = None) -> str:
 
 def cmd_serve(args: argparse.Namespace) -> int:
     import uvicorn
+
+    if args.offline:
+        # An environment variable, so a --reload worker process inherits it.
+        os.environ["ANTARES_OFFLINE"] = "1"
 
     uvicorn.run(
         "antares.server:app", host=args.host, port=args.port, reload=args.reload
@@ -199,15 +204,11 @@ def cmd_replay(args: argparse.Namespace) -> int:
 
 
 def cmd_calibrate(args: argparse.Namespace) -> int:
-    from antares import factors, server
+    from fastapi import HTTPException
+
+    from antares import server
 
     if not _load_factor_files(args.factors_file):
-        return EXIT_USAGE
-    try:
-        fit = factors.parse_selection(args.factors, "shared")
-        per = factors.parse_selection(args.per_joint_factors, "per_joint")
-    except (KeyError, ValueError) as e:
-        print(f"--factors: {str(e).strip(chr(39))}", file=sys.stderr)
         return EXIT_USAGE
     ds = _load_dataset(args.repo_id)
     if ds is None:
@@ -243,30 +244,37 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
                 flush=True,
             )
 
-    result, lock, path = server.run_calibration(
-        ds,
-        n_train=args.n_train,
-        n_eval=args.n_eval,
-        max_evaluations=args.max_evaluations,
-        seed=args.seed,
-        name=args.name,
-        per_joint=args.per_joint,
-        per_joint_max_evaluations=args.per_joint_evaluations,
-        per_joint_sigma0=args.per_joint_sigma0,
-        fit_gravity=args.fit_gravity,
-        fit_deadband=args.fit_deadband,
-        robot=args.robot,
-        on_progress=on_progress,
-        fit_sensor=args.fit_sensor,
-        sensor_mode=args.sensor_mode,
-        n_seeds=args.seeds,
-        factors=None if fit is None else list(fit),
-        per_joint_factors=None if per is None else list(per),
-        calibration_path=args.calibration,
-        robot_id=args.robot_id,
-        robot_type=args.robot_type,
-        servo=args.servo,
-    )
+    try:
+        # The factor selections go through as typed; run_calibration resolves
+        # +/- edits against what the fit searches by default (once, for the
+        # CLI and the API alike) and answers a bad one with a 400.
+        result, lock, path = server.run_calibration(
+            ds,
+            n_train=args.n_train,
+            n_eval=args.n_eval,
+            max_evaluations=args.max_evaluations,
+            seed=args.seed,
+            name=args.name,
+            per_joint=args.per_joint,
+            per_joint_max_evaluations=args.per_joint_evaluations,
+            per_joint_sigma0=args.per_joint_sigma0,
+            fit_gravity=args.fit_gravity,
+            fit_deadband=args.fit_deadband,
+            robot=args.robot,
+            on_progress=on_progress,
+            fit_sensor=args.fit_sensor,
+            sensor_mode=args.sensor_mode,
+            n_seeds=args.seeds,
+            factors=[args.factors] if args.factors else None,
+            per_joint_factors=[args.per_joint_factors] if args.per_joint_factors else None,
+            calibration_path=args.calibration,
+            robot_id=args.robot_id,
+            robot_type=args.robot_type,
+            servo=args.servo,
+        )
+    except HTTPException as e:
+        print(f"error: {_detail(e)}", file=sys.stderr)
+        return EXIT_USAGE
     r = result.to_dict()
     only = lock.get("dynamics_only")
     before = r.get("per_joint_before") or {}
@@ -477,10 +485,17 @@ def cmd_dr(args: argparse.Namespace) -> int:
     )
 
     def on_fit(i, result) -> None:
-        p = result.params.to_dict()
+        p = result.params
+
+        def fmt(v, spec):
+            # Deliberately a range, not SimParams.scalar's mean: this line
+            # shows how far the joints spread within one fit; the derived DR
+            # ranges below are from the joint means.
+            return f"{min(v):{spec}}-{max(v):{spec}}" if isinstance(v, tuple) else f"{v:{spec}}"
+
         print(
             f"  fit {i + 1}/{args.n_fits}: train {result.train_score:6.3f} deg  "
-            f"kp {p['kp']:.1f}  kv {p['kv']:.2f}  latency {p['latency_frames']}",
+            f"kp {fmt(p.kp, '.1f')}  kv {fmt(p.kv, '.2f')}  latency {fmt(p.latency_frames, '')}",
             flush=True,
         )
 
@@ -1422,14 +1437,28 @@ def _load_lock_arg(lock: str) -> dict:
 def cmd_synth(args: argparse.Namespace) -> int:
     from antares import server, synth
 
+    arm = None
     if args.lock:
         from antares.check import _lock_view
+        from antares.sim import Arm
 
         try:
-            params = _lock_view(_load_lock_arg(args.lock))[2]
+            lock_d = _load_lock_arg(args.lock)
+            params = _lock_view(lock_d)[2]
+            # The lock's own sim: its sensor and unit maps shape the recording
+            # just as they shape the replay `antares check` scores it with.
+            arm = Arm(
+                robot=server.check_robot(lock_d.get("robot")),
+                command_map=server.command_map_from_lock(lock_d),
+                **({"unit_map": um} if (um := server.unit_map_from_lock(lock_d)) is not None else {}),
+            )
         except Exception as e:  # noqa: BLE001 - HTTPException, bad JSON or a lock without params
             detail = getattr(e, "detail", None) or f"{type(e).__name__}: {e}"
             print(f"--lock: {detail}", file=sys.stderr)
+            return EXIT_USAGE
+        if arm.n_joints != 6:
+            print(f"--lock: synth generates SO-arm motions; {arm.robot.name} has {arm.n_joints} joints",
+                  file=sys.stderr)
             return EXIT_USAGE
     else:
         params = server.default_params()
@@ -1450,6 +1479,7 @@ def cmd_synth(args: argparse.Namespace) -> int:
         seed=args.seed,
         noise_units=args.noise,
         repo_id=args.out,
+        arm=arm,
     )
     synth.write_local(ds, args.out)
     print(f"wrote {len(ds.episodes)} episodes x {args.frames} frames -> {args.out}")
@@ -1570,7 +1600,8 @@ def cmd_identify(args: argparse.Namespace) -> int:
     from antares.specificity import identifiability, latency_profile
 
     ds = server.get_dataset(args.repo_id)
-    params = server.params_from_dict(server.load_lock_dict(args.lock)["params"])
+    lock_d = server.load_lock_dict(args.lock)
+    params = server.params_from_dict(lock_d["params"])
     train, eval_ = split_episodes(ds.episodes, args.n_train, args.n_eval, seed=args.seed)
     episodes = train if args.split == "train" else eval_
     if not episodes:
@@ -1578,7 +1609,9 @@ def cmd_identify(args: argparse.Namespace) -> int:
             f"{ds.repo_id} has {len(ds.episodes)} episodes; --n-train {args.n_train} --n-eval {args.n_eval} "
             f"leaves no {args.split} split"
         )
-    simulate = default_simulate()
+    # The lock's own sim (robot, sensor and unit maps held fixed), else the dataset's robot.
+    simulate = (server.lock_simulate(lock_d) or server.simulate_for(server.dataset_robot(ds))
+                or default_simulate())
     rep = identifiability(params, episodes, simulate, delta_deg=args.delta)
     lat = latency_profile(params, episodes, simulate)
     print(f"lock {args.lock} on {ds.repo_id} ({args.split} split, {len(episodes)} episodes)")
@@ -1760,7 +1793,14 @@ def cmd_export(args: argparse.Namespace) -> int:
 
     from antares import server
     from antares.export import SCENE_FILENAME, TASK_FILENAME, export_scene, sidecar_path
-    from antares.export_targets import TARGET_LABELS, TargetExportError, dataset_fps, render, resolve_targets
+    from antares.export_targets import (
+        TARGET_LABELS,
+        TargetExportError,
+        dataset_fps,
+        render,
+        resolve_targets,
+        write_unsupported_note,
+    )
     from antares.lock import RobotLock
     from antares.task import TASK_SUFFIX, TaskDistribution
 
@@ -1813,6 +1853,14 @@ def cmd_export(args: argparse.Namespace) -> int:
     else:
         print(f"  {'assets/':<40} STL meshes")
     fps = getattr(args, "fps", None)
+    # A lock on another model than the SO-101 gets the MJCF and a note in
+    # place of the framework configs, as the zip download does.
+    note = write_unsupported_note(lock, out_dir) if targets else None
+    if note is not None:
+        skipped = ", ".join(TARGET_LABELS[t] for t in targets)
+        print(f"  {note.name:<40} why the {skipped} configs were not written")
+        print(f"note: {note.read_text().strip()}")
+        targets = []
     for target in targets:
         export = render(lock, target, fps=fps, lock_dir=server.LOCK_DIR)
         for path in export.write(out_dir):
@@ -1862,6 +1910,9 @@ def cmd_camera_fit(args: argparse.Namespace) -> int:
         fit, path = server.run_camera_fit(
             ds, args.camera, lock, n_frames=args.frames, n_episodes=args.episodes,
             n_starts=args.starts, seed=args.seed, on_progress=on_progress,
+            on_second_pass=lambda sibling: print(
+                f"  second pass: field of view held near the {sibling} camera's (kept if it scores better on held-out frames)"
+            ),
         )
     except Exception as e:  # noqa: BLE001
         print(f"error: {e}", file=sys.stderr)
@@ -2528,6 +2579,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--reload", action="store_true", help="auto-reload on code changes")
+    p.add_argument(
+        "--offline",
+        action="store_true",
+        help="never contact the Hugging Face Hub; read datasets and videos from the local cache only",
+    )
     p.set_defaults(func=cmd_serve)
 
     dataset_help = "Hub dataset id, upload/<name>, or a LeRobot dataset directory on disk"
@@ -3071,7 +3127,61 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", default=None, help="also save the estimate as JSON here")
     p.set_defaults(func=cmd_payload)
 
+    _add_bench_parser(sub)
+
     return parser
+
+
+def cmd_bench(args: argparse.Namespace) -> int:
+    from antares import servo_bench
+
+    return servo_bench.COMMANDS[args.bench_cmd](args)
+
+
+def _add_bench_parser(sub) -> None:
+    """``antares bench``: a hobby servo on an Arduino as a one-joint robot
+    (:mod:`antares.servo_bench`). Registered here, without importing that
+    module, so ``antares --help`` stays light."""
+    p = sub.add_parser("bench", help="a hobby servo on an Arduino as a one-joint robot (import, simulate, demo, live)")
+    bsub = p.add_subparsers(dest="bench_cmd", required=True)
+
+    b = bsub.add_parser("import", help="turn bench CSVs (bench/capture.py) into a dataset for one servo")
+    b.add_argument("csv", nargs="+", help="runs of the same servo")
+    b.add_argument("--servo", default="a", help="which raw_<servo> column (default a)")
+    b.add_argument("--out", required=True, help="dataset directory to write")
+    b.add_argument("--episode-seconds", type=float, default=5.0, help="episode length (default 5 s)")
+    b.set_defaults(func=cmd_bench)
+
+    b = bsub.add_parser("simulate", help="write the CSV a servo with given parameters would log (no hardware)")
+    b.add_argument("out")
+    b.add_argument("--servo", default="a")
+    b.add_argument("--set", action="append", default=[], metavar="PARAM=VALUE",
+                   help="change a parameter from the sg92r model's defaults, e.g. --set armature=0.0005")
+    b.add_argument("--pot-scale", type=float, default=0.28, help="degrees per pot count")
+    b.add_argument("--pot-offset", type=float, default=-40.0, help="degrees at zero counts")
+    b.add_argument("--noise", type=float, default=1.0, help="pot noise, counts (std)")
+    b.add_argument("--seed", type=int, default=0)
+    b.set_defaults(func=cmd_bench)
+
+    b = bsub.add_parser("demo", help="every servo's recording through every lock, then the payload check")
+    b.add_argument("--servo", action="append", required=True, metavar="NAME=DATASET",
+                   help="a servo's held-out recording (e.g. a=datasets/servo_a_test); repeat per servo")
+    b.add_argument("--lock", action="append", required=True, metavar="NAME=LOCK",
+                   help="that servo's lock (name or path); same NAME as --servo")
+    b.add_argument("--payload", metavar="NAME=DATASET", help="a recording of servo NAME with the coin taped on")
+    b.add_argument("--fresh", metavar="DATASET", help="a recording of the same servo without the coin, for contrast")
+    b.add_argument("--ratio", type=float, default=1.5, help="drift limit as a multiple of the lock's held-out score")
+    b.set_defaults(func=cmd_bench)
+
+    b = bsub.add_parser("live", help="watch the real stick and its sim ghosts move together in the browser")
+    b.add_argument("--lock", required=True, help="the servo's lock (name or path)")
+    b.add_argument("--servo", default="a", help="which raw_<servo> column to follow (default a)")
+    b.add_argument("--port", help="the Arduino's serial port (default: the first one found)")
+    b.add_argument("--replay", metavar="CSV", help="play a recorded run at real speed instead of the Arduino")
+    b.add_argument("--dataset", help="dataset whose pot conversion to use (default: the one the lock was fitted on)")
+    b.add_argument("--host", default="127.0.0.1")
+    b.add_argument("--http-port", type=int, default=8010)
+    b.set_defaults(func=cmd_bench)
 
 
 def main(argv: list[str] | None = None) -> int:

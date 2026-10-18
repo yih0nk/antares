@@ -133,6 +133,9 @@ class Space:
 
     ref: Camera  # start camera: image size and the reference azimuth/roll
     centre: np.ndarray  # (3,) the arm's workspace centre the target box is around
+    # Field-of-view box (degrees); narrowed when the fov is known from a sibling camera.
+    fovy_lo: float = FOVY_LO
+    fovy_hi: float = FOVY_HI
 
     n_dims: int = 8
 
@@ -152,7 +155,7 @@ class Space:
         x[4] = (_wrap(az - az0) + math.pi) / (2 * math.pi)
         x[5] = (el - EL_LO) / (EL_HI - EL_LO)
         x[6] = (_wrap(roll - roll0) + ROLL_LIMIT) / (2 * ROLL_LIMIT)
-        x[7] = (cam.fovy - FOVY_LO) / (FOVY_HI - FOVY_LO)
+        x[7] = (cam.fovy - self.fovy_lo) / (self.fovy_hi - self.fovy_lo)
         return np.clip(x, 0.0, 1.0)
 
     def decode(self, x: np.ndarray) -> Camera:
@@ -163,7 +166,7 @@ class Space:
         az = az0 - math.pi + x[4] * 2 * math.pi
         el = EL_LO + x[5] * (EL_HI - EL_LO)
         roll = roll0 - ROLL_LIMIT + x[6] * 2 * ROLL_LIMIT
-        fovy = FOVY_LO + x[7] * (FOVY_HI - FOVY_LO)
+        fovy = self.fovy_lo + x[7] * (self.fovy_hi - self.fovy_lo)
         return camera_from_look_at(target, dist, az, el, roll, fovy, self.ref.width, self.ref.height)
 
 
@@ -539,6 +542,7 @@ def fit_camera(
     arm: Any | None = None,
     on_progress: Callable[[ProgressEvent], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
+    fovy_range: tuple[float, float] | None = None,
 ) -> CameraFit:
     """Fit ``camera`` of ``dataset`` from its own frames and joint logs.
 
@@ -550,7 +554,11 @@ def fit_camera(
     ``frames_idx`` overrides the automatic ``(episode, frame)`` selection for
     the fit (held-out frames are still chosen automatically from other
     episodes). ``init`` adds one start at a given camera (for example the
-    previous fit) ahead of the sampled ones.
+    previous fit) ahead of the sampled ones. ``fovy_range`` (degrees) holds
+    the field of view in a band, for a camera whose lens is known, such as a
+    second camera of the same model: from the arm's silhouette alone a
+    narrower view from further away can look almost the same, which lines
+    up the base but not the gripper.
     """
     from antares import video
     from antares.sim import Arm
@@ -588,12 +596,18 @@ def fit_camera(
     # arm's workspace centre, scored at 1/8 resolution.
     rng = np.random.default_rng(seed)
     centre = np.mean([p.mean(axis=0) for p in pts_fit], axis=0)
-    samples = sample_cameras(rng, n_samples, W, H, target=centre)
+    fov_lo, fov_hi = fovy_range if fovy_range is not None else (FOVY_LO, FOVY_HI)
+    fov_lo, fov_hi = max(FOVY_LO, float(fov_lo)), min(FOVY_HI, float(fov_hi))
+    if not fov_lo < fov_hi:
+        raise ValueError(f"fovy_range must be an interval inside [{FOVY_LO}, {FOVY_HI}], not {fovy_range}")
+    samples = sample_cameras(
+        rng, n_samples, W, H, target=centre, **({"fovy": (fov_lo, fov_hi)} if fovy_range is not None else {})
+    )
     sample_scores = np.array([tiny(c) for c in samples])
     evaluations += len(samples)
     starts = [samples[i] for i in pick_distinct(samples, sample_scores, n_starts)]
     if init is not None:
-        starts.insert(0, Camera(init.pos, init.rotvec, init.fovy, W, H))
+        starts.insert(0, Camera(init.pos, init.rotvec, float(np.clip(init.fovy, fov_lo, fov_hi)), W, H))
     n_total = len(starts)
     if on_progress is not None:
         on_progress(
@@ -644,7 +658,7 @@ def fit_camera(
         if stop():
             cancelled = True
             break
-        space = Space(ref=start, centre=centre)
+        space = Space(ref=start, centre=centre, fovy_lo=fov_lo, fovy_hi=fov_hi)
         counter = [0]
 
         def counting(cam: Camera, _obj=low, _c=counter) -> float:
@@ -664,7 +678,7 @@ def fit_camera(
     # Stage 2: refine the best start at full resolution.
     best_val, best_cam, best_k = best_global
     if not cancelled and not stop():
-        space = Space(ref=best_cam, centre=centre)
+        space = Space(ref=best_cam, centre=centre, fovy_lo=fov_lo, fovy_hi=fov_hi)
         counter = [0]
 
         def counting_full(cam: Camera, _c=counter) -> float:

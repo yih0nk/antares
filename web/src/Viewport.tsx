@@ -5,6 +5,7 @@ import type * as THREE from "three";
 import type { Geometry } from "./api";
 import { Arm, compMaterial, realMaterial, type Playhead } from "./Arm";
 import { palette } from "./theme";
+import { MatchCamera, type Underlay } from "./VideoUnderlay";
 
 // One 3D pane: the real arm, the sim ghost and (optionally) the
 // lag-compensated sim for one episode, with its own playhead and camera.
@@ -113,6 +114,7 @@ export function ArmScene({
   ghostMat,
   children,
   follow,
+  underlay,
   label,
 }: {
   geometry: Geometry | null;
@@ -136,17 +138,22 @@ export function ArmScene({
   children?: ReactNode;
   // Follow another pane's playhead (scaled by fps) instead of running its own clock.
   follow?: { lead: Playhead; leadFps: number };
+  // The dataset video drawn behind a transparent canvas; a fitted camera pins the view to it.
+  underlay?: Underlay | null;
   // Accessible description of the pane.
   label: string;
 }) {
+  const pinned = underlay?.fit ?? null;
   return (
     <Canvas shadows camera={{ position: CAMERA_POSITION, fov: 38, near: 0.01, far: 20 }} aria-label={label} role="img">
-      <FitCamera />
-      <color attach="background" args={[palette.bg]} />
+      {pinned ? <MatchCamera fit={pinned} /> : <FitCamera />}
+      {!underlay && <color attach="background" args={[palette.bg]} />}
       <ambientLight intensity={0.55} />
       <directionalLight position={[0.8, 1.6, 0.6]} intensity={1.3} castShadow shadow-mapSize={[1024, 1024]} />
       <directionalLight position={[-1, 0.6, -0.8]} intensity={0.35} />
-      <Grid infiniteGrid cellSize={0.05} sectionSize={0.25} cellColor={palette.raised} sectionColor={palette.border} fadeDistance={3} />
+      {!underlay && (
+        <Grid infiniteGrid cellSize={0.05} sectionSize={0.25} cellColor={palette.raised} sectionColor={palette.border} fadeDistance={3} />
+      )}
       {geometry && (
         <Suspense fallback={null}>
           {/* MuJoCo is z-up; three.js is y-up. Keyed by model so a robot switch swaps the meshes cleanly. */}
@@ -171,7 +178,7 @@ export function ArmScene({
       ) : (
         <Driver playhead={playhead} playing={playing} fps={fps} frames={frames} speed={speed} onFrame={onFrame} />
       )}
-      <OrbitControls makeDefault target={CAMERA_TARGET} />
+      {!pinned && <OrbitControls makeDefault target={CAMERA_TARGET} />}
     </Canvas>
   );
 }

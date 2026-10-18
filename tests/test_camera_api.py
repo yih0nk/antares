@@ -134,7 +134,7 @@ def test_camera_overlay_reports_missing_video_support(client, monkeypatch):
     from antares import video
 
     def boom(*a, **k):
-        raise video.VideoUnavailable("video decoding needs PyAV")
+        raise video.VideoUnsupported("video decoding needs PyAV")
 
     monkeypatch.setattr(video, "frames", boom)
     r = client.get("/api/camera/overlay", params={"dataset": "fake/ds", "camera": "up", "episode": 0, "frame": 0})
@@ -175,3 +175,125 @@ def test_cli_camera_fit_prints_result(monkeypatch, capsys, tmp_path):
     assert "fit IoU 0.700" in out and "held-out IoU 0.650" in out and "ds.camera.json" in out
     assert cli.main(["camera-fit", "fake/ds", "--camera", "wrist"]) == 1
     assert cli.main(["camera-fit", "fake/ds", "--camera", "nope"]) == 1
+
+
+def test_camera_clip_serves_the_episode_mp4(client, monkeypatch, tmp_path):
+    from antares import video
+
+    clip = tmp_path / "ep.mp4"
+    clip.write_bytes(b"\x00" * 1000)
+    seen = {}
+
+    def fake_clip(repo, camera, episode, ds=None, fmt="mp4"):
+        seen.update(repo=repo, camera=camera, episode=episode, fmt=fmt)
+        return clip
+
+    monkeypatch.setattr(video, "episode_clip", fake_clip)
+    r = client.get("/api/camera/clip", params={"dataset": "fake/ds", "camera": "up", "episode": 2})
+    assert r.status_code == 200 and r.headers["content-type"] == "video/mp4" and len(r.content) == 1000
+    assert seen == {"repo": "fake/ds", "camera": "up", "episode": 2, "fmt": "mp4"}
+    r = client.get("/api/camera/clip", params={"dataset": "fake/ds", "camera": "up", "episode": 2, "format": "webm"})
+    assert r.headers["content-type"] == "video/webm" and seen["fmt"] == "webm"
+    assert client.get("/api/camera/clip", params={"dataset": "fake/ds", "camera": "up", "episode": 2, "format": "gif"}).status_code == 422
+    # Seeking in the browser needs byte ranges.
+    r = client.get("/api/camera/clip", params={"dataset": "fake/ds", "camera": "up", "episode": 2}, headers={"Range": "bytes=10-19"})
+    assert r.status_code == 206 and len(r.content) == 10
+
+    def missing(*a, **k):
+        raise video.VideoUnavailable("fake/ds has no camera 'side'")
+
+    monkeypatch.setattr(video, "episode_clip", missing)
+    assert client.get("/api/camera/clip", params={"dataset": "fake/ds", "camera": "side", "episode": 0}).status_code == 400
+
+
+@pytest.mark.parametrize(
+    "error,status",
+    [
+        ("VideoUnsupported", 501),  # PyAV missing: the only unsupported case
+        ("VideoNotFound", 404),  # unknown episode, missing file, no frames
+        ("VideoUnavailable", 400),  # unknown camera
+        ("VideoDecodeError", 500),  # the file is there but will not decode
+        ("RuntimeError", 500),
+    ],
+)
+def test_camera_clip_errors_say_what_went_wrong(client, monkeypatch, error, status):
+    from antares import video
+
+    exc = getattr(video, error, None) or RuntimeError
+
+    def fail(*a, **k):
+        raise exc(f"{error} happened")
+
+    monkeypatch.setattr(video, "episode_clip", fail)
+    r = client.get("/api/camera/clip", params={"dataset": "fake/ds", "camera": "up", "episode": 0})
+    assert r.status_code == status and r.json()["detail"] == f"{error} happened"
+
+
+def test_camera_fits_for_dataset_take_the_best_fit_over_its_locks(client, tmp_path):
+    def lock(name, dataset, created):
+        (tmp_path / f"{name}.lock.json").write_text(json.dumps({"name": name, "dataset": dataset, "created_at": created}))
+
+    def fits(name, **cams):
+        (tmp_path / f"{name}.camera.json").write_text(json.dumps({"lock": name, "cameras": cams}))
+
+    lock("fresh", "fake/ds", "2026-10-18T09:00:00Z")  # newest, no camera fit
+    lock("base", "fake/ds", "2026-10-17T00:00:00Z")
+    lock("perjoint", "fake/ds", "2026-10-17T01:00:00Z")
+    lock("other", "other/ds", "2026-10-18T10:00:00Z")
+    fits("base", up={**FIT, "heldout_iou": 0.6}, side={**FIT, "camera": "side", "heldout_iou": 0.5})
+    fits("perjoint", up={**FIT, "heldout_iou": 0.8})
+    fits("other", up={**FIT, "dataset": "other/ds", "heldout_iou": 0.99}, front={**FIT, "dataset": "other/ds"})
+
+    cams = client.get("/api/camera/dataset", params={"dataset": "fake/ds"}).json()["cameras"]
+    assert set(cams) == {"up", "side"}
+    assert cams["up"]["lock"] == "perjoint" and cams["up"]["heldout_iou"] == 0.8
+    assert cams["side"]["lock"] == "base"
+    assert "fit_ious" not in cams["up"] and "appearance" not in cams["up"]
+    assert client.get("/api/camera/dataset", params={"dataset": "nobody/ds"}).json()["cameras"] == {}
+
+
+def _sibling_setup(tmp_path, fovy=43.0, size=(640, 480)):
+    (tmp_path / "base.lock.json").write_text(json.dumps({"name": "base", "dataset": "fake/ds", "created_at": "2026-10-17T00:00:00Z"}))
+    up = {**FIT, "fovy": fovy, "width": size[0], "height": size[1], "heldout_iou": 0.83}
+    (tmp_path / "base.camera.json").write_text(json.dumps({"lock": "base", "cameras": {"up": up}}))
+
+
+def _fake_fit_camera(calls, heldout):
+    from antares.camera import CameraFit
+
+    def fake(ds, camera, *, fovy_range=None, **kw):
+        calls.append(fovy_range)
+        h = heldout(fovy_range)
+        return CameraFit.from_dict({**FIT, "camera": camera, "key": f"observation.images.{camera}", "fovy": 44.0 if fovy_range else 26.0, "heldout_iou": h})
+
+    return fake
+
+
+@pytest.mark.parametrize("banded_better", [True, False])
+def test_camera_fit_tries_a_sibling_cameras_fov(client, monkeypatch, tmp_path, banded_better):
+    import antares.camera as camera_mod
+
+    _sibling_setup(tmp_path)
+    calls, passes = [], []
+    monkeypatch.setattr(camera_mod, "fit_camera", _fake_fit_camera(calls, lambda band: (0.78 if banded_better else 0.6) if band else 0.72))
+    fit, path = server.run_camera_fit(server.get_dataset("fake/ds"), "side", "unit", on_second_pass=passes.append)
+    assert calls == [None, (41.0, 45.0)] and passes == ["up"]
+    assert fit.heldout_iou == (0.78 if banded_better else 0.72)
+    saved = json.loads(path.read_text())["cameras"]["side"]
+    assert saved["fovy"] == (44.0 if banded_better else 26.0)
+
+
+def test_camera_fit_skips_the_fov_pass_without_a_sibling_of_the_same_size(client, monkeypatch, tmp_path):
+    import antares.camera as camera_mod
+
+    calls = []
+    monkeypatch.setattr(camera_mod, "fit_camera", _fake_fit_camera(calls, lambda band: 0.7))
+    server.run_camera_fit(server.get_dataset("fake/ds"), "side", "unit")
+    assert calls == [None]  # no other camera fitted
+    _sibling_setup(tmp_path, size=(1280, 720))
+    calls.clear()
+    server.run_camera_fit(server.get_dataset("fake/ds"), "side", "unit")
+    assert calls == [None]  # the fitted camera has another image size
+    calls.clear()
+    server.run_camera_fit(server.get_dataset("fake/ds"), "up", "unit")
+    assert calls == [None]  # a camera is not its own sibling

@@ -1,8 +1,9 @@
-import { useId, type ReactNode } from "react";
+import { useId, useState, type ReactNode } from "react";
 import type { CalibrationResult, NumericParamKey, Params, ParamValue, ProgressEvent } from "./api";
 import { Sparkline } from "./Charts";
 import { Factors } from "./Factors";
 import { deg } from "./format";
+import { ARM_JOINTS, JointArm } from "./JointArm";
 import { KIND_HELP, ROLE_HELP, type EpisodeRole, type LockKind, type PartialRun } from "./lockInfo";
 import type { SimTone } from "./theme";
 import {
@@ -15,6 +16,7 @@ import {
   LegendItem,
   OverflowMenu,
   ProgressBar,
+  SegmentedControl,
   Spinner,
   Stat,
 } from "./ui";
@@ -140,6 +142,9 @@ export function PhysicsPicker({
   stockValue,
   liveValue,
   liveMeta,
+  manual = false,
+  manualValue = "",
+  manualMeta = null,
 }: {
   rows: PhysicsRow[];
   stockHeldOut: number | null;
@@ -154,6 +159,10 @@ export function PhysicsPicker({
   stockValue: string;
   liveValue: string;
   liveMeta: ReactNode;
+  // The hand-tuned row: shown while the ghost replays your parameters.
+  manual?: boolean;
+  manualValue?: string;
+  manualMeta?: ReactNode;
 }) {
   const name = useId();
   const shown = showAll ? rows : rows.filter((r, i) => i < VISIBLE_LOCKS || r.name === selected);
@@ -193,6 +202,20 @@ export function PhysicsPicker({
               value2={liveValue}
               caption="training"
               tone="sim"
+            />
+          )}
+          {manual && (
+            <PhysicsRowView
+              group={name}
+              value={MANUAL_ID}
+              checked={selected === MANUAL_ID}
+              onSelect={onSelect}
+              title="Your parameters"
+              meta={manualMeta}
+              value2={manualValue}
+              caption="this episode"
+              tone="sim"
+              disabled={running}
             />
           )}
           {shown.map((r) => (
@@ -257,6 +280,7 @@ export function PhysicsPicker({
 
 export const STOCK = "default";
 export const LIVE_ID = "live";
+export const MANUAL_ID = "manual";
 
 function PhysicsRowView({
   group,
@@ -342,49 +366,270 @@ export function JointBars({
 }) {
   const calibrated = tone === "sim";
   const max = Math.max(1e-6, ...Object.values(stock ?? {}), ...Object.values(selected ?? {}));
+  // Per-joint error as bars, or drawn on a sketch of the arm (SO-100/101 joint layout only).
+  const [view, setView] = useState<"bars" | "arm">("bars");
+  const [armOf, setArmOf] = useState<"stock" | "selected">("selected");
+  const canSketch = jointNames.length === ARM_JOINTS.length && ARM_JOINTS.every((j) => jointNames.includes(j));
+  const onArm = canSketch && view === "arm";
+  const armErrors = (calibrated && armOf === "selected" ? selected : stock) ?? {};
   return (
     <section className="section">
       <div className="section-head">
         <h2 className="section-title">Per joint</h2>
-        <span className="legend-row">
-          {calibrated && <LegendItem k={<span className="key bar-key tone-stock" />}>stock model</LegendItem>}
-          <LegendItem k={<span className={`key bar-key tone-${tone}`} />}>{calibrated ? "selected" : "stock model"}</LegendItem>
-        </span>
+        {!onArm && (
+          <span className="legend-row">
+            {calibrated && <LegendItem k={<span className="key bar-key tone-stock" />}>stock model</LegendItem>}
+            <LegendItem k={<span className={`key bar-key tone-${tone}`} />}>{calibrated ? "selected" : "stock model"}</LegendItem>
+          </span>
+        )}
       </div>
       <div className="section-hint">
-        RMS error on this episode{calibrated ? `, stock model vs ${physicsLabel}` : ""}. Click a joint to trace it below.
+        RMS error on this episode{calibrated && !onArm ? `, stock model vs ${physicsLabel}` : ""}. Click a joint to trace it below.
       </div>
-      <div className="bars">
-        {jointNames.map((j) => {
-          const s = stock?.[j];
-          const g = calibrated ? selected?.[j] : s;
-          const isScored = scored.has(j);
-          const on = j === joint;
-          return (
-            <button
-              key={j}
-              type="button"
-              className={`bar-row ${on ? "on" : ""} ${isScored ? "" : "unscored"}`}
-              aria-pressed={on}
-              onClick={() => onJoint(j)}
-              title={
-                isScored
-                  ? calibrated
-                    ? `${j}: stock model ${deg(s)}, ${physicsLabel} ${deg(g)}`
-                    : `${j}: stock model ${deg(s)}`
-                  : "Not scored: gripper contact isn't simulated"
-              }
-            >
-              <span className="bar-name">{j}</span>
-              <span className={`bar-track ${calibrated ? "two" : ""}`}>
-                {calibrated && s != null && <span className="bar tone-stock" style={{ width: `${(s / max) * 100}%` }} />}
-                {g != null && <span className={`bar tone-${tone}`} style={{ width: `${(g / max) * 100}%` }} />}
-              </span>
-              <span className="bar-val">{isScored ? deg(g, 1) : "not scored"}</span>
-            </button>
-          );
-        })}
-      </div>
+      {canSketch && (
+        <div className="joint-view-controls">
+          <SegmentedControl<"bars" | "arm">
+            ariaLabel="Per-joint view"
+            value={view}
+            onChange={setView}
+            options={[
+              { value: "bars", label: "Bars", title: "Each joint's error as a bar" },
+              { value: "arm", label: "On the arm", title: "Each joint's error drawn on a sketch of the arm" },
+            ]}
+          />
+          {onArm && calibrated && (
+            <SegmentedControl<"stock" | "selected">
+              ariaLabel="Physics drawn on the arm"
+              value={armOf}
+              onChange={setArmOf}
+              options={[
+                { value: "stock", label: "Stock model" },
+                { value: "selected", label: "Selected", title: physicsLabel },
+              ]}
+            />
+          )}
+        </div>
+      )}
+      {onArm ? (
+        <JointArm errors={armErrors} selected={joint} onSelect={onJoint} />
+      ) : (
+        <div className="bars">
+          {jointNames.map((j) => {
+            const s = stock?.[j];
+            const g = calibrated ? selected?.[j] : s;
+            const isScored = scored.has(j);
+            const on = j === joint;
+            return (
+              <button
+                key={j}
+                type="button"
+                className={`bar-row ${on ? "on" : ""} ${isScored ? "" : "unscored"}`}
+                aria-pressed={on}
+                onClick={() => onJoint(j)}
+                title={
+                  isScored
+                    ? calibrated
+                      ? `${j}: stock model ${deg(s)}, ${physicsLabel} ${deg(g)}`
+                      : `${j}: stock model ${deg(s)}`
+                    : "Not scored: gripper contact isn't simulated"
+                }
+              >
+                <span className="bar-name">{j}</span>
+                <span className={`bar-track ${calibrated ? "two" : ""}`}>
+                  {calibrated && s != null && <span className="bar tone-stock" style={{ width: `${(s / max) * 100}%` }} />}
+                  {g != null && <span className={`bar tone-${tone}`} style={{ width: `${(g / max) * 100}%` }} />}
+                </span>
+                <span className="bar-val">{isScored ? deg(g, 1) : "not scored"}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
+// ---- (c2) hand tuning ----------------------------------------------------------------------
+
+// What Tune by hand offers: a log-scale multiplier on the starting value
+// (per-joint values keep their shape), or whole frames added to the latency.
+const TUNE_KEYS: { key: NumericParamKey; kind: "scale" | "frames"; hint: string }[] = [
+  { key: "kp", kind: "scale", hint: "servo stiffness: how hard it pulls toward the target" },
+  { key: "kv", kind: "scale", hint: "velocity gain: how much it resists moving fast" },
+  { key: "damping", kind: "scale", hint: "joint damping: drag that slows motion" },
+  { key: "armature", kind: "scale", hint: "motor inertia felt at the joint" },
+  { key: "frictionloss", kind: "scale", hint: "dry friction: torque needed to start moving" },
+  { key: "gravity_scale", kind: "scale", hint: "how much of the links' weight gravity pulls on" },
+  { key: "latency_frames", kind: "frames", hint: "frames between a command and the servo acting on it" },
+];
+const TUNE_LOG_RANGE = 2; // the multiplier spans 10^-2 to 10^2
+const TUNE_FRAMES = 6;
+// What the server accepts as a lock name (its check also refuses "..").
+const LOCK_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+export const validLockName = (s: string) => LOCK_NAME.test(s) && !s.includes("..");
+
+const fmtMult = (m: number) => (m >= 10 ? m.toFixed(0) : m >= 1 ? m.toFixed(1) : m.toFixed(2));
+
+export type TuneAdj = Partial<Record<NumericParamKey, number>>;
+
+// The sliders applied to the parameters tuning started from.
+export function applyTune(base: Params, adj: TuneAdj): Params {
+  const out: Params = { ...base };
+  for (const { key, kind } of TUNE_KEYS) {
+    const a = adj[key] ?? 0;
+    // A lock without a gravity term gets one only once its slider moves.
+    const v = base[key] ?? (key === "gravity_scale" && a !== 0 ? 1 : undefined);
+    if (v == null) continue;
+    const f = kind === "frames" ? (x: number) => Math.max(0, Math.round(x + a)) : (x: number) => x * 10 ** a;
+    out[key] = Array.isArray(v) ? v.map(f) : f(v);
+  }
+  return out;
+}
+
+export function TuneSection({
+  active,
+  base,
+  tuned,
+  adj,
+  onAdj,
+  from,
+  fromLock,
+  startLabel,
+  blocker,
+  onStart,
+  onReplay,
+  saveName,
+  onSaveName,
+  nameValid,
+  saving,
+  saveError,
+  onSave,
+}: {
+  // The ghost replays the tuned parameters.
+  active: boolean;
+  base: Params | null;
+  tuned: Params | null;
+  adj: TuneAdj;
+  onAdj: (f: (a: TuneAdj) => TuneAdj) => void;
+  // What tuning started from ("the stock model", a lock's label).
+  from: string;
+  // The saved lock it started from, whose sensor map and camera fits the new lock keeps.
+  fromLock: string | null;
+  // The selected physics, which Start tuning starts from.
+  startLabel: string;
+  // Why tuning cannot start, said next to the button.
+  blocker: string | null;
+  onStart: () => void;
+  onReplay: () => void;
+  saveName: string;
+  onSaveName: (s: string) => void;
+  nameValid: boolean;
+  saving: boolean;
+  saveError: string | null;
+  onSave: () => void;
+}) {
+  const nameId = useId();
+  const on = active && base && tuned;
+  const changed = on ? Object.values(adj).filter((a) => a).length : 0;
+  const servo = base ? servoOf(base) !== "position" : false;
+  return (
+    <section className="section">
+      <Disclosure summary="Tune by hand" meta={on ? (changed ? `${changed} changed` : "no changes") : "off"} defaultOpen={!!on}>
+        {!on ? (
+          <>
+            <div className="section-hint">
+              Set the parameters yourself and watch the sim replay this episode with them. Starts from the {startLabel}.
+            </div>
+            <Button size="sm" disabled={!!blocker} onClick={onStart}>
+              Start tuning
+            </Button>
+            {blocker && <div className="section-hint">{blocker}</div>}
+          </>
+        ) : (
+          <>
+            <div className="section-hint">
+              Starting from {from}. Drag a slider and the sim replays this episode with the new value; double-click a slider to reset it
+              {servo && ". This lock uses the servo model, so kp and kv are derived and left out"}.
+            </div>
+            <div className="tune-rows">
+              {TUNE_KEYS.map(({ key, kind, hint }) => {
+                if (servo && LINEARIZED_KEYS.has(key)) return null;
+                const a = adj[key] ?? 0;
+                const v = tuned[key] ?? (key === "gravity_scale" ? 1 : null);
+                if (v == null) return null;
+                return (
+                  <label key={key} className="tune-row" title={hint}>
+                    <span className="tune-name">{key}</span>
+                    <input
+                      type="range"
+                      min={kind === "frames" ? -TUNE_FRAMES : -TUNE_LOG_RANGE}
+                      max={kind === "frames" ? TUNE_FRAMES : TUNE_LOG_RANGE}
+                      step={kind === "frames" ? 1 : 0.02}
+                      value={a}
+                      aria-valuetext={`${fmtParam(key, v)}${a ? (kind === "frames" ? `, ${a > 0 ? "+" : ""}${a} frames` : `, times ${fmtMult(10 ** a)}`) : ", unchanged"}`}
+                      onChange={(e) => onAdj((t) => ({ ...t, [key]: Number(e.target.value) }))}
+                      onDoubleClick={() => onAdj((t) => ({ ...t, [key]: 0 }))}
+                    />
+                    <span className={`tune-val num ${a ? "changed" : ""}`}>
+                      {a !== 0 && (
+                        <span className="changed-mark" aria-hidden="true">
+                          •{" "}
+                        </span>
+                      )}
+                      {fmtParam(key, v)}
+                      <span className="muted">{kind === "frames" ? (a ? ` ${a > 0 ? "+" : ""}${a}` : "") : a ? ` ×${fmtMult(10 ** a)}` : ""}</span>
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+            <div className="tune-actions">
+              <Button size="sm" onClick={onReplay}>
+                Replay from the start
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => onAdj(() => ({}))}
+                disabled={!changed}
+                title={changed ? "Put every slider back where it started" : "Nothing changed yet"}
+              >
+                Reset all
+              </Button>
+            </div>
+            <div className="save-lock">
+              <label className="field-label" htmlFor={nameId}>
+                Lock name
+              </label>
+              <div className="save-lock-row">
+                <input
+                  id={nameId}
+                  className="input"
+                  value={saveName}
+                  onChange={(e) => onSaveName(e.target.value)}
+                  spellCheck={false}
+                  aria-invalid={!nameValid || undefined}
+                  aria-describedby={`${nameId}-help`}
+                />
+                <Button busy={saving} disabled={!nameValid} onClick={onSave} title={nameValid ? undefined : "Give the lock a valid name first"}>
+                  {saving ? "Saving…" : "Save as lock"}
+                </Button>
+              </div>
+              {saveError ? (
+                <InlineNotice tone="error" title="Could not save the lock">
+                  {saveError}
+                </InlineNotice>
+              ) : (
+                <div className="section-hint" id={`${nameId}-help`}>
+                  {nameValid
+                    ? <>Scored on the same held-out episodes as a calibration, then listed with the other locks{fromLock && `; keeps ${fromLock}'s sensor map and camera fits`}.</>
+                    : "Letters, digits, '.', '_' and '-' only, starting with a letter or digit."}
+                </div>
+              )}
+            </div>
+          </>
+        )}
+      </Disclosure>
     </section>
   );
 }

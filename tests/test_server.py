@@ -56,6 +56,10 @@ class FakeParams:
     def default(cls):
         return cls()
 
+    def scalar(self, name):  # as SimParams.scalar: a per-joint value is its joint mean
+        v = getattr(self, name)
+        return float(sum(v) / len(v)) if isinstance(v, (tuple, list)) else float(v)
+
 
 class FakeCommandMap:
     def __init__(self, gain, bias):
@@ -335,17 +339,21 @@ def fakes(monkeypatch, tmp_path):
     import antares.diagnose  # noqa: F401
     import antares.drift  # noqa: F401
     import antares.specificity  # noqa: F401
+    import antares.lerobot_calib  # noqa: F401
+    import antares.sensor  # noqa: F401
 
     sim = _module("antares.sim", JOINTS=JOINTS, SimParams=FakeParams, Arm=FakeArm, CommandMap=FakeCommandMap,
                   MODEL_PATH=tmp_path / "so101.xml",
                   model_geometry=lambda model=None: {"bodies": [], "geoms": [], "joints": []})
     gap = _module("antares.gap", GapReport=FakeGap, tracking_error=fake_tracking_error,
                   aggregate=fake_aggregate)
-    from antares.calibrate import scoring_names  # the real one: pure, reads the robot off its argument
+    # the real ones: pure, reading the robot off their argument / the factor registry
+    from antares.calibrate import default_factor_names, scoring_names
 
     cal = _module("antares.calibrate", calibrate=fake_calibrate, split_episodes=fake_split, PENALTY=1e3,
                   default_simulate=lambda command_map=None, robot=None: (lambda params, ep: (ep.state, ep.action)),
-                  scoring_names=scoring_names)
+                  scoring_names=scoring_names, default_factor_names=default_factor_names,
+                  describe_simulate=lambda simulate, arm: simulate)  # FakeArm has no robot model
     lock = _module("antares.lock", RobotLock=FakeLock, dataset_digest=lambda eps: "deadbeef",
                    slug=lambda r: r.replace("/", "__"), LOCK_DIR=tmp_path / "locks",
                    LOCK_SUFFIX=LOCK_SUFFIX,
@@ -735,6 +743,14 @@ def test_calibrate_default_name_is_slug(client, fakes):
     assert events[-1]["type"] == "done"
     assert events[-1]["lock"]["name"] == "fake__so101_unit_a"
     assert (fakes / "locks" / f"fake__so101_unit_a{LOCK_SUFFIX}").is_file()
+
+
+def test_calibrate_refuses_to_overwrite_a_saved_lock(client, fakes):
+    """Two tabs (or a CLI run) starting a fit under one name must not clobber it."""
+    write_lock(fakes, "unit-a", kp=50.0)
+    r = client.post("/api/calibrate", json={"dataset": FAKE_DS, "name": "unit-a"})
+    assert r.status_code == 409 and "already exists" in r.json()["detail"]
+    assert client.post("/api/calibrate", json={"dataset": FAKE_DS, "name": "unit-fresh"}).status_code == 200
 
 
 def test_calibrate_rejects_bad_input(client, fakes):
@@ -1505,6 +1521,17 @@ def test_post_replay_accepts_command_map(client, fakes):
     mapped = client.post("/api/replay", json={**body, "command_map": SHIFT_MAP}).json()
     assert mapped["command_map"] == SHIFT_MAP
     assert mapped["gap"]["overall_deg"] < plain["gap"]["overall_deg"]
+    # naming a lock keeps its command map: hand-tuned params start from the
+    # lock's own physics, not the identity map
+    write_lock(fakes, "unit-b", kp=50.0, dataset=FAKE_DS2, command_map=SHIFT_MAP)
+    from_lock = client.post("/api/replay", json={**body, "lock": "unit-b"}).json()
+    assert from_lock["command_map"] == SHIFT_MAP and from_lock["lock"] is None
+    assert from_lock["gap"]["overall_deg"] == mapped["gap"]["overall_deg"]
+    # an explicit command_map still wins over the lock's
+    ident = {"gain": [1.0] * 6, "bias": [0.0] * 6}
+    override = client.post("/api/replay", json={**body, "lock": "unit-b", "command_map": ident}).json()
+    assert override["gap"]["overall_deg"] == plain["gap"]["overall_deg"]
+    assert client.post("/api/replay", json={**body, "lock": "ghost"}).status_code == 404
     bad = client.post("/api/replay", json={**body, "command_map": {"gain": [1.0] * 6}})
     assert bad.status_code == 400
     # the map exactly as a sensor-fitted lock stores it, "mode" and all

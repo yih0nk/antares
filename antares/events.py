@@ -353,7 +353,9 @@ def residual_baseline(
     if not episodes:
         raise ValueError("no episodes")
     robot = getattr(arm, "robot", None)
-    g = robot.gripper_indices[0] if robot is not None and robot.grippers else GRIPPER_INDEX
+    # A robot without a gripper (the bench servo) labels by its last column,
+    # as the server's thresholds were fitted on.
+    g = GRIPPER_INDEX if robot is None else (robot.gripper_indices[0] if robot.grippers else -1)
     joints = tuple(robot.joints) if robot is not None else JOINTS
     if thresholds is None:
         thresholds = gripper_thresholds(np.concatenate([ep.action[:, g] for ep in episodes]))

@@ -461,10 +461,27 @@ def window_slices(n_episodes: int, window: int, step: int) -> list[range]:
     return [range(s, s + window) for s in range(0, n_episodes - window + 1, step)]
 
 
+def _numeric(v: Any) -> bool:
+    if isinstance(v, (list, tuple)):
+        return bool(v) and all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in v)
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
 def trended_params(params: Any) -> list[str]:
-    """Keys of ``params.to_dict()`` a trend can be fitted to: scalar numbers,
-    so not ``servo`` (the actuator model's name) nor per-joint lists."""
-    return [n for n, v in params.to_dict().items() if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    """Keys of ``params.to_dict()`` a trend can be fitted to: numbers and
+    per-joint lists of numbers, so not ``servo`` (the actuator model's name)."""
+    return [n for n, v in params.to_dict().items() if _numeric(v)]
+
+
+def _param_value(params: Any, name: str) -> float | None:
+    """One number per window (:meth:`SimParams.scalar`: a per-joint value is
+    its mean over the joints), so a window whose refit kept per-joint values
+    and one that collapsed them to a shared value land on the same scale.
+    None for a non-numeric parameter."""
+    v = params.to_dict().get(name, getattr(params, name, None))
+    if not _numeric(v):
+        return None
+    return params.scalar(name)
 
 
 def compute_trends(
@@ -476,17 +493,20 @@ def compute_trends(
 ) -> dict[str, Trend]:
     """Trend of every fitted parameter and of both scores against episode index.
 
-    Only the numeric, shared parameters are trended: ``servo`` names the
-    actuator model (a string) and is skipped, as is any per-joint value.
+    Numeric parameters are trended; ``servo`` names the actuator model (a
+    string) and is skipped. A per-joint value is trended as its mean over
+    the joints.
     """
     windows = list(windows)
     if not windows:
         return {}
     x = [w.center for w in windows]
-    names = trended_params(windows[0].params)
+    names = list(dict.fromkeys(n for w in windows for n in trended_params(w.params)))
     out: dict[str, Trend] = {}
     for i, name in enumerate(names):
-        y = [float(w.params.to_dict()[name]) for w in windows]
+        y = [_param_value(w.params, name) for w in windows]
+        if any(v is None for v in y):
+            continue
         out[name] = fit_trend(
             x, y, log_space=name in LOG_PARAMS, threshold=threshold, n_boot=n_boot, seed=seed + i
         )

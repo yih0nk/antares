@@ -255,6 +255,8 @@ REGISTRY: dict[str, RobotModel] = {
         joint_names=("Rotation", "Pitch", "Elbow", "Wrist_Pitch", "Wrist_Roll", "Jaw"),
         description="The Robot Studio SO-ARM100 v1.3 (MuJoCo Menagerie trs_so_arm100); Euler at 2 ms, white meshes.",
         unit_map_factory=default_unit_map,
+        # Its MJCF has no shared sts3215 class to bake into: export through MjSpec.
+        export_class=None,
         label="SO-100",
     ),
     "aloha": _menagerie_robot(
@@ -333,6 +335,31 @@ REGISTRY: dict[str, RobotModel] = {
         fps=None,
         license="Apache-2.0",
         label="Koch",
+    ),
+    "sg92r": RobotModel(
+        name="sg92r",
+        model_path=ASSETS_DIR / "sg92r" / "sg92r.xml",
+        mesh_dir=ASSETS_DIR / "sg92r" / "assets",
+        scene_path=ASSETS_DIR / "sg92r" / "sg92r.xml",
+        joint_names=("shaft",),
+        description="One Tower Pro SG92R hobby servo with a stick on its horn, logged by an Arduino "
+        "(see antares.servo_bench). Shaft angle in degrees, 0..180 as commanded.",
+        joints=("shaft",),
+        grippers=(),
+        units=("degrees_raw",),
+        robot_types=(r"sg92r", r"hobby_servo"),
+        bounds={
+            "kp": (0.05, 50.0, "log"),
+            "kv": (1e-4, 1.0, "log"),
+            "damping": (1e-5, 0.5, "log"),
+            "armature": (1e-6, 1e-2, "log"),
+            "frictionloss": (1e-5, 0.2, "log"),
+            "forcerange": (0.02, 2.0, "log"),
+        },
+        default_params="model",
+        export_class=None,
+        license="MIT",
+        label="SG92R servo",
     ),
 }
 

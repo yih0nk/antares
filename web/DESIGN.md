@@ -59,10 +59,12 @@ Every data and status colour is at least 3:1 on every surface. `--sim` and `--co
 ## Encoding rules (never colour alone)
 
 - **Real arm:** solid and opaque, `--real`. **Sim arms:** translucent. In 2D traces the real arm is a solid line and a sim a dashed line; legends draw the line style (`LineKey`) or the opacity (`ArmKey`), not just a swatch.
-- **A sim's colour follows its physics.** Stock model: `--stock`. Any calibrated lock or the live fit: `--sim`. This applies to the 3D ghost, the joint trace, the residual area, the swatch on each Sim physics row, and the per-joint bars (grey bar: stock-model error; blue bar: the selected physics' error, with a legend).
+- **A sim's colour follows its physics.** Stock model: `--stock`. Any calibrated lock, the live fit or hand-tuned parameters ("Your parameters"): `--sim`. This applies to the 3D ghost, the joint trace, the residual area, the swatch on each Sim physics row, and the per-joint bars (grey bar: stock-model error; blue bar: the selected physics' error, with a legend).
 - **Policy ghosts:** the policy in the stock model is `--stock`, in the calibrated sim `--sim`. While they are drawn the replay ghost hides (two blue arms would be ambiguous) and the legend says so.
 - **Lag-compensated arm:** `--comp`.
 - **Where the sim disagrees:** contact spans and the ghost's glow are `--critical`; anomalies are `--warn`; gripper-closed windows are a neutral `--border-strong` hatch. The glowing ghost also tints its base colour toward the status colour so a glowing blue arm never reads as the magenta lag-compensated one.
+- **Per joint, on the arm:** the arm sketch (`src/JointArm.tsx`) draws each joint as a dot whose fill runs `--good` → `--warn` → `--critical` from 0° to 8°+ of error. The dot's size and the number beside it carry the same value, so the heat is never the only cue; the selected joint gets a `--text` ring and a heavier label. No other colours.
+- **Video underlay:** while Video is on, the 3D background colour, the grid and the fitted table plane are not drawn, so the footage shows through; the letterbox around a video of another aspect ratio is `--bg`.
 - **Status always has a glyph and a word:** the status pill (icon + "Sim disagrees: contact on …"), badges (`◐ partial · 70/150`, `✓ ok`, `▲ drifted`), the gap delta (`▼ from 4.44° on the stock model`), notice icons.
 - **Selected is never colour alone:** a check glyph, weight 500, a border or a filled radio marks it (segmented options, tabs, the Sim physics radio rows, the selected joint's inset bar, the pressed Compare episode button).
 
@@ -111,7 +113,7 @@ Weights: 400 body, 500 buttons and emphasis, 600 the hero only. Mono is wide, so
 | `OverflowMenu` | Row actions (`role=menu`): arrow keys, Escape returns focus to the button. |
 | `LineKey`, `ArmKey`, `SpanKey`, `LegendItem` | Legend marks that show line style and opacity, not just colour. |
 
-Feature components built on these: `GapStat`, `PhysicsPicker`, `JointBars`, `CalibrateSection`, `ParamsDisclosure` (`src/CalibrateTab.tsx`), `CameraView`, `PolicyTab`, `ToolsTab`, `CrossModal`, `Timeline`, `ArmScene` (`src/Viewport.tsx`).
+Feature components built on these: `GapStat`, `PhysicsPicker`, `JointBars`, `TuneSection`, `CalibrateSection`, `ParamsDisclosure` (`src/CalibrateTab.tsx`), `JointArm`, `CameraView`, `PolicyTab`, `ToolsTab`, `CrossModal`, `Timeline`, `ArmScene` (`src/Viewport.tsx`), `VideoBackdrop` / `MatchCamera` / `useUnderlay` (`src/VideoUnderlay.tsx`).
 
 ## Layout
 
@@ -119,15 +121,16 @@ Feature components built on these: `GapStat`, `PhysicsPicker`, `JointBars`, `Cal
 ┌ topbar: antares · Viewer | Fleet ·············· dataset chip · dataset · Add dataset ┐
 ├ viewport (3D) ──────────────────────────────────────────┬ inspector (360px) ─────────┤
 │ status pill (only during an event)   Show: Both|Real|Sim │ Calibrate Camera Policy Tools│
-│                                      [Compare episode]   │                            │
+│              [Compare episode] [Video] camera · − delay + │                            │
 │ legend                                                   │                            │
 ├ timeline: ▶ speed | ⏮ episode ⏭ | time                  │                            │
 │ joint trace (scrubber) · residual strip                  │                            │
 └──────────────────────────────────────────────────────────┴────────────────────────────┘
 ```
 
-- **Calibrate** (default tab): the gap (hero number, delta from the stock model, caption naming the episode and whether it is held out or train for the selected physics' split); Sim physics (Stock model, the live fit while calibrating, then locks newest first with kind, held-out error, created time and partial/repeat badges; four shown, then "Show all"; a row menu with Download MJCF and Delete); per-joint bars; the Calibrate button, its run state and result, an Options disclosure; a Parameters disclosure.
-- **Camera:** three steps (camera, scene, objects), each saved per lock. A step that needs an earlier one says "Needs: camera fit" instead of showing a disabled button. A lock without a camera fit shows an empty state that can start a fit or switch to a lock that has one.
+- **Viewport toolbar:** Show, Compare episode, and Video (the dataset's camera video behind the main pane; disabled with the reason when the dataset has no video). While Video is on, a camera picker (two or more cameras) and a delay stepper (frames the video lags the joint log) follow it. With a fitted camera the 3D view is pinned to its pose (no orbit); a fixed camera nobody fitted is lined up automatically the first time (about a minute, with progress and Stop in the legend); a wrist camera is a plain backdrop. The legend says which of these applies.
+- **Calibrate** (default tab): the gap (hero number, delta from the stock model, caption naming the episode and whether it is held out or train for the selected physics' split); Sim physics (Stock model, the live fit while calibrating, "Your parameters" while tuning by hand, then locks newest first with kind, held-out error, created time and partial/repeat badges; four shown, then "Show all"; a row menu with Download MJCF and Delete); per joint (Bars / On the arm, the arm sketch for the SO-100/101 layout, with Stock model / Selected); a Tune by hand disclosure (Start tuning from the selected physics, then one slider per parameter, Replay from the start, Reset all, a lock name and Save as lock, secondary so Calibrate stays the one primary); the Calibrate button, its run state and result, an Options disclosure; a Parameters disclosure.
+- **Camera:** three steps (camera, scene, objects), each saved per lock. It shares one camera list with the video underlay, and a fit saved in either place reaches the other. A step that needs an earlier one says "Needs: camera fit" instead of showing a disabled button. A lock without a camera fit shows an empty state that can start a fit or switch to a lock that has one.
 - **Policy:** train, evaluate (Shadow / Closed loop, each explained in one line), results, policy ghosts.
 - **Tools:** lag compensation, the cross-robot matrix, export.
 - Narrow screens (≤ 900px) stack topbar, viewport, timeline and inspector, and the page scrolls.
@@ -152,4 +155,4 @@ Buttons mention their shortcut in the tooltip. Tabs use arrow keys while focused
 
 ## Copy
 
-Sentence case, verbs first on buttons, plain words. Current names: "Sim physics" (not "Ghost parameters"), "Stock model" (not "Default"), "Compare episode" (not "Side by side"), "Both / Real / Sim", "Calibrate", "Fit each joint separately", "Fit gravity sag", "Fit servo deadband", "Held-out (not used in the fit)", "Stop and save best so far".
+Sentence case, verbs first on buttons, plain words. Current names: "Sim physics" (not "Ghost parameters"), "Stock model" (not "Default"), "Compare episode" (not "Side by side"), "Both / Real / Sim", "Video", "Calibrate", "Fit each joint separately", "Fit gravity sag", "Fit servo deadband", "Held-out (not used in the fit)", "Stop and save best so far", "Tune by hand", "Start tuning", "Your parameters", "Save as lock", "On the arm".

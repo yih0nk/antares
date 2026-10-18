@@ -307,6 +307,35 @@ export type JobEvent =
   | { type: "done"; lock: { name: string; params: Params }; result: CalibrationResult }
   | { type: "error"; message: string };
 
+// GET /api/jobs/{id}: where a background job stands, for a client that lost
+// its event stream. `lock` is the saved lock dict of a finished calibration.
+export type JobStatus = {
+  job_id: string;
+  kind: string;
+  dataset: string;
+  status: "running" | "done" | "error";
+  cancelled: boolean;
+  result?: unknown;
+  lock?: { name: string; params: Params };
+  error?: string;
+};
+
+// Deliver a job's events once each. The server replays every buffered event
+// on each connection, so after EventSource reconnects the ones this client
+// already handled are skipped; every stream consumer goes through here.
+export function followJob<T>(src: EventSource, onEvent: (ev: T) => void): void {
+  let handled = 0;
+  let seenThisConnection = 0;
+  src.onopen = () => {
+    seenThisConnection = 0;
+  };
+  src.onmessage = (msg) => {
+    if (++seenThisConnection <= handled) return;
+    handled++;
+    onEvent(JSON.parse(msg.data) as T);
+  };
+}
+
 // A failed request. `detail` is the API's error body: a string, or for a
 // rejected dataset `{ message, verdict }` so the UI can list the reasons.
 export class ApiError extends Error {
@@ -339,6 +368,21 @@ export type CameraInfo = {
   fps: number;
   fixed: boolean; // false for wrist cameras, which cannot be fitted
 };
+
+// The camera to show once a dataset's cameras are known: the one already
+// chosen if it is still there, else the first fixed one, else the first.
+// Shared by the Camera panel and the video underlay.
+export function pickCamera(cameras: CameraInfo[], current: string): string {
+  if (cameras.some((c) => c.name === current)) return current;
+  return (cameras.find((c) => c.fixed) ?? cameras[0])?.name ?? "";
+}
+
+// The clip format this browser plays, checked once: H.264 mp4 everywhere but
+// a Chromium build without H.264, which gets VP9 webm.
+const CLIP_FORMAT: "mp4" | "webm" =
+  typeof document !== "undefined" && document.createElement("video").canPlayType('video/mp4; codecs="avc1.42E01E"')
+    ? "mp4"
+    : "webm";
 
 // One fitted camera as saved in locks/<lock>.camera.json (per-frame arrays omitted).
 export type CameraFit = {
@@ -379,6 +423,8 @@ export type CameraProgressEvent = {
 
 export type CameraJobEvent =
   | CameraProgressEvent
+  // A second pass that holds the field of view near an already fitted camera's.
+  | { type: "pass"; pass: number; sibling: string }
   | { type: "done"; fit: CameraFit & { lock: string; path: string } }
   | { type: "error"; message: string };
 
@@ -776,15 +822,25 @@ export const api = {
   meshUrl: (file: string, robot?: string) =>
     `/api/model/mesh/${file.split("/").map(encodeURIComponent).join("/")}${robot ? `?${q({ robot })}` : ""}`,
   locks: () => fetch("/api/locks").then((r) => json<LockSummary[]>(r)),
+  // Hand-tuned parameters saved as a lock, scored like a calibration;
+  // `fromLock` (the lock they were tuned from) lends its sensor map and fits.
+  saveLock: (dataset: string, name: string, params: Params, fromLock: string | null) =>
+    fetch("/api/locks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dataset, name, params, from_lock: fromLock }),
+    }).then((r) => json<LockSummary>(r)),
   replay: (dataset: string, episode: number, lock: string | null) =>
     fetch(`/api/replay?${q(lock ? { dataset, episode, lock } : { dataset, episode })}`).then((r) =>
       json<Replay>(r),
     ),
-  replayParams: (dataset: string, episode: number, params: Params) =>
+  // `lock` keeps that saved lock's command map and calibration unit map, so
+  // parameters tuned from a lock replay with the lock's own physics.
+  replayParams: (dataset: string, episode: number, params: Params, lock: string | null = null) =>
     fetch("/api/replay", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ dataset, episode, params }),
+      body: JSON.stringify(lock ? { dataset, episode, params, lock } : { dataset, episode, params }),
     }).then((r) => json<Replay>(r)),
   // `perJoint` adds the per-joint refinement stage after the shared fit.
   // `factors` (null: the defaults) picks what the shared fit accounts for;
@@ -838,12 +894,21 @@ export const api = {
   cameras: (dataset: string) => fetch(`/api/camera/cameras?${q({ dataset })}`).then((r) => json<CameraInfo[]>(r)),
   cameraFits: (lock: string) =>
     fetch(`/api/camera?${q({ lock })}`).then((r) => json<{ lock: string; cameras: Record<string, CameraFit> }>(r)),
+  // The best saved fit of each camera over all of the dataset's locks, with the lock it is saved under.
+  cameraFitsForDataset: (dataset: string) =>
+    fetch(`/api/camera/dataset?${q({ dataset })}`).then((r) =>
+      json<{ dataset: string; cameras: Record<string, CameraFit & { lock: string }> }>(r),
+    ),
   cameraFit: (dataset: string, camera: string, lock: string, nFrames = 40, nEpisodes = 4) =>
     fetch("/api/camera/fit", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ dataset, camera, lock, n_frames: nFrames, n_episodes: nEpisodes }),
     }).then((r) => json<{ job_id: string }>(r)),
+  // One episode of a camera as a clip whose frame 0 is the episode's frame 0:
+  // H.264 mp4, or VP9 webm for a browser without H.264.
+  cameraClipUrl: (dataset: string, camera: string, episode: number) =>
+    `/api/camera/clip?${q({ dataset, camera, episode, format: CLIP_FORMAT })}`,
   cameraOverlay: (dataset: string, camera: string, episode: number, frame: number, lock: string | null) =>
     fetch(
       `/api/camera/overlay?${q(lock ? { dataset, camera, episode, frame, lock } : { dataset, camera, episode, frame })}`,
@@ -871,6 +936,7 @@ export const api = {
   objectsTrack: (dataset: string, episode: number, lock: string) =>
     fetch(`/api/objects/track?${q({ dataset, episode, lock })}`).then((r) => json<ObjectTrack>(r)),
   jobEvents: (jobId: string) => new EventSource(`/api/jobs/${jobId}/events`),
+  jobStatus: (jobId: string) => fetch(`/api/jobs/${jobId}`).then((r) => json<JobStatus>(r)),
   cancelJob: (jobId: string) => fetch(`/api/jobs/${jobId}/cancel`, { method: "POST" }).then((r) => json(r)),
   // ---- policy ----
   policies: (lock: string) =>

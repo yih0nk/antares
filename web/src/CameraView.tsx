@@ -9,8 +9,10 @@ import {
   type ObjectsFit,
   type ObjectsJobEvent,
   type ObjectTrack,
+  pickCamera,
   type SceneFit,
   type SceneView,
+  followJob,
 } from "./api";
 import { Sparkline } from "./Charts";
 import { Badge, Button, EmptyState, InlineNotice, LegendItem, LineKey, ProgressBar, SegmentedControl, Spinner } from "./ui";
@@ -26,6 +28,9 @@ import { Badge, Button, EmptyState, InlineNotice, LegendItem, LineKey, ProgressB
 
 type Props = {
   dataset: string;
+  // The dataset's cameras (`useCameras`), fetched once by the app and shared
+  // with the video underlay.
+  cameras: CameraInfo[];
   episode: number | null;
   frame: number;
   playing: boolean;
@@ -55,6 +60,10 @@ type Props = {
   // Tells the app which cameras `lock` has fitted (for "switch to a lock with a camera fit").
   onFitsChange: (lock: string, cameras: string[]) => void;
   onError: (message: string) => void;
+  // A camera fit finished and was saved (the video underlay refetches the fits).
+  onFitSaved?: () => void;
+  // Changes when a fit was saved elsewhere (the video underlay's automatic fit).
+  fitsRev?: number;
 };
 
 type ObjectsJob = {
@@ -109,8 +118,28 @@ function Step({ n, title, needs, children }: { n: number; title: string; needs?:
   );
 }
 
+// The cameras in the dataset's info, fetched once per dataset for the Camera
+// panel and the video underlay (empty while they load or when there are none).
+export function useCameras(dataset: string): CameraInfo[] {
+  const [cameras, setCameras] = useState<CameraInfo[]>([]);
+  useEffect(() => {
+    setCameras([]);
+    if (!dataset) return;
+    let live = true;
+    api.cameras(dataset).then(
+      (cs) => live && setCameras(cs),
+      () => live && setCameras([]),
+    );
+    return () => {
+      live = false;
+    };
+  }, [dataset]);
+  return cameras;
+}
+
 export function CameraView({
   dataset,
+  cameras,
   episode,
   frame,
   playing,
@@ -130,8 +159,9 @@ export function CameraView({
   track,
   onFitsChange,
   onError,
+  onFitSaved,
+  fitsRev,
 }: Props) {
-  const [cameras, setCameras] = useState<CameraInfo[]>([]);
   const [objectsJob, setObjectsJob] = useState<ObjectsJob | null>(null);
   const objectsSourceRef = useRef<EventSource | null>(null);
   useEffect(() => () => objectsSourceRef.current?.close(), []);
@@ -154,24 +184,11 @@ export function CameraView({
   const frameRef = useRef(frame);
   frameRef.current = frame;
 
-  // ---- cameras in the dataset's info -----------------------------------------
+  // ---- the camera shown: only a fixed one can be fitted ----------------------
   useEffect(() => {
-    if (!dataset) return;
-    let live = true;
-    setCameras([]);
     setOverlay(null);
-    api.cameras(dataset).then(
-      (cs) => {
-        if (!live) return;
-        setCameras(cs);
-        setCamera((cur) => (cs.some((c) => c.name === cur) ? cur : cs.find((c) => c.fixed)?.name ?? ""));
-      },
-      () => live && setCameras([]),
-    );
-    return () => {
-      live = false;
-    };
-  }, [dataset]);
+    setCamera((cur) => pickCamera(cameras.filter((c) => c.fixed), cur));
+  }, [cameras]);
 
   // ---- fits saved for the lock ------------------------------------------------
   const onFitsChangeRef = useRef(onFitsChange);
@@ -202,6 +219,15 @@ export function CameraView({
     setFits(null);
     refreshFits(lock);
   }, [lock]);
+  // A fit saved elsewhere (the video underlay's line-up): refetch, keeping the current fits meanwhile.
+  const firstRev = useRef(true);
+  useEffect(() => {
+    if (firstRev.current) {
+      firstRev.current = false;
+      return;
+    }
+    refreshFits(lockRef.current);
+  }, [fitsRev]);
 
   const fitsReady = fits != null && fitsLock === lock;
   const fit = camera && fitsReady ? fits[camera] : undefined;
@@ -331,19 +357,19 @@ export function CameraView({
     sourceRef.current?.close();
     const src = api.jobEvents(jobId);
     sourceRef.current = src;
-    src.onmessage = (msg) => {
-      const ev = JSON.parse(msg.data) as CameraJobEvent;
+    followJob<CameraJobEvent>(src, (ev) => {
       if (ev.type === "progress") {
         setJob((j) => (j && j.jobId === jobId ? { ...j, last: ev, best: [...j.best, ev.best_iou] } : j));
       } else if (ev.type === "done") {
         src.close();
         setJob((j) => (j && j.jobId === jobId ? { ...j, status: "done" } : j));
         refreshFits(lock);
+        onFitSaved?.();
       } else if (ev.type === "error") {
         src.close();
         setJob((j) => (j && j.jobId === jobId ? { ...j, status: "error", error: ev.message } : j));
       }
-    };
+    });
     src.onerror = () => {
       if (src.readyState === EventSource.CLOSED) {
         setJob((j) => (j && j.jobId === jobId && j.status === "running" ? { ...j, status: "error", error: "lost the progress stream" } : j));
@@ -353,7 +379,12 @@ export function CameraView({
 
   const stopFit = async () => {
     if (!job) return;
-    await api.cancelJob(job.jobId).catch(() => {});
+    try {
+      await api.cancelJob(job.jobId);
+    } catch (e) {
+      onError(`Could not stop the camera fit: ${(e as Error).message}`);
+      return;
+    }
     setJob((j) => (j ? { ...j, status: j.status === "running" ? "cancelled" : j.status } : j));
   };
 
@@ -371,8 +402,7 @@ export function CameraView({
     objectsSourceRef.current?.close();
     const src = api.jobEvents(jobId);
     objectsSourceRef.current = src;
-    src.onmessage = (msg) => {
-      const ev = JSON.parse(msg.data) as ObjectsJobEvent;
+    followJob<ObjectsJobEvent>(src, (ev) => {
       if (ev.type === "progress") {
         setObjectsJob((j) =>
           j && j.jobId === jobId
@@ -392,7 +422,7 @@ export function CameraView({
         src.close();
         setObjectsJob((j) => (j && j.jobId === jobId ? { ...j, status: "error", error: ev.message } : j));
       }
-    };
+    });
     src.onerror = () => {
       if (src.readyState === EventSource.CLOSED) {
         setObjectsJob((j) => (j && j.jobId === jobId && j.status === "running" ? { ...j, status: "error", error: "lost the progress stream" } : j));
@@ -402,7 +432,12 @@ export function CameraView({
 
   const stopObjectsFit = async () => {
     if (!objectsJob) return;
-    await api.cancelJob(objectsJob.jobId).catch(() => {});
+    try {
+      await api.cancelJob(objectsJob.jobId);
+    } catch (e) {
+      onError(`Could not stop the object fit: ${(e as Error).message}`);
+      return;
+    }
     setObjectsJob((j) => (j ? { ...j, status: j.status === "running" ? "cancelled" : j.status } : j));
   };
 

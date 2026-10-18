@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>antares live servo</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --bg: #0f1115; --panel: #181b22; --text: #e8eaef; --muted: #9aa1ad;
+    --real: #e0b872; --lock: #4f8cff; --default: #8a8f99; --grid: #2a2e37;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg: #f6f7f9; --panel: #ffffff; --text: #16181d; --muted: #5c6370;
+            --real: #b07a1f; --lock: #2f6fe0; --default: #9097a3; --grid: #e3e6eb; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { padding: 16px 24px 0; display: flex; gap: 16px; align-items: baseline; flex-wrap: wrap; }
+  h1 { font-size: 20px; margin: 0; font-weight: 600; }
+  .sub { color: var(--muted); }
+  main { display: grid; grid-template-columns: minmax(280px, 1fr) minmax(320px, 1.4fr); gap: 16px; padding: 16px 24px 24px; }
+  @media (max-width: 800px) { main { grid-template-columns: 1fr; padding: 12px 16px; } }
+  .panel { background: var(--panel); border-radius: 12px; padding: 16px; }
+  canvas { width: 100%; display: block; }
+  .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
+  .stat .v { font-size: 34px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .stat .k { color: var(--muted); font-size: 13px; }
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 8px; color: var(--muted); font-size: 13px; }
+  .sw { display: inline-block; width: 18px; height: 4px; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
+  #status { color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>SG92R servo, live</h1>
+  <span class="sub" id="lockname"></span>
+  <span id="status">connecting…</span>
+</header>
+<main>
+  <section class="panel">
+    <canvas id="top" width="600" height="600" aria-label="Servo seen from above"></canvas>
+    <div class="legend">
+      <span><span class="sw" style="background:var(--real)"></span>real stick</span>
+      <span><span class="sw" style="background:var(--lock)"></span>calibrated sim (lock)</span>
+      <span><span class="sw" style="background:var(--default)"></span>uncalibrated sim</span>
+    </div>
+  </section>
+  <section class="panel">
+    <canvas id="trace" width="900" height="420" aria-label="Angle over the last 10 seconds"></canvas>
+    <div class="stats">
+      <div class="stat"><div class="v" id="e_lock" style="color:var(--lock)">–</div><div class="k">calibrated sim error, last 5 s (deg RMS)</div></div>
+      <div class="stat"><div class="v" id="e_default" style="color:var(--default)">–</div><div class="k">uncalibrated sim error, last 5 s (deg RMS)</div></div>
+    </div>
+  </section>
+</main>
+<script>
+const css = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const topCv = document.getElementById("top"), tctx = topCv.getContext("2d");
+const trace = document.getElementById("trace"), rctx = trace.getContext("2d");
+const hist = [];
+let last = null;
+
+fetch("/info").then(r => r.json()).then(i => {
+  document.getElementById("lockname").textContent = "lock " + i.lock +
+    (i.lock_score != null ? " (held-out " + i.lock_score.toFixed(2) + "°)" : "");
+});
+
+function stick(ctx, cx, cy, len, deg, color, width, dash) {
+  // 0° points left, 180° right, like the servo seen from above with its
+  // shaft toward you; 90° is straight up.
+  const a = Math.PI - deg * Math.PI / 180;
+  ctx.save();
+  ctx.strokeStyle = color; ctx.lineWidth = width; ctx.lineCap = "round";
+  if (dash) ctx.setLineDash(dash);
+  ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx + len * Math.cos(a), cy - len * Math.sin(a)); ctx.stroke();
+  ctx.restore();
+}
+
+function drawTop() {
+  const w = topCv.width, h = topCv.height, cx = w / 2, cy = h * 0.78, r = w * 0.42;
+  tctx.clearRect(0, 0, w, h);
+  tctx.strokeStyle = css("--grid"); tctx.lineWidth = 2;
+  tctx.beginPath(); tctx.arc(cx, cy, r, Math.PI, 2 * Math.PI); tctx.stroke();
+  tctx.fillStyle = css("--muted"); tctx.font = "22px system-ui"; tctx.textAlign = "center";
+  for (const d of [30, 90, 150]) {
+    const a = Math.PI - d * Math.PI / 180;
+    tctx.fillText(d + "°", cx + (r + 26) * Math.cos(a), cy - (r + 26) * Math.sin(a) + 8);
+  }
+  if (!last) return;
+  // The real stick is the wide one underneath; both ghosts are drawn on top
+  // of it so a ghost that lags shows up beside it.
+  stick(tctx, cx, cy, r, last.real, css("--real"), 26);
+  stick(tctx, cx, cy, r, last.default, css("--default"), 8, [14, 10]);
+  stick(tctx, cx, cy, r, last.lock, css("--lock"), 8);
+  tctx.fillStyle = css("--text"); tctx.beginPath(); tctx.arc(cx, cy, 14, 0, 2 * Math.PI); tctx.fill();
+}
+
+function drawTrace() {
+  const w = trace.width, h = trace.height, pad = 40, span = 10;
+  rctx.clearRect(0, 0, w, h);
+  if (!hist.length) return;
+  const t1 = hist[hist.length - 1].t, t0 = t1 - span;
+  const x = (t) => pad + (t - t0) / span * (w - pad - 10);
+  const y = (d) => h - 20 - (d - 20) / 140 * (h - 40);
+  rctx.strokeStyle = css("--grid"); rctx.lineWidth = 1; rctx.fillStyle = css("--muted"); rctx.font = "16px system-ui";
+  for (const d of [30, 90, 150]) {
+    rctx.beginPath(); rctx.moveTo(pad, y(d)); rctx.lineTo(w - 10, y(d)); rctx.stroke(); rctx.fillText(d + "°", 2, y(d) + 5);
+  }
+  const line = (key, color, width, dash) => {
+    rctx.save(); rctx.strokeStyle = color; rctx.lineWidth = width; if (dash) rctx.setLineDash(dash);
+    rctx.beginPath();
+    hist.forEach((p, i) => { const X = x(p.t), Y = y(p[key]); i ? rctx.lineTo(X, Y) : rctx.moveTo(X, Y); });
+    rctx.stroke(); rctx.restore();
+  };
+  line("real", css("--real"), 7);
+  line("default", css("--default"), 2, [8, 6]);
+  line("lock", css("--lock"), 2);
+}
+
+function frame() { drawTop(); drawTrace(); requestAnimationFrame(frame); }
+requestAnimationFrame(frame);
+
+const es = new EventSource("/stream");
+es.onopen = () => { document.getElementById("status").textContent = "live"; };
+es.onerror = () => { document.getElementById("status").textContent = "reconnecting…"; };
+es.onmessage = (ev) => {
+  const m = JSON.parse(ev.data);
+  if (last && m.t < last.t) hist.length = 0;
+  last = m; hist.push(m);
+  while (hist.length && hist[0].t < m.t - 10) hist.shift();
+  document.getElementById("e_lock").textContent = m.err_lock.toFixed(2) + "°";
+  document.getElementById("e_default").textContent = m.err_default.toFixed(2) + "°";
+};
+</script>
+</body>
+</html>

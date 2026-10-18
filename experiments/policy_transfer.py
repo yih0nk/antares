@@ -72,8 +72,10 @@ def fleet_arms() -> list[ArmSpec]:
 def split_arms(arms: list[ArmSpec], n_test: int, seed: int) -> tuple[list[ArmSpec], list[ArmSpec]]:
     """Hold out ``n_test`` arms. The source arm of the single-arm sims stays in training.
 
-    The fleet scan keeps one dataset per Hub account, so no account (and
-    likely no physical arm) lands on both sides.
+    The fleet scan keeps one dataset per Hub account, except the pinned demo
+    datasets, which share the ``lerobot`` account: in the committed run
+    ``lerobot__svla_so100_pickplace`` is a test arm while
+    ``lerobot__svla_so101_pickplace`` (:data:`SOURCE_LOCK`) trains.
     """
     rng = np.random.default_rng(seed)
     pool = [a for a in arms if a.name != SOURCE_LOCK]
@@ -275,6 +277,7 @@ def make_sampler(kind: str, train: list[ArmSpec]):
     if kind == "default":
         return lambda rng: ArmSpec("default", SimParams())
     if kind == "default_dr30":
+        # The default latency is 0, so +-30% never randomizes latency.
         ranges = uniform_ranges(SimParams(), 0.3, name="default+-30%")
         return lambda rng: ArmSpec("default_dr30", sample(ranges, rng, 1)[0])
     if kind in ("lock", "lock_dr"):

@@ -320,3 +320,14 @@ def test_servo_lock_ranges_cover_the_servo_space(episodes):
     # hand-picked ranges follow the same space
     pm = uniform_ranges(start, 0.2)
     assert set(pm.ranges) == set(SERVO_SPACE) and pm["servo_gain"].nominal == pytest.approx(start.servo_gain)
+
+
+def test_ranges_from_a_per_joint_lock_use_the_joint_mean():
+    """A per-joint lock gets one interval per parameter, around its joint mean."""
+    from antares.dr import uniform_ranges
+
+    pj = SimParams(kp=(10.0, 20.0, 30.0, 40.0, 50.0, 60.0), latency_frames=(4, 4, 4, 3, 4, 5))
+    r = uniform_ranges(pj, 0.3)
+    assert r.ranges["kp"].nominal == pytest.approx(35.0)
+    assert (r.ranges["latency_frames"].lo, r.ranges["latency_frames"].hi) == (3, 5)
+    assert sample(r, 0, 1)[0].kp > 0

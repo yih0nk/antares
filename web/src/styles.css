@@ -2589,3 +2589,227 @@ strong {
     grid-template-columns: 1fr;
   }
 }
+
+/* ---- video underlay ------------------------------------------------------------------------------------------------------------------- */
+/* The dataset video behind a transparent 3D canvas. The frame keeps the
+   camera's aspect ratio so a fitted camera lines up with the footage. */
+
+.pane-main {
+  container-type: size;
+}
+
+.pane-fill {
+  position: absolute;
+  inset: 0;
+}
+
+.underlay-frame {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: min(100cqw, calc(100cqh * var(--aspect)));
+  height: min(100cqh, calc(100cqw / var(--aspect)));
+  transform: translate(-50%, -50%);
+  background: var(--bg);
+}
+
+.underlay-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  pointer-events: none;
+}
+
+.video-delay {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  font-size: var(--fs-small);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.legend-note .btn {
+  margin-left: var(--s1);
+}
+
+/* ---- per joint: on the arm ------------------------------------------------------------------------------------------------------------ */
+
+.joint-view-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+}
+
+.joint-arm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+}
+
+.joint-arm svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.arm-base {
+  fill: var(--raised);
+}
+
+.arm-link {
+  stroke: var(--border-strong);
+  stroke-width: 12;
+  stroke-linecap: round;
+}
+
+.arm-finger {
+  stroke: var(--border-strong);
+  stroke-width: 6;
+  stroke-linecap: round;
+}
+
+.arm-joint {
+  cursor: pointer;
+}
+
+.arm-joint circle {
+  stroke: var(--surface);
+  stroke-width: 2;
+  transition: r 200ms ease-out, fill 200ms ease-out;
+}
+
+.arm-joint:focus-visible {
+  outline: none;
+}
+
+.arm-joint:focus-visible circle {
+  stroke: var(--text);
+  stroke-width: 2;
+  stroke-dasharray: 3 2;
+}
+
+/* Selected: a ring and a heavier label, not colour alone. */
+.arm-joint.sel circle {
+  stroke: var(--text);
+  stroke-width: 3;
+}
+
+.arm-joint.sel .arm-name {
+  fill: var(--text);
+  font-weight: 500;
+}
+
+.arm-name {
+  fill: var(--text-muted);
+  font-size: 10px;
+}
+
+.arm-val {
+  fill: var(--text);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.arm-scale {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  font-size: var(--fs-label);
+  color: var(--text-muted);
+}
+
+.arm-scale i {
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
+  background: linear-gradient(90deg, var(--good), var(--warn), var(--critical));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .arm-joint circle {
+    transition: none;
+  }
+}
+
+/* ---- tune by hand --------------------------------------------------------------------------------------------------------------------- */
+/* One slider per parameter, the applied value beside it. */
+
+.tune-rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+.tune-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas:
+    "name val"
+    "slider slider";
+  align-items: center;
+  column-gap: var(--s2);
+  font-size: var(--fs-small);
+}
+
+.tune-name {
+  grid-area: name;
+}
+
+.tune-row input[type="range"] {
+  grid-area: slider;
+  width: 100%;
+  min-width: 0;
+  min-height: 24px;
+  margin: 0;
+  accent-color: var(--sim);
+  cursor: pointer;
+}
+
+.tune-val {
+  grid-area: val;
+  font-size: var(--fs-label);
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-muted);
+}
+
+.tune-val.changed {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.tune-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+}
+
+.save-lock {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+}
+
+.field-label {
+  font-size: var(--fs-small);
+  color: var(--text-muted);
+}
+
+.save-lock-row {
+  display: flex;
+  gap: var(--s2);
+}
+
+.save-lock-row .input {
+  flex: 1;
+  min-width: 0;
+}
+
+.save-lock-row .input[aria-invalid="true"] {
+  border-color: var(--critical);
+}
