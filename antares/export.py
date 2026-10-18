@@ -391,7 +391,7 @@ def _fmt_param(v: ParamValue) -> str:
 
 def header_lines(lock: RobotLock) -> list[str]:
     r = lock.result
-    p = lock.params
+    p = lock.params.linearized()
     lines = [
         f"Antares calibrated SO-101 (antares {__version__}, lock format {EXPORT_FORMAT})",
         f"lock:        {lock.name}",
@@ -415,6 +415,13 @@ def header_lines(lock: RobotLock) -> list[str]:
         lines.append(
             f"scene:       table at z={lock.scene.get('table_z', float('nan')):.4f} m from "
             f"{lock.scene.get('n_grasps', '?')} grasps (see scene.xml)"
+        )
+    if lock.params.uses_servo_model:
+        q = lock.params
+        lines.append(
+            f"servo: {q.servo} (servo_gain={_fmt_param(q.servo_gain)} max_velocity={_fmt_param(q.max_velocity)} "
+            f"rad/s); baked as its PD equivalent, which drops the firmware's rate limit and duty-cycle "
+            f"saturation; the full model is in the .antares.json sidecar"
         )
     if lock.cameras:
         lines.append(
@@ -453,6 +460,12 @@ def sidecar_dict(lock: RobotLock, model: mujoco.MjModel, model_file: str, meshdi
             "Servo position-error deadband in radians (params.deadband, shared or per joint; "
             "0 or absent means none). Not representable in MJCF: command q + shrink(target - q) "
             "with |error| reduced by the band, as antares.sim.Arm.replay does."
+        ),
+        "servo_note": (
+            "params.servo names the actuator model (absent means MuJoCo's position actuator). "
+            "For 'sts3215' the MJCF carries the PD equivalent (kp, kv); the full model "
+            "(servo_gain, p_coefficient, vin, kt, resistance, max_velocity) is in params, "
+            "as antares.sim.Arm replays it."
         ),
         "joints": list(JOINTS),
         "command_map": {
@@ -514,7 +527,8 @@ def export_mjcf(lock: RobotLock, out_path: Path, bundle_assets: bool = True) -> 
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     xml = MODEL_PATH.read_text()
-    xml = bake_params(xml, lock.params.to_dict())
+    # A servo-model lock bakes its PD equivalent; the sidecar keeps the model.
+    xml = bake_params(xml, lock.params.linearized().to_dict())
     if bundle_assets:
         meshdir = ASSETS_DIRNAME
         _copy_assets(xml, out_path.parent / ASSETS_DIRNAME)

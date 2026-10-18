@@ -397,3 +397,21 @@ def test_scene_xml_needs_a_held_grasp():
     td = TaskDistribution.from_episodes([pick_place_episode(0, held_jaw=SHUT)], name="toy")
     with pytest.raises(ValueError):
         scene_xml(td)
+
+
+def test_servo_lock_bakes_its_pd_equivalent_and_replays_from_the_sidecar(tmp_path):
+    params = SimParams.sts3215(servo_gain=1.2, max_velocity=4.0, latency_frames=2)
+    lock = make_lock(params=params)
+    out = export_mjcf(lock, tmp_path / "s.xml")
+    lin = params.linearized()
+    model = mujoco.MjModel.from_xml_path(str(out))
+    assert model.actuator_gainprm[0, 0] == pytest.approx(lin.kp)
+    assert -model.actuator_biasprm[0, 2] == pytest.approx(lin.kv)
+    sc = read_sidecar(out)
+    assert sc["params"]["servo"] == "sts3215" and "servo_note" in sc
+    head = out.read_text().split("<option", 1)[0]
+    assert "servo: sts3215" in head
+    arm = load_exported_arm(out)
+    assert arm.params == params
+    ep = synthetic_episode()
+    np.testing.assert_allclose(arm.replay(ep), Arm(params=params).replay(ep), rtol=0, atol=1e-9)
