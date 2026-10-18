@@ -667,3 +667,32 @@ def test_replay_with_lock_passes_command_map(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(server, "replay_episode", fake_replay)
     assert cli.main(["replay", "fake/robot", "--episode", "1", "--lock", "unit-a"]) == 0
     assert seen["cmap"].bias.tolist() == cmap["bias"]
+
+
+def test_calibrate_fit_sensor_prints_comparison(monkeypatch, capsys):
+    from antares import server
+
+    per = {j: 1.0 for j in JOINTS}
+    result = type("R", (), {"to_dict": lambda self: {
+        "per_joint_before": {j: 4.0 for j in JOINTS}, "per_joint_after": per,
+        "baseline_eval_score": 4.0, "eval_score": 0.75, "params": {"kp": 1.0},
+        "n_evaluations": 10, "elapsed_s": 1.0,
+    }})()
+    lock = {
+        "name": "unit-a",
+        "command_map": {"gain": [1.0, 0.98, 1.0, 1.0, 1.0, 1.0], "bias": [0.0, -2.5, 0.0, 0.0, 0.0, 0.0]},
+        "dynamics_only": {"eval_score": 1.5, "per_joint_after": {j: 1.5 for j in JOINTS}},
+    }
+    seen = {}
+
+    def fake_run(ds, **kw):
+        seen.update(kw)
+        return result, lock, "locks/unit-a.lock.json"
+
+    monkeypatch.setattr(server, "_DATASETS", {"fake/robot": _dataset()})
+    monkeypatch.setattr(server, "run_calibration", fake_run)
+    assert cli.main(["calibrate", "fake/robot", "--fit-sensor"]) == 0
+    out = capsys.readouterr().out
+    assert seen["fit_sensor"] is True
+    assert "dynamics only" in out and "1.500" in out and "0.750" in out
+    assert "sensor calibration" in out and "-2.500" in out and "0.9800" in out
