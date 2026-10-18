@@ -1531,6 +1531,29 @@ def test_calibrate_request_forwards_fit_sensor(client, fakes, monkeypatch):
     assert seen["fit_sensor"] is True and seen["sensor_mode"] == "kinematic"
 
 
+def test_calibrate_request_forwards_fit_gravity_and_fit_deadband(client, fakes, monkeypatch):
+    seen = {}
+
+    def spy(ds, **kw):
+        seen.update(kw)
+        raise HTTPException(status_code=400, detail="stop here")
+
+    monkeypatch.setattr(server, "run_calibration", spy)
+    for body, want in (
+        ({"dataset": FAKE_DS}, (False, False)),
+        ({"dataset": FAKE_DS, "fit_gravity": True}, (True, False)),
+        ({"dataset": FAKE_DS, "fit_gravity": True, "fit_deadband": True, "per_joint": True}, (True, True)),
+    ):
+        seen.clear()
+        job = client.post("/api/calibrate", json=body).json()["job_id"]
+        for _ in range(100):
+            if client.get(f"/api/calibrate/{job}").json()["status"] != "running":
+                break
+            time.sleep(0.01)
+        assert (seen["fit_gravity"], seen["fit_deadband"]) == want
+    assert seen["per_joint"] is True
+
+
 def test_check_uses_lock_command_map(client, fakes):
     write_lock(fakes, "unit-b", kp=50.0, dataset=FAKE_DS2, command_map=SHIFT_MAP)
     write_lock(fakes, "unit-b-plain", kp=50.0, dataset=FAKE_DS2)

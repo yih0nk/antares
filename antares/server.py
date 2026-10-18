@@ -1282,6 +1282,8 @@ def run_calibration(
     per_joint: bool = False,
     per_joint_max_evaluations: int = 600,
     per_joint_sigma0: float | None = None,
+    fit_gravity: bool = False,
+    fit_deadband: bool = False,
     robot: str | None = None,
     on_progress: Callable[[Any], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
@@ -1307,6 +1309,8 @@ def run_calibration(
     (fit through the sim, alternating) or ``"kinematic"`` (pre-fit from
     still frames, then frozen).
 
+    ``fit_gravity`` adds ``gravity_scale`` to the shared stage and
+    ``fit_deadband`` the servo ``deadband`` to both stages.
     ``calibration_path`` (a LeRobot calibration file) or ``robot_id`` (the
     ``--robot.id`` LeRobot saved it under, with ``robot_type``) replaces the
     model-derived unit map with the follower's own tick-to-angle map for
@@ -1338,6 +1342,10 @@ def run_calibration(
         extra = {"per_joint": True, "per_joint_max_evaluations": int(per_joint_max_evaluations)}
         if per_joint_sigma0 is not None:
             extra["per_joint_sigma0"] = float(per_joint_sigma0)
+    if fit_gravity:
+        extra["fit_gravity"] = True
+    if fit_deadband:
+        extra["fit_deadband"] = True
     if n_seeds > 1:
         extra["n_seeds"] = int(n_seeds)
     if fit_sensor:
@@ -1452,6 +1460,8 @@ def _job_worker(job: Job, req: "CalibrateRequest") -> None:
             fit_sensor=req.fit_sensor,
             sensor_mode=req.sensor_mode,
             n_seeds=req.n_seeds,
+            fit_gravity=req.fit_gravity,
+            fit_deadband=req.fit_deadband,
             calibration_path=req.calibration_path,
             robot_id=req.robot_id,
             robot_type=req.robot_type,
@@ -2054,6 +2064,10 @@ class CalibrateRequest(BaseModel):
     per_joint_max_evaluations: int = Field(600, ge=1)
     fit_sensor: bool = False
     sensor_mode: Literal["sim", "kinematic"] = "sim"
+    # Optional terms: the arm's gravity load (shared stage) and the servo
+    # deadband (both stages); see run_calibration.
+    fit_gravity: bool = False
+    fit_deadband: bool = False
     # Sim model override (registry name); default: the dataset's family.
     robot: str | None = None
     # The physical robot's id (LeRobot's --robot.id, e.g. "arm_a"). Two effects:

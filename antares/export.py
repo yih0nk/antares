@@ -8,13 +8,14 @@ model can be dropped into any MuJoCo or RL pipeline without Antares:
   ``damping``/``armature``/``frictionloss`` on its ``<joint>``. Per-joint
   values (a sequence of six) are written on the named ``<joint>`` /
   ``<position>`` elements instead.
+* ``gravity_scale``, when the lock fitted one, scales ``<option gravity>``.
 * ``meshdir`` is rewritten: either the STL meshes are copied into an
   ``assets/`` directory next to the output, or it points (absolute) at the
   package's own assets.
 * A header comment records the lock (name, dataset, created_at, held-out
   score before/after, latency).
 
-MJCF cannot express command latency, so a sidecar ``<name>.antares.json``
+MJCF cannot express command latency or a servo deadband, so a sidecar ``<name>.antares.json``
 is written next to the model with the full parameters (including
 ``latency_frames``) and the dataset-unit -> radian map, for a consumer to
 apply in its control loop. :func:`load_exported_arm` builds an
@@ -44,7 +45,7 @@ import numpy as np
 
 from antares import __version__
 from antares.lock import RobotLock
-from antares.sim import JOINTS, MESH_DIR, MODEL_PATH, Arm, CommandMap, SimParams, UnitMap
+from antares.sim import JOINTS, MESH_DIR, MODEL_PATH, STANDARD_GRAVITY, Arm, CommandMap, SimParams, UnitMap
 from antares.task import OBJECT_SIZE, TaskDistribution, scene_xml
 
 SCENE_PATH: Path = MODEL_PATH.parent / "scene.xml"
@@ -58,7 +59,13 @@ EXPORT_FORMAT = "antares.export/1"
 SERVO_CLASS = "sts3215"
 JOINT_PARAMS: tuple[str, ...] = ("damping", "armature", "frictionloss")
 ACTUATOR_PARAMS: tuple[str, ...] = ("kp", "kv")
-BAKED_PARAMS: tuple[str, ...] = JOINT_PARAMS + ACTUATOR_PARAMS
+#: Written on ``<option>`` (``gravity_scale`` scales the gravity vector).
+OPTION_PARAMS: tuple[str, ...] = ("gravity_scale",)
+#: Everything :func:`bake_params` writes into the MJCF.
+BAKED_PARAMS: tuple[str, ...] = JOINT_PARAMS + ACTUATOR_PARAMS + OPTION_PARAMS
+#: Parameters MJCF cannot express; they travel in the sidecar for the
+#: consumer's control loop.
+SIDECAR_PARAMS: tuple[str, ...] = ("latency_frames", "deadband")
 
 ParamValue = float | Sequence[float]
 
@@ -115,14 +122,15 @@ def bake_params(xml: str, params: Mapping[str, ParamValue], joints: Sequence[str
 
     Scalars are set on the ``sts3215`` default class; a sequence of
     ``len(joints)`` values is written on each named joint/actuator element
-    instead (explicit attributes override class defaults in MuJoCo). Keys
-    other than the five baked parameters (e.g. ``latency_frames``) are
-    ignored. The rest of the text is untouched.
+    instead (explicit attributes override class defaults in MuJoCo).
+    ``gravity_scale`` scales ``<option gravity>``. Keys outside
+    :data:`BAKED_PARAMS` (``latency_frames``, ``deadband``: see
+    :data:`SIDECAR_PARAMS`) are ignored. The rest of the text is untouched.
     """
     scalar: dict[str, str] = {}
     per_joint: dict[str, list[str]] = {}
     for key, value in params.items():
-        if key not in BAKED_PARAMS:
+        if key not in BAKED_PARAMS or key in OPTION_PARAMS:
             continue
         if np.ndim(value) == 0:
             scalar[key] = _fmt(value)  # type: ignore[arg-type]
@@ -141,6 +149,13 @@ def bake_params(xml: str, params: Mapping[str, ParamValue], joints: Sequence[str
     if a_attrs:
         block = _sub_one(block, re.compile(r"<position\b[^>]*/>"), a_attrs, f"<position> in class {SERVO_CLASS}")
     xml = xml[:start] + block + xml[end:]
+
+    if "gravity_scale" in params:
+        g = np.asarray(params["gravity_scale"], dtype=np.float64).reshape(-1)
+        if np.any(g != g[0]):
+            raise ExportError("gravity_scale must be one value for all joints")
+        gz = _fmt(-STANDARD_GRAVITY * float(g[0]))
+        xml = _sub_one(xml, re.compile(r"<option\b[^>]*/>"), {"gravity": f"0 0 {gz}"}, "<option>")
 
     for i, joint in enumerate(joints):
         j_attrs = {k: v[i] for k, v in per_joint.items() if k in JOINT_PARAMS}
@@ -255,10 +270,17 @@ def header_lines(lock: RobotLock) -> list[str]:
         f"held-out tracking RMSE: {_score_text(r.baseline_eval_score)} before -> "
         f"{_score_text(r.eval_score)} after ({len(r.eval_episodes)} episodes)",
         f"baked: kp={_fmt_param(p.kp)} kv={_fmt_param(p.kv)} damping={_fmt_param(p.damping)} "
-        f"armature={_fmt_param(p.armature)} frictionloss={_fmt_param(p.frictionloss)}",
+        f"armature={_fmt_param(p.armature)} frictionloss={_fmt_param(p.frictionloss)} "
+        f"gravity_scale={_fmt_param(float(p.per_joint('gravity_scale')[0]))} (scales option gravity)",
         f"latency_frames: {p.latency_frames} (command delay in dataset frames; MJCF cannot "
         f"express this, apply it in your control loop; see the .antares.json sidecar)",
     ]
+    if np.any(p.per_joint("deadband")):
+        band = " ".join(_fmt(v) for v in p.per_joint("deadband")) if p.is_per_joint("deadband") else _fmt(p.deadband)
+        lines.append(
+            f"deadband: {band} rad (servo deadband; MJCF cannot express this, "
+            f"apply it in your control loop; see the .antares.json sidecar)"
+        )
     if lock.cameras:
         lines.append(
             "cameras:     "
@@ -286,10 +308,16 @@ def sidecar_dict(lock: RobotLock, model: mujoco.MjModel, model_file: str, meshdi
         },
         "params": lock.params.to_dict(),
         "baked_params": list(BAKED_PARAMS),
+        "sidecar_params": list(SIDECAR_PARAMS),
         "latency_frames": lock.params.to_dict()["latency_frames"],  # int, or six ints for a per-joint lock
         "latency_note": (
             "Command delay in dataset frames (at the dataset's recording rate). "
             "Not representable in MJCF: delay each ctrl by latency_frames frames."
+        ),
+        "deadband_note": (
+            "Servo position-error deadband in radians (params.deadband, shared or per joint; "
+            "0 or absent means none). Not representable in MJCF: command q + shrink(target - q) "
+            "with |error| reduced by the band, as antares.sim.Arm.replay does."
         ),
         "joints": list(JOINTS),
         "command_map": {
@@ -443,8 +471,8 @@ def read_sidecar(xml_path: Path) -> dict[str, Any]:
 
 def load_exported_arm(xml_path: Path, contacts: bool = False) -> Arm:
     """An :class:`Arm` driven by an exported model. The parameters come from
-    the sidecar when it is there (its ``params`` carry per-joint values and
-    ``latency_frames``, which the XML cannot), else the gains/joint values
+    the sidecar when it is there (its ``params`` carry per-joint values,
+    ``latency_frames`` and the servo ``deadband``, which the XML cannot), else the gains/joint values
     compiled into the XML with latency 0; the command map likewise comes
     from the sidecar (identity if it is missing)."""
     xml_path = Path(xml_path)

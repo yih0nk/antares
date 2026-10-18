@@ -1219,6 +1219,63 @@ caught by the default-sim rule above), too few episodes (7) and merges (3).
   median, at the bottom of the search range. Score outliers are kept out
   of the cross matrix so one unexplained arm does not dominate it.
 
+## Gravity load and servo deadband
+
+The contact section above blames the elbow's leftover error on pose. `antares
+sag` checks that: it replays a lock's held-out episodes and regresses each
+joint's residual on the torque that holds the real pose against gravity (with
+velocity as a covariate), prints the residual by torque bin and by motion
+(still, moving up, moving down), and converts the slope into an implied
+gravity load.
+
+```bash
+antares sag lerobot/svla_so101_pickplace --lock svla_so101_pickplace
+antares calibrate lerobot/svla_so100_pickplace --fit-gravity      # + gravity_scale
+antares calibrate lerobot/svla_so100_pickplace --fit-deadband     # + servo deadband
+```
+
+On both demo arms the elbow error is a step, not a slope. On SO-101 it sits
+near +0.9° in the two most loaded torque bins and near -0.5° in the other
+three, which differ by only 0.03 N·m. The elbow's load barely changes in
+pick-and-place logs (std 0.02-0.04 N·m), so these datasets cannot measure
+elbow sag directly. `sag` reports no implied scale for a joint whose torque
+varies by less than 0.05 N·m.
+
+Two optional terms can be fitted, and both are left out of a lock when unused,
+so old locks load and replay unchanged:
+
+* `gravity_scale` scales the gravity vector (exported as `<option gravity>`).
+  A soft servo's static droop is about `gravity_scale * g(q) / kp`, so this
+  sets the droop apart from how fast `kp` makes the joint track.
+* `deadband` (rad, shared or per joint) is a band of position error in which
+  the servo applies no torque. It stands for the STS3215 firmware deadzone
+  plus gear backlash. MJCF cannot express it, so it travels in the export
+  sidecar.
+
+`POST /api/calibrate` takes the same two flags (`fit_gravity`, `fit_deadband`)
+and the UI's calibrate panel has a checkbox for each; a lock's parameter table
+shows the two terms when the lock carries them.
+
+Held-out RMS (deg) at an equal budget of 300 shared evaluations. Seed 0 and
+seed 1 use different train/eval splits.
+
+| dataset | seed | dynamics only | + gravity | + deadband | + both |
+|---|---|---|---|---|---|
+| SO-101 | 0 | 0.701 | 0.690 | 0.997 | 0.950 |
+| SO-101 | 1 | 1.137 | 0.588 | | |
+| SO-100 | 0 | 0.760 | 0.524 | 0.540 | 0.577 |
+| SO-100 | 1 | 0.800 | 0.537 | | |
+
+The gravity term wins all four pairs. It works by keeping the fit off the
+gain ridge (see per-joint calibration): without it, three of four fits drove
+`kp` to between 730 and 2,600, and with it every fit landed between 19 and 36.
+The fitted scale is 1.3 to 1.9, which reads as a heavier arm than the MJCF.
+That number is inferred to stand in for whatever else makes the real servo
+droop, not measured as a mass. The deadband helps SO-100 about as much as
+gravity does, but makes SO-101 worse, so it stays opt-in. A per-joint deadband
+fit (600 evaluations) put the SO-101 elbow's band at 1.4°, but scored 0.674°
+held-out against 0.593° without it.
+
 #### Fleet dashboard
 
 The UI's **Fleet** toggle (top bar, next to Viewer) is the one screen for a
@@ -1589,6 +1646,7 @@ best read as "late, by a similar amount".
 | `.github/workflows/` | Tests on every push (`ci.yml`) and an example weekly drift gate on the SO-101 demo lock (`robot-check.yml`) |
 | `antares/events.py` | Contact events from the real-sim residual |
 | `antares/compensate.py` | Lag compensation (shift, ILC), sim-validated |
+| `antares/sag.py` | Residual vs gravity load and motion (`antares sag`) |
 | `antares/specificity.py` | Cross-arm verdict, identifiability, swap and same-arm checks |
 | `antares/synthetic.py` | Simulated arm datasets with known parameters |
 | `antares/transfer.py` | Sim-to-sim policy transfer experiment (`antares transfer`) |
