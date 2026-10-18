@@ -34,7 +34,7 @@ def test_help_exits_zero(capsys):
         cli.main(["--help"])
     assert e.value.code == 0
     out = capsys.readouterr().out
-    for cmd in ("serve", "inspect", "replay", "calibrate", "cross", "drift", "dr", "locks", "export", "check", "events", "compensate", "fleet", "synth", "task", "noise"):
+    for cmd in ("serve", "inspect", "replay", "calibrate", "cross", "drift", "dr", "locks", "export", "check", "events", "compensate", "fleet", "synth", "task", "noise", "camera-delay"):
         assert cmd in out
 
 
@@ -1396,3 +1396,25 @@ def test_noise_prints_table_and_saves(monkeypatch, capsys, tmp_path):
     assert "lag-1 corr" in out and "elbow_flex" in out
     saved = json.loads((tmp_path / "robot.noise.json").read_text())
     assert saved["name"] == "robot" and len(saved["scale_rad"]) == 6
+
+
+def test_camera_delay_reports_the_median_lag(monkeypatch, capsys, tmp_path):
+    from antares import server, video
+    from test_videodelay import _blob_video, _jerky
+
+    eps, vids = [], {}
+    for i in range(3):
+        q = _jerky(seed=i)
+        eps.append(Episode(index=i, fps=30.0, joint_names=tuple("abcdef"), state=q, action=q))
+        vids[i] = _blob_video(q, 3, seed=i)[..., None].repeat(3, axis=-1).repeat(4, axis=1).repeat(4, axis=2)
+    ds = Dataset("fake/robot", "so101", 30.0, tuple("abcdef"), tuple(eps))
+    monkeypatch.setattr(server, "_DATASETS", {"fake/robot": ds})
+    monkeypatch.setattr(server, "list_camera_infos", lambda repo: [{"name": "front", "fixed": True}])
+    monkeypatch.setattr(video, "frames", lambda repo, cam, ep, idx, dataset=None, cache=True: vids[ep][idx])
+
+    out_path = tmp_path / "delay.json"
+    assert cli.main(["camera-delay", "fake/robot", "--camera", "front", "--out", str(out_path)]) == 0
+    out = capsys.readouterr().out
+    assert "median: +" in out and "positive: video is late" in out
+    assert json.loads(out_path.read_text())["delay_frames"] == pytest.approx(3, abs=0.5)
+    assert cli.main(["camera-delay", "fake/robot", "--camera", "side"]) == 1

@@ -859,6 +859,42 @@ def cmd_noise(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_camera_delay(args: argparse.Namespace) -> int:
+    import json
+    from pathlib import Path
+
+    import numpy as np
+
+    from antares import server
+    from antares.video import VideoUnavailable
+    from antares.videodelay import camera_delay
+
+    try:
+        ds = server.get_dataset(args.repo_id)
+    except Exception as e:  # noqa: BLE001
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    cams = {c["name"] for c in server.list_camera_infos(args.repo_id)}
+    if args.camera not in cams:
+        print(f"error: {args.repo_id} has no camera {args.camera!r}; cameras: {sorted(cams)}", file=sys.stderr)
+        return 1
+    n = min(args.episodes, len(ds.episodes))
+    picks = [ds.episodes[int(i)].index for i in np.unique(np.linspace(0, len(ds.episodes) - 1, n).round())]
+    try:
+        res = camera_delay(ds, args.camera, picks, max_lag=args.max_lag)
+    except VideoUnavailable as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    rows = [[str(ep), f"{lag:+.2f}", f"{res.peak_corr[ep]:.2f}"] for ep, lag in res.per_episode.items()]
+    print(f"{ds.repo_id} camera {args.camera}: video lag behind the joint log, per episode")
+    print(_table(["episode", "lag (frames)", "peak corr"], rows))
+    print(f"median: {res.frames:+.2f} frames = {res.ms:+.0f} ms at {res.fps:g} fps (positive: video is late)")
+    if args.out:
+        Path(args.out).write_text(json.dumps(res.to_dict(), indent=2, sort_keys=True) + "\n")
+        print(f"saved -> {args.out}")
+    return 0
+
+
 def cmd_task(args: argparse.Namespace) -> int:
     from antares import server
     from antares.task import TaskDistribution
@@ -1862,6 +1898,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--starts", type=int, default=8, help="CMA-ES starts kept from the random sample")
     p.add_argument("--seed", type=int, default=0)
     p.set_defaults(func=cmd_camera_fit)
+
+    p = sub.add_parser("camera-delay", help="how many frames a camera's video lags the joint log")
+    p.add_argument("repo_id", help="Hub dataset id or a LeRobot dataset directory on disk")
+    p.add_argument("--camera", required=True, help="camera name, e.g. up (observation.images.up)")
+    p.add_argument("--episodes", type=int, default=6, help="episodes measured, spread over the dataset")
+    p.add_argument("--max-lag", type=int, default=10, help="largest lag tried either way, frames")
+    p.add_argument("--out", default=None, help="also save the result as JSON here")
+    p.set_defaults(func=cmd_camera_delay)
 
     p = sub.add_parser("camera-list", help="list the camera fits saved for a lock")
     p.add_argument("lock")
