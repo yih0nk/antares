@@ -232,8 +232,17 @@ def put_dataset(ds: Dataset, *, source: str | None = None, warnings: list[str] |
 
 
 def dataset_robot(ds: Dataset) -> str:
-    """Registry name of the model that simulates ``ds`` (by its robot_type)."""
-    return model_for_dataset(ds.robot_type)
+    """Registry name of the model that simulates ``ds``: the catalog's (or a
+    ``--robot`` assignment's) pick for it, else its robot_type's family."""
+    from antares.catalog import robot_for_dataset
+
+    return robot_for_dataset(ds.repo_id) or model_for_dataset(ds.robot_type)
+
+
+def _scoring(robot: str | None) -> dict[str, Any]:
+    """``joint_names``/``exclude`` for scoring on ``robot``'s model."""
+    r = get_robot(check_robot(robot))
+    return {"joint_names": tuple(r.joints), "exclude": tuple(r.grippers)}
 
 
 def dataset_summary(repo_id: str) -> dict:
@@ -247,7 +256,7 @@ def dataset_summary(repo_id: str) -> dict:
         "source": meta.get("source") or dataset_source(repo_id),
         "warnings": list(meta.get("warnings") or []),
         "robot_family": family,
-        "robot": model_for_dataset(ds.robot_type) if ds is not None else model_for_dataset(repo_id),
+        "robot": dataset_robot(ds) if ds is not None else model_for_dataset(repo_id),
     }
     if ds is not None:
         out.update(
@@ -531,10 +540,28 @@ def simulate_for(robot: str | None):
     return default_simulate(robot=name)
 
 
-def default_params():
+def default_params(robot: str | None = None):
+    """STS3215 defaults on the SO arms; other robots start from their own
+    MJCF values when their profile says ``default_params="model"``."""
     from antares.sim import SimParams
 
-    return SimParams.default()
+    if robot is None or get_robot(check_robot(robot)).default_params != "model":
+        return SimParams.default()
+    return get_arm(robot).default_params(from_model=True)
+
+
+def _gripper_column(ds: Dataset) -> int:
+    """Index of the gripper whose command marks grasps (the first gripper
+    on a two-arm rig; the last column if the robot names none)."""
+    r = get_robot(dataset_robot(ds))
+    for name in r.grippers:
+        if name in ds.joint_names:
+            return ds.joint_names.index(name)
+    # Validation holds the columns to the profile's order, so a dataset
+    # whose columns go by an alias (motor_5, ..._joint_6) is read by index.
+    if r.grippers and len(ds.joint_names) == r.n_joints:
+        return r.gripper_indices[0]
+    return -1
 
 
 def params_from_dict(d: dict):
@@ -600,12 +627,11 @@ def replay_episode(ds: Dataset, episode: int, params=None, command_map=None, rob
     ``robot`` overrides the model (default: the one for the dataset's family).
     """
     from antares.gap import tracking_error
-    from antares.sim import JOINTS
 
     ep = find_episode(ds, episode)
-    if params is None:
-        params = default_params()
     robot = check_robot(robot or dataset_robot(ds))
+    if params is None:
+        params = default_params(robot)
     arm = get_arm(robot)
     with arm_lock(robot), _command_map(arm, command_map):
         arm.apply(params)
@@ -614,13 +640,13 @@ def replay_episode(ds: Dataset, episode: int, params=None, command_map=None, rob
         real_poses = np.asarray(arm.fk(real_q))
         sim_poses = np.asarray(arm.fk(sim_q))
         body_names = list(arm.body_names)
-    gap = tracking_error(real_q, sim_q, joint_names=JOINTS)
+    gap = tracking_error(real_q, sim_q, **_scoring(robot))
     return {
         "dataset": ds.repo_id,
         "episode": ep.index,
         "fps": ep.fps,
         "robot": robot,
-        "joints": list(JOINTS),
+        "joints": list(get_robot(robot).joints),
         "body_names": body_names,
         "params": params.to_dict(),
         "command_map": None if command_map is None else command_map.to_dict(),
@@ -636,16 +662,16 @@ def score_episodes(params, episodes, command_map=None, robot: str | None = None)
     """Aggregate GapReport of ``params`` (and ``command_map``) over ``episodes``
     using the shared Arm of ``robot``."""
     from antares.gap import aggregate, tracking_error
-    from antares.sim import JOINTS
 
     arm = get_arm(robot)
+    names = _scoring(robot)
     reports = []
     with arm_lock(robot), _command_map(arm, command_map):
         arm.apply(params)
         for ep in episodes:
             real_q = np.asarray(arm.real_q(ep))
             sim_q = np.asarray(arm.replay(ep))
-            reports.append(tracking_error(real_q, sim_q, joint_names=JOINTS))
+            reports.append(tracking_error(real_q, sim_q, **names))
     return aggregate(reports)
 
 
@@ -687,8 +713,8 @@ def get_baseline(ds: Dataset, lock_name: str | None):
     if hit is not None:
         return hit
     lock = load_lock_dict(lock_name) if lock_name else None
-    params = params_from_dict(lock["params"]) if lock else default_params()
-    g = ds.joint_names.index("gripper") if "gripper" in ds.joint_names else -1
+    params = params_from_dict(lock["params"]) if lock else default_params(dataset_robot(ds))
+    g = _gripper_column(ds)
     thr = gripper_thresholds(np.concatenate([ep.action[:, g] for ep in ds.episodes]))
     eps = baseline_episodes(ds, lock)
     cmap = command_map_from_lock(lock) if lock else None
@@ -714,10 +740,11 @@ def _episode_residual(ds: Dataset, ep: Episode, lock_name: str | None, z: float,
         real_q = np.asarray(arm.real_q(ep))
         sim_q = np.asarray(arm.replay(ep))
     res = residuals(real_q, sim_q)
-    events = detect_events(res, bl, z=z, min_frames=min_frames, warmup=WARMUP_FRAMES)
-    g = ds.joint_names.index("gripper")
-    cmd = ep.action[:, g]
-    val = validate_episode(res, events, cmd, thr, episode=ep.index)
+    r = get_robot(robot)
+    scored = r.scored_joints
+    events = detect_events(res, bl, z=z, min_frames=min_frames, warmup=WARMUP_FRAMES, joints=scored)
+    cmd = ep.action[:, _gripper_column(ds)]
+    val = validate_episode(res, events, cmd, thr, episode=ep.index, joints=scored, joint_names=r.joints)
     return bl, thr, params, res, events, cmd, val
 
 
@@ -725,20 +752,20 @@ def residual_episode(
     ds: Dataset, episode: int, lock_name: str | None = None, z: float = 4.0, min_frames: int = 5
 ) -> dict:
     """Residual, robust z, detected events and the gripper proxy label for one episode."""
-    from antares.events import SCORED_JOINTS, gripper_transitions
-    from antares.sim import JOINTS
+    from antares.events import gripper_transitions
 
     ep = find_episode(ds, episode)
     bl, thr, params, res, events, cmd, val = _episode_residual(ds, ep, lock_name, z, min_frames)
     grasps, releases = gripper_transitions(cmd, thr)
+    r = get_robot(dataset_robot(ds))
     return {
         "dataset": ds.repo_id,
         "episode": ep.index,
         "fps": ep.fps,
         "lock": lock_name,
         "params": params.to_dict(),
-        "joints": list(JOINTS),
-        "scored_joints": list(SCORED_JOINTS),
+        "joints": list(r.joints),
+        "scored_joints": list(r.scored_joints),
         "z_threshold": float(z),
         "min_frames": int(min_frames),
         "warmup_frames": WARMUP_FRAMES,
@@ -1164,6 +1191,8 @@ def run_calibration(
     fit_sensor: bool = False,
     sensor_mode: str = "sim",
     n_seeds: int = 1,
+    factors: list[str] | None = None,
+    per_joint_factors: list[str] | None = None,
 ) -> tuple[Any, dict, Path]:
     """Calibrate on ``ds``, save a lock, return (CalibrationResult, lock dict, path).
 
@@ -1179,6 +1208,10 @@ def run_calibration(
     with the dynamics-only fit for comparison. ``sensor_mode`` is ``"sim"``
     (fit through the sim, alternating) or ``"kinematic"`` (pre-fit from
     still frames, then frozen).
+
+    ``factors``/``per_joint_factors`` choose which registered factors the
+    shared and per-joint stages fit (see :mod:`antares.factors`); ``None``
+    keeps the built-in lists.
     """
     from antares.calibrate import calibrate, split_episodes
 
@@ -1195,6 +1228,13 @@ def run_calibration(
             extra["per_joint_sigma0"] = float(per_joint_sigma0)
     if n_seeds > 1:
         extra["n_seeds"] = int(n_seeds)
+    try:
+        if factors is not None:
+            extra["fit_factors"] = _factor_names(factors, "shared")
+        if per_joint_factors is not None:
+            extra["per_joint_factors"] = _factor_names(per_joint_factors, "per_joint")
+    except (KeyError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e).strip("'\"")) from e
     if fit_sensor:
         from antares.sensor import calibrate_with_sensor
 
@@ -1207,7 +1247,7 @@ def run_calibration(
         out = calibrate_with_sensor(
             train,
             eval_,
-            start=default_params(),
+            start=default_params(robot),
             max_evaluations=max_evaluations,
             seed=seed,
             on_progress=on_progress,
@@ -1228,7 +1268,7 @@ def run_calibration(
     result = calibrate(
         train,
         eval_,
-        start=default_params(),
+        start=default_params(robot),
         max_evaluations=max_evaluations,
         seed=seed,
         on_progress=on_progress,
@@ -1238,6 +1278,15 @@ def run_calibration(
     lock = build_lock(ds, train, result, name, robot=robot)
     path = save_lock(lock)
     return result, lock.to_dict(), path
+
+
+def _factor_names(selection: list[str], stage: str) -> list[str] | None:
+    """Resolve a factor selection (names, or ``+x``/``-y`` edits of the
+    stage's defaults) into the list calibrate takes (``None``: defaults)."""
+    from antares import factors
+
+    out = factors.parse_selection(",".join(selection), stage)
+    return None if out is None else list(out)
 
 
 def _job_worker(job: Job, req: "CalibrateRequest") -> None:
@@ -1262,6 +1311,8 @@ def _job_worker(job: Job, req: "CalibrateRequest") -> None:
             fit_sensor=req.fit_sensor,
             sensor_mode=req.sensor_mode,
             n_seeds=req.n_seeds,
+            factors=req.factors,
+            per_joint_factors=req.per_joint_factors,
         )
         result_d = result.to_dict()
         job.push({"type": "done", "lock": lock, "result": result_d})
@@ -1545,14 +1596,13 @@ def compensate_episode_dict(
     compensated ghost are included so the viewer can overlay it.
     """
     from antares.compensate import compensate_episode, max_joint_velocity
-    from antares.sim import JOINTS
 
     _check_method(method)
     ep = find_episode(ds, episode)
-    if params is None:
-        params = default_params()
-    cmap = command_map_from_lock(load_lock_dict(lock)) if lock else None
     robot = dataset_robot(ds)
+    if params is None:
+        params = default_params(robot)
+    cmap = command_map_from_lock(load_lock_dict(lock)) if lock else None
     arm = get_arm(robot)
     with arm_lock(robot), _command_map(arm, cmap):
         vmax = max_joint_velocity(ds.episodes, arm)
@@ -1564,7 +1614,7 @@ def compensate_episode_dict(
         "episode": ep.index,
         "fps": rep.fps,
         "robot": robot,
-        "joints": list(JOINTS),
+        "joints": list(get_robot(robot).joints),
         "lock": lock,
         "method": method,
         "params": params.to_dict(),
@@ -1691,6 +1741,24 @@ def robots_list() -> list[dict]:
     return [r.to_dict() for r in REGISTRY.values()]
 
 
+@app.get("/api/factors")
+def factors_list() -> dict:
+    """Every registered factor (what it explains, bounds, data it needs,
+    whether the fleet showed it measurable) and the effects not modelled."""
+    from antares import factors
+
+    return factors.describe()
+
+
+@app.get("/api/datasets/catalog")
+def datasets_catalog() -> list[dict]:
+    """Public datasets of robots other than the SO arms, with the model each
+    replays on."""
+    from antares.catalog import entries
+
+    return entries()
+
+
 @app.get("/api/episodes")
 def episodes(dataset: str = Query(...)) -> list[dict]:
     ds = get_dataset(dataset)
@@ -1752,6 +1820,10 @@ class ReplayRequest(BaseModel):
     command_map: dict[str, Any] | None = None
     # Sim model override (registry name); default: the dataset's family.
     robot: str | None = None
+    # Factors to fit (names, or "+x"/"-y" edits of the defaults); see
+    # GET /api/factors. None keeps the built-in lists.
+    factors: list[str] | None = None
+    per_joint_factors: list[str] | None = None
 
 
 @app.post("/api/replay")
@@ -1833,6 +1905,10 @@ class CalibrateRequest(BaseModel):
     sensor_mode: Literal["sim", "kinematic"] = "sim"
     # Sim model override (registry name); default: the dataset's family.
     robot: str | None = None
+    # Factors to fit (names, or "+x"/"-y" edits of the defaults); see
+    # GET /api/factors. None keeps the built-in lists.
+    factors: list[str] | None = None
+    per_joint_factors: list[str] | None = None
 
 
 @app.post("/api/calibrate")
