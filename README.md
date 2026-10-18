@@ -17,7 +17,10 @@ you how much of the sim-to-real gap closed.
    same commands, and measure where the sim drifts from reality.
 3. **Calibrate.** CMA-ES fits actuator gain, damping, armature, friction,
    and latency to that robot's episodes, scored on held-out ones.
-4. **See it.** The web UI overlays the real arm and the sim ghost in 3D
+4. **Fit the sensor calibration (optional).** With `--fit-sensor`,
+   Antares also fits a per-joint offset and scale between the logged
+   commands and the measured joints, and saves it in the lock.
+5. **See it.** The web UI overlays the real arm and the sim ghost in 3D
    and streams the fit live, so you watch the ghost lock on.
 
 First embodiment: the SO-100/101 arm, using public community datasets.
@@ -483,6 +486,26 @@ bimanual or non-SO arms (14).
   below the fleet median. Score outliers are kept out of the cross matrix so
   one unexplained arm does not dominate it.
 
+
+## Sensor calibration
+
+LeRobot normalizes the commands (the leader arm's readings) and the
+measured state (the follower's) with two separate per-arm calibrations, so
+the same number can mean slightly different angles on each side. No
+dynamics parameter can model that, so a plain fit bends stiffness and
+latency to hide it. `--fit-sensor` fits `command = gain * logged + bias`
+per body joint through the simulator, alternating with the dynamics fit,
+and reports held-out error with and without it:
+
+```sh
+.venv/bin/antares calibrate lerobot/svla_so101_pickplace --fit-sensor --name so101-sensor
+```
+
+Locks fitted this way carry a `command_map`, and replay, the viewer and
+`antares cross` use it. Older locks replay unchanged.
+`scripts/sensor_synthetic.py` checks the fit on a simulated arm with a
+known mismatch.
+
 ## Layout
 
 | Path | What |
@@ -490,6 +513,7 @@ bimanual or non-SO arms (14).
 | `antares/data.py` | LeRobot dataset loader (tabular only) |
 | `antares/sim.py` | MuJoCo model, unit mapping, replay and rollout |
 | `antares/calibrate.py` | CMA-ES parameter fit |
+| `antares/sensor.py` | Per-joint command offset/scale fit |
 | `antares/gap.py` | Tracking-error metrics |
 | `antares/lock.py` | Calibrated sim saved per robot as a lock file |
 | `antares/export.py` | Lock -> standalone MJCF, sidecar, scene, zip |
