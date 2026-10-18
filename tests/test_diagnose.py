@@ -8,20 +8,24 @@ MuJoCo arm on synthetic recordings.
 
 from __future__ import annotations
 
+import json
 import math
 
 import numpy as np
 import pytest
 
-from antares.calibrate import SimParams
+from antares.calibrate import CalibrationResult, SimParams
 from antares.data import Episode
 from antares.diagnose import (
     FIELDS,
+    ParamChange,
     apply_change,
     decode_change,
     describe_change,
+    diagnose,
     encode_change,
     neutral,
+    split_alternating,
 )
 
 JOINTS = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper")
@@ -100,3 +104,92 @@ def test_describe_change():
     assert describe_change("frictionloss", 2.0) == "+100%"
     assert describe_change("latency_frames", 1) == "+1 frame"
     assert describe_change("latency_frames", -2) == "-2 frames"
+
+
+def test_split_alternating_is_disjoint_and_ordered():
+    eps = make_episodes(TRUE, n=5)
+    a, b = split_alternating(list(reversed(eps)))
+    assert [e.index for e in a] == [0, 2, 4] and [e.index for e in b] == [1, 3]
+
+
+def test_param_change_to_dict_is_json():
+    c = ParamChange("latency_frames", 1, alone_deg=0.5, stale_deg=2.0)
+    d = json.loads(json.dumps(c.to_dict()))
+    assert d["change"] == "+1 frame" and d["recovers_deg"] == pytest.approx(1.5)
+
+
+# -- diagnose ---------------------------------------------------------------------
+
+
+def test_extra_lag_is_named():
+    eps = make_episodes(TRUE.replace(latency_frames=3), seed=1)
+    d = diagnose(eps, lock_of(), simulate=toy_simulate, max_evaluations=80)
+    assert d.stale_deg > 1.0
+    assert d.refit_deg < 0.05 * d.stale_deg
+    assert d.explained and d.recovered > 0.9
+    assert [c.name for c in d.causes][0] == "latency_frames"
+    by = {c.name: c for c in d.changes}
+    assert by["latency_frames"].value == 2
+    assert "likely cause: latency_frames +2 frames" in d.summary()
+
+
+def test_weaker_gain_is_named():
+    eps = make_episodes(TRUE.replace(kp=TRUE.kp * 0.5), seed=2)
+    d = diagnose(eps, lock_of(), simulate=toy_simulate, max_evaluations=120)
+    assert d.explained
+    # in the toy servo kp, kv and damping only enter through (kv+damping)/kp,
+    # so any of them can carry the change; it must be named and alone suffice
+    top = d.causes[0]
+    assert top.name in ("kp", "kv", "damping")
+    assert top.recovers_deg > 0.5 * d.gap_deg
+
+
+def test_unchanged_arm_names_nothing():
+    eps = make_episodes(TRUE, seed=3)
+    d = diagnose(eps, lock_of(), simulate=toy_simulate, max_evaluations=40)
+    assert d.stale_deg == pytest.approx(0.0, abs=1e-9)
+    assert d.gap_deg == pytest.approx(0.0, abs=1e-9)
+    assert d.causes == []
+    assert all(c.recovers_deg == 0.0 for c in d.changes)
+
+
+def test_drift_outside_the_dynamics_is_not_explained():
+    """A sensor offset is not something the servo parameters can absorb."""
+    eps = [Episode(e.index, e.fps, e.joint_names, e.state + 0.05, e.action)
+           for e in make_episodes(TRUE, seed=4)]
+    d = diagnose(eps, lock_of(eval_score=0.0), simulate=toy_simulate, max_evaluations=60)
+    assert d.stale_deg > 2.0
+    assert not d.explained
+    assert "not explained by the sim's dynamics parameters" in d.summary()
+
+
+def test_refit_and_held_out_halves_are_disjoint():
+    eps = make_episodes(TRUE.replace(latency_frames=2), n=6)
+    d = diagnose(eps, lock_of(), simulate=toy_simulate, max_evaluations=20)
+    assert d.refit_episodes == [0, 2, 4] and d.held_out_episodes == [1, 3, 5]
+    assert d.n_evaluations <= 20 + 12  # one generation may overshoot the budget
+
+
+def test_accepts_a_robot_lock_and_serializes():
+    from antares.lock import RobotLock
+
+    result = CalibrationResult(
+        params=TRUE, baseline=SimParams(), train_score=0.0, eval_score=0.0,
+        baseline_train_score=1.0, baseline_eval_score=1.0, per_joint_before={},
+        per_joint_after={}, history=[], n_evaluations=0, elapsed_s=0.0,
+    )
+    lock = RobotLock(name="unit-b", dataset="fake/unit_b", robot_type="so101_follower",
+                     data_sha256="0" * 64, params=TRUE, result=result,
+                     created_at="2026-10-17T00:00:00Z", antares_version="0")
+    eps = make_episodes(TRUE.replace(latency_frames=2), n=4)
+    d = diagnose(eps, lock, simulate=toy_simulate, max_evaluations=30, dataset="fresh")
+    out = json.loads(json.dumps(d.to_dict()))
+    assert out["lock"] == "unit-b" and out["dataset"] == "fresh"
+    assert out["causes"] == [c.name for c in d.causes]
+    assert {c["name"] for c in out["changes"]} == set(FIELDS)
+    assert out["refit_params"]["latency_frames"] == d.refit_params.latency_frames
+
+
+def test_needs_two_episodes():
+    with pytest.raises(ValueError, match="two episodes"):
+        diagnose(make_episodes(TRUE, n=1), lock_of(), simulate=toy_simulate)
