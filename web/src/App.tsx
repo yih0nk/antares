@@ -20,6 +20,7 @@ import {
 } from "./api";
 import { Arm, compMaterial, ghostMaterial, realMaterial, type Playhead } from "./Arm";
 import { CrossHeatmap, JointTrace, ResidualStrip, Sparkline } from "./Charts";
+import { AddDataset } from "./AddDataset";
 
 // Layout: 3D viewer (real arm + ghost sim arm) on the left, gap panel on
 // the right, episode timeline along the bottom. The ghost is the simulator
@@ -150,9 +151,32 @@ export default function App() {
       },
       (e) => setError(`API unreachable: ${e.message}. Is \`antares serve\` running?`),
     );
-    api.model().then(setGeometry, (e) => setError(`Could not load the arm model: ${e.message}`));
     api.locks().then(setLocks, () => setLocks([]));
   }, []);
+
+  // ---- arm model for the selected dataset's robot ---------------------------
+  // SO-100 and SO-101 datasets may be simulated with different MJCFs; the
+  // geometry (and its meshes) follows whatever model the API uses for it.
+  const currentDs = datasets.find((d) => d.id === dataset);
+  const robot = currentDs?.robot ?? "so101";
+  useEffect(() => {
+    let live = true;
+    api.model(robot).then(
+      (g) => live && setGeometry(g),
+      (e) => live && setError(`Could not load the arm model: ${e.message}`),
+    );
+    return () => {
+      live = false;
+    };
+  }, [robot]);
+
+  // A dataset added from the "+ add dataset" popover: list it and select it;
+  // the dataset effect below then loads it behind the usual overlay.
+  const addDataset = (info: DatasetInfo) => {
+    setDatasets((ds) => (ds.some((d) => d.id === info.id) ? ds.map((d) => (d.id === info.id ? info : d)) : [...ds, info]));
+    setError(null);
+    setDataset(info.id);
+  };
 
   // ---- dataset -> episodes ---------------------------------------------------
   useEffect(() => {
@@ -422,8 +446,8 @@ export default function App() {
     : "fitting shared params";
   const shownParams = replay?.params ?? null;
   const defaultParams = baseline?.params ?? null;
-  const currentDs = datasets.find((d) => d.id === dataset);
   const clip = `${dataset}#${episode ?? ""}`;
+  const dsWarnings = currentDs?.warnings ?? [];
 
   // The trace arrays only change with the replay or the joint, not per frame.
   const traceReal = useMemo(() => baseline?.real_q.map((r) => r[jIndex]) ?? [], [baseline, jIndex]);
@@ -453,6 +477,19 @@ export default function App() {
         <span className="tagline">sim, calibrated to this robot</span>
         <div className="picker-wrap">
           {dsState === "loading" && <span className="muted small">loading dataset…</span>}
+          {currentDs && (
+            <span
+              className={`chip ${currentDs.source} ${dsWarnings.length ? "warn" : ""}`}
+              title={[
+                `${currentDs.source} dataset${currentDs.robot_family ? ` · ${currentDs.robot_family} arm` : ""} · sim model ${currentDs.robot}`,
+                ...dsWarnings,
+              ].join("\n")}
+            >
+              {currentDs.source}
+              {currentDs.robot_family && currentDs.robot_family !== currentDs.robot && ` · ${currentDs.robot_family}→${currentDs.robot}`}
+              {dsWarnings.length > 0 && ` · ${dsWarnings.length} warning${dsWarnings.length === 1 ? "" : "s"}`}
+            </span>
+          )}
           <select
             className="picker"
             value={dataset}
@@ -465,6 +502,7 @@ export default function App() {
               </option>
             ))}
           </select>
+          <AddDataset disabled={running} onAdded={addDataset} />
         </div>
       </header>
 
@@ -484,8 +522,8 @@ export default function App() {
           />
           {geometry && (
             <Suspense fallback={null}>
-              {/* MuJoCo is z-up; three.js is y-up. */}
-              <group rotation={[-Math.PI / 2, 0, 0]}>
+              {/* MuJoCo is z-up; three.js is y-up. Keyed by model so a robot switch swaps the meshes cleanly. */}
+              <group key={geometry.robot} rotation={[-Math.PI / 2, 0, 0]}>
                 <Arm geometry={geometry} poses={baseline?.real_poses ?? null} clip={clip} playhead={playhead} material={realMaterial} />
                 <Arm
                   geometry={geometry}

@@ -43,11 +43,15 @@ BIAS_BOUND = 25.0
 GAIN_BOUNDS = (0.75, 1.33)
 
 
-def sensor_simulate() -> SensorSimulateFn:
-    """One MuJoCo :class:`~antares.sim.Arm` wrapped as a ``SensorSimulateFn``."""
+def sensor_simulate(robot: str | None = None) -> SensorSimulateFn:
+    """One MuJoCo :class:`~antares.sim.Arm` wrapped as a ``SensorSimulateFn``.
+
+    ``robot`` picks the model from :data:`antares.robots.REGISTRY` (default
+    SO-101).
+    """
     from antares.sim import Arm
 
-    arm = Arm()
+    arm = Arm(robot=robot)
     real_cache: dict[int, tuple[Episode, np.ndarray]] = {}
 
     def simulate(params: SimParams, cmap: CommandMap, episode: Episode) -> tuple[np.ndarray, np.ndarray]:

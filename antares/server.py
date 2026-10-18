@@ -12,19 +12,24 @@ file I/O) are shared with the CLI.
 
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import os
 import re
+import shutil
 import tempfile
 import threading
 import uuid
+import zipfile
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal
 
 import numpy as np
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -32,6 +37,8 @@ from pydantic import BaseModel, Field
 
 import antares
 from antares.data import Dataset, Episode
+from antares.robots import DEFAULT_ROBOT, get_robot, model_for_dataset, model_for_family
+from antares.validate import Verdict, merge_verdicts, robot_family, validate_dataset, validate_dataset_info
 
 # Datasets the demo offers out of the box.
 DEMO_DATASETS = [
@@ -41,6 +48,13 @@ DEMO_DATASETS = [
 
 _ROOT = Path(__file__).resolve().parent.parent
 WEB_DIST = Path(os.environ.get("ANTARES_WEB_DIST", _ROOT / "web" / "dist"))
+
+# Uploaded datasets are extracted under here, one ``<slug>-<shorthash>/``
+# directory each, and addressed as ``upload/<slug>``.
+UPLOAD_DIR: Path = Path(os.environ.get("ANTARES_UPLOAD_DIR", "uploads"))
+UPLOAD_PREFIX = "upload/"
+UPLOAD_MARKER = ".antares-upload.json"
+MAX_UPLOAD_BYTES = 200 * 2**20
 
 # Where RobotLock JSON files live (one ``<name>.lock.json`` per lock, the same
 # layout ``antares.lock.list_locks`` reads). Tests monkeypatch LOCK_DIR.
@@ -71,18 +85,113 @@ ROUND = 4
 
 
 # --------------------------------------------------------------------------
-# Dataset cache
+# Dataset cache and validation
 # --------------------------------------------------------------------------
 
 _DATASETS: dict[str, Dataset] = {}
+# Per loaded dataset: ``source`` (demo | hub | upload | local), the validation
+# ``warnings`` and, for uploads, the extracted ``path``.
+_DATASET_META: dict[str, dict[str, Any]] = {}
 _DATASETS_LOCK = threading.Lock()
+
+
+def dataset_source(repo_id: str) -> str:
+    if repo_id in DEMO_DATASETS:
+        return "demo"
+    if repo_id.startswith(UPLOAD_PREFIX):
+        return "upload"
+    if os.path.isdir(repo_id):
+        return "local"
+    return "hub"
+
+
+def rejected(verdict: Verdict, what: str) -> HTTPException:
+    """400 whose ``detail`` carries both a sentence and the full verdict."""
+    return HTTPException(
+        status_code=400,
+        detail={"message": f"{what} cannot be replayed: " + "; ".join(verdict.reasons), "verdict": verdict.to_dict()},
+    )
+
+
+def fetch_hub_info(repo_id: str) -> dict:
+    """Only ``meta/info.json`` from the Hub (cached by huggingface_hub)."""
+    from huggingface_hub import hf_hub_download
+
+    path = hf_hub_download(repo_id, "meta/info.json", repo_type="dataset")
+    return json.loads(Path(path).read_text())
+
+
+def _upload_dir_for(repo_id: str) -> Path | None:
+    """The extracted directory behind ``upload/<name>``, from the registry or
+    by scanning ``UPLOAD_DIR`` for its marker file (survives a restart)."""
+    with _DATASETS_LOCK:
+        meta = _DATASET_META.get(repo_id)
+    if meta and meta.get("path") and Path(meta["path"]).is_dir():
+        return Path(meta["path"])
+    root = Path(UPLOAD_DIR)
+    if not root.is_dir():
+        return None
+    for marker in sorted(root.glob(f"*/{UPLOAD_MARKER}")):
+        try:
+            if json.loads(marker.read_text()).get("id") == repo_id:
+                return marker.parent
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def _local_info(root: Path) -> dict:
+    p = Path(root) / "meta" / "info.json"
+    if not p.is_file():
+        raise HTTPException(status_code=400, detail=f"{root} has no meta/info.json; not a LeRobot dataset directory")
+    try:
+        return json.loads(p.read_text())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"{p} is not valid JSON: {e}")
+
+
+def min_episodes_for(repo_id: str) -> int:
+    """A directory on disk is the user's own recording (``antares check``
+    enforces its own minimum), so only what cannot be replayed is refused;
+    Hub datasets and uploads need :data:`antares.validate.MIN_EPISODES`."""
+    from antares.validate import MIN_EPISODES
+
+    return 1 if dataset_source(repo_id) == "local" else MIN_EPISODES
+
+
+def validate_id(repo_id: str) -> Verdict:
+    """Pre-check a dataset id without loading its data (info.json only).
+
+    Hub ids download one small file; local directories and uploads read it
+    from disk. 404 when there is no such dataset, 502 when the Hub cannot
+    be reached.
+    """
+    n_min = min_episodes_for(repo_id)
+    if repo_id.startswith(UPLOAD_PREFIX):
+        root = _upload_dir_for(repo_id)
+        if root is None:
+            raise HTTPException(status_code=404, detail=f"no upload named {repo_id!r}")
+        return validate_dataset_info(_local_info(root), repo_id, min_episodes=n_min)
+    if os.path.isdir(repo_id):
+        return validate_dataset_info(_local_info(Path(repo_id)), repo_id, min_episodes=n_min)
+    try:
+        info = fetch_hub_info(repo_id)
+    except Exception as e:  # noqa: BLE001 - a Hub error, in any shape
+        name = type(e).__name__
+        if "NotFound" in name or "GatedRepo" in name or "Revision" in name:
+            raise HTTPException(status_code=404, detail=f"{repo_id}: no such dataset on the Hub, or no meta/info.json ({name})")
+        raise HTTPException(status_code=502, detail=f"could not fetch {repo_id} meta/info.json: {name}: {e}")
+    return validate_dataset_info(info, repo_id)
 
 
 def get_dataset(repo_id: str) -> Dataset:
     """Return a cached Dataset, loading it (slow first time) if needed.
 
-    ``repo_id`` is a Hub dataset id, or the path of a LeRobot dataset
-    directory on disk (a fresh local recording), which is read in place.
+    ``repo_id`` is a Hub dataset id, the path of a LeRobot dataset directory
+    on disk (a fresh local recording, read in place) or ``upload/<name>``
+    for a dataset posted to ``/api/datasets/upload``. The dataset is
+    validated before (``meta/info.json``) and after loading; a dataset the
+    sim cannot replay is a 400 whose detail carries the reasons.
     """
     with _DATASETS_LOCK:
         ds = _DATASETS.get(repo_id)
@@ -90,28 +199,55 @@ def get_dataset(repo_id: str) -> Dataset:
             return ds
     from antares.data import load_dataset, read_local
 
+    pre = validate_id(repo_id)
+    if not pre.ok:
+        raise rejected(pre, repo_id)
     try:
-        if os.path.isdir(repo_id):
+        if repo_id.startswith(UPLOAD_PREFIX):
+            ds = read_local(_upload_dir_for(repo_id), repo_id=repo_id)
+        elif os.path.isdir(repo_id):
             ds = read_local(repo_id, repo_id=repo_id)
         else:
             ds = load_dataset(repo_id)
     except Exception as e:  # noqa: BLE001 - surface loader errors to the client
         raise HTTPException(status_code=502, detail=f"could not load {repo_id}: {e}")
-    with _DATASETS_LOCK:
-        _DATASETS.setdefault(repo_id, ds)
-        return _DATASETS[repo_id]
+    verdict = merge_verdicts(pre, validate_dataset(ds, min_episodes=min_episodes_for(repo_id)))
+    if not verdict.ok:
+        raise rejected(verdict, repo_id)
+    return put_dataset(ds, warnings=verdict.warnings)
 
 
-def put_dataset(ds: Dataset) -> None:
+def put_dataset(ds: Dataset, *, source: str | None = None, warnings: list[str] | None = None, path: Path | None = None) -> Dataset:
     """Register an already loaded dataset so ``get_dataset`` finds it."""
     with _DATASETS_LOCK:
         _DATASETS.setdefault(ds.repo_id, ds)
+        meta = _DATASET_META.setdefault(ds.repo_id, {})
+        meta["source"] = source or dataset_source(ds.repo_id)
+        if warnings is not None:
+            meta["warnings"] = list(warnings)
+        if path is not None:
+            meta["path"] = str(path)
+        return _DATASETS[ds.repo_id]
+
+
+def dataset_robot(ds: Dataset) -> str:
+    """Registry name of the model that simulates ``ds`` (by its robot_type)."""
+    return model_for_dataset(ds.robot_type)
 
 
 def dataset_summary(repo_id: str) -> dict:
     with _DATASETS_LOCK:
         ds = _DATASETS.get(repo_id)
-    out: dict[str, Any] = {"id": repo_id, "loaded": ds is not None}
+        meta = dict(_DATASET_META.get(repo_id) or {})
+    family = robot_family(ds.robot_type) if ds is not None else robot_family(repo_id)
+    out: dict[str, Any] = {
+        "id": repo_id,
+        "loaded": ds is not None,
+        "source": meta.get("source") or dataset_source(repo_id),
+        "warnings": list(meta.get("warnings") or []),
+        "robot_family": family,
+        "robot": model_for_dataset(ds.robot_type) if ds is not None else model_for_dataset(repo_id),
+    }
     if ds is not None:
         out.update(
             robot_type=ds.robot_type,
@@ -122,6 +258,220 @@ def dataset_summary(repo_id: str) -> dict:
     return out
 
 
+def forget_dataset(repo_id: str) -> dict:
+    """Drop ``repo_id`` from the in-process cache; an upload's files go too."""
+    with _DATASETS_LOCK:
+        ds = _DATASETS.pop(repo_id, None)
+        meta = _DATASET_META.pop(repo_id, None) or {}
+    with _BASELINES_LOCK:
+        for key in [k for k in _BASELINES if k[0] == repo_id]:
+            del _BASELINES[key]
+    removed_dir = None
+    if repo_id.startswith(UPLOAD_PREFIX):
+        root = Path(meta["path"]) if meta.get("path") else _upload_dir_for(repo_id)
+        if root is None and ds is None:
+            raise HTTPException(status_code=404, detail=f"no upload named {repo_id!r}")
+        if root is not None and root.is_dir() and _inside(root, Path(UPLOAD_DIR)):
+            shutil.rmtree(root)
+            removed_dir = str(root)
+    elif ds is None:
+        raise HTTPException(status_code=404, detail=f"{repo_id} is not loaded")
+    return {"deleted": repo_id, "removed_dir": removed_dir}
+
+
+# --------------------------------------------------------------------------
+# Uploads: a zip of a LeRobot dataset directory, or one parquet + info.json
+# --------------------------------------------------------------------------
+
+
+def _inside(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _safe_member(name: str) -> Path | None:
+    """A zip member name as a relative, traversal-free path, or None to skip."""
+    name = name.replace("\\", "/")
+    if not name or name.endswith("/"):
+        return None
+    p = Path(name)
+    if p.is_absolute() or name.startswith("/") or re.match(r"^[A-Za-z]:", name):
+        raise HTTPException(status_code=400, detail=f"zip member {name!r} has an absolute path")
+    if any(part in ("..", "") for part in p.parts) or any(part.startswith("..") and part != ".." for part in p.parts if "/" in part):
+        raise HTTPException(status_code=400, detail=f"zip member {name!r} escapes the archive")
+    return p
+
+
+def _upload_name(name: str | None, filename: str | None) -> str:
+    from antares.lock import slug
+
+    base = (name or "").strip() or Path(filename or "dataset").name
+    base = re.sub(r"\.(zip|parquet)$", "", base, flags=re.IGNORECASE)
+    return slug(base)
+
+
+def _spool_upload(upload: UploadFile) -> tuple[Path, str, int]:
+    """Stream the body to a temp file with a running SHA-256; 413 past the cap."""
+    h = hashlib.sha256()
+    size = 0
+    tmp = tempfile.NamedTemporaryFile(prefix="antares-upload-", delete=False)
+    try:
+        while True:
+            chunk = upload.file.read(1 << 20)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > MAX_UPLOAD_BYTES:
+                raise HTTPException(status_code=413, detail=f"upload exceeds {MAX_UPLOAD_BYTES // 2**20} MB")
+            h.update(chunk)
+            tmp.write(chunk)
+        tmp.close()
+    except BaseException:
+        tmp.close()
+        Path(tmp.name).unlink(missing_ok=True)
+        raise
+    return Path(tmp.name), h.hexdigest(), size
+
+
+def extract_dataset_zip(zip_path: Path, dest: Path) -> int:
+    """Copy ``meta/**`` and ``data/**/*.parquet`` out of a LeRobot dataset zip.
+
+    The dataset may sit at the archive root or inside one top-level folder
+    (``<name>/meta/info.json``). Videos and anything else are ignored.
+    Member paths are checked for traversal and the uncompressed size is
+    capped. Returns the number of files written.
+    """
+    try:
+        zf = zipfile.ZipFile(zip_path)
+    except zipfile.BadZipFile:
+        raise HTTPException(status_code=400, detail="not a zip file")
+    with zf:
+        members = []
+        for zi in zf.infolist():
+            rel = _safe_member(zi.filename)
+            if rel is not None:
+                members.append((zi, rel))
+        roots = [rel.parent.parent for _, rel in members if rel.parts[-2:] == ("meta", "info.json")]
+        if not roots:
+            raise HTTPException(status_code=400, detail="zip has no meta/info.json (expected a LeRobot dataset directory)")
+        root = sorted(roots, key=lambda r: len(r.parts))[0]
+        total = 0
+        wanted: list[tuple[zipfile.ZipInfo, Path]] = []
+        for zi, rel in members:
+            try:
+                inner = rel.relative_to(root)
+            except ValueError:
+                continue
+            parts = inner.parts
+            if parts[0] == "meta" or (parts[0] == "data" and inner.suffix.lower() == ".parquet"):
+                total += int(zi.file_size)
+                if total > MAX_UPLOAD_BYTES:
+                    raise HTTPException(status_code=413, detail=f"uncompressed data exceeds {MAX_UPLOAD_BYTES // 2**20} MB")
+                wanted.append((zi, inner))
+        if not any(inner.parts[0] == "data" for _, inner in wanted):
+            raise HTTPException(status_code=400, detail="zip has no data/**/*.parquet files")
+        dest.mkdir(parents=True, exist_ok=True)
+        for zi, inner in wanted:
+            out = dest / inner
+            if not _inside(out, dest):
+                raise HTTPException(status_code=400, detail=f"zip member {zi.filename!r} escapes the archive")
+            out.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(zi) as src, open(out, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+        return len(wanted)
+
+
+def _is_parquet(path: Path) -> bool:
+    with open(path, "rb") as f:
+        head = f.read(4)
+        if head != b"PAR1":
+            return False
+        f.seek(-4, os.SEEK_END)
+        return f.read(4) == b"PAR1"
+
+
+def register_upload(
+    body: Path,
+    *,
+    filename: str | None,
+    name: str | None = None,
+    info_json: bytes | None = None,
+    sha256: str | None = None,
+) -> dict:
+    """Extract/validate/load an uploaded dataset and register it as ``upload/<name>``.
+
+    ``body`` is the spooled upload: a zip of a LeRobot dataset directory, or
+    a single parquet file in which case ``info_json`` must hold the
+    ``meta/info.json`` text. On any failure the extracted directory is
+    removed and an HTTPException (400/409/413) is raised.
+    """
+    from antares.data import read_local
+
+    slug_name = _upload_name(name, filename)
+    repo_id = f"{UPLOAD_PREFIX}{slug_name}"
+    digest = sha256 or hashlib.sha256(body.read_bytes()).hexdigest()
+    dest = Path(UPLOAD_DIR) / f"{slug_name}-{digest[:8]}"
+
+    with _DATASETS_LOCK:
+        existing = _DATASET_META.get(repo_id)
+    if existing is not None:
+        if existing.get("sha256") == digest:
+            return {**dataset_summary(repo_id), "verdict": existing.get("verdict")}
+        raise HTTPException(
+            status_code=409,
+            detail=f"{repo_id} already exists with different data; delete it first or upload under another name",
+        )
+
+    if dest.exists():
+        shutil.rmtree(dest)
+    try:
+        if zipfile.is_zipfile(body):
+            extract_dataset_zip(body, dest)
+        elif _is_parquet(body):
+            if not info_json:
+                raise HTTPException(status_code=400, detail="a single parquet upload needs an info.json field (meta/info.json)")
+            try:
+                json.loads(info_json)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=f"info.json is not valid JSON: {e}")
+            (dest / "meta").mkdir(parents=True, exist_ok=True)
+            (dest / "data" / "chunk-000").mkdir(parents=True, exist_ok=True)
+            (dest / "meta" / "info.json").write_bytes(info_json)
+            shutil.copyfile(body, dest / "data" / "chunk-000" / "file-000.parquet")
+        else:
+            raise HTTPException(status_code=400, detail="upload must be a .zip of a LeRobot dataset directory or a .parquet file")
+
+        pre = validate_dataset_info(_local_info(dest), repo_id)
+        if not pre.ok:
+            raise rejected(pre, repo_id)
+        try:
+            ds = read_local(dest, repo_id=repo_id)
+        except Exception as e:  # noqa: BLE001 - a bad parquet is the client's problem
+            raise HTTPException(status_code=400, detail=f"could not read the uploaded data: {e}")
+        verdict = merge_verdicts(pre, validate_dataset(ds))
+        if not verdict.ok:
+            raise rejected(verdict, repo_id)
+    except BaseException:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise
+
+    marker = {
+        "id": repo_id,
+        "name": slug_name,
+        "sha256": digest,
+        "filename": filename,
+        "created_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+    }
+    (dest / UPLOAD_MARKER).write_text(json.dumps(marker, indent=2) + "\n")
+    put_dataset(ds, source="upload", warnings=verdict.warnings, path=dest)
+    with _DATASETS_LOCK:
+        _DATASET_META[repo_id].update(sha256=digest, verdict=verdict.to_dict())
+    return {**dataset_summary(repo_id), "verdict": verdict.to_dict()}
+
+
 def find_episode(ds: Dataset, index: int) -> Episode:
     for ep in ds.episodes:
         if ep.index == index:
@@ -130,20 +480,54 @@ def find_episode(ds: Dataset, index: int) -> Episode:
 
 
 # --------------------------------------------------------------------------
-# Sim access: one Arm per process, guarded by a lock (Arm mutates state)
+# Sim access: one Arm per robot model, each behind its own lock (Arm mutates
+# state). Tests inject fakes into ``_ARMS``.
 # --------------------------------------------------------------------------
 
-_arm = None
-_ARM_LOCK = threading.Lock()
+_ARMS: dict[str, Any] = {}
+_ARM_LOCKS: dict[str, threading.Lock] = {}
+_ARMS_GUARD = threading.Lock()
 
 
-def get_arm():
-    global _arm
-    if _arm is None:
+def check_robot(robot: str | None) -> str:
+    """Registry name for ``robot`` (default model when None); 400 if unknown."""
+    try:
+        return get_robot(robot).name
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+def get_arm(robot: str | None = None):
+    """The process-wide Arm for ``robot`` (built on first use)."""
+    name = check_robot(robot)
+    with _ARMS_GUARD:
+        arm = _ARMS.get(name)
+    if arm is None:
         from antares.sim import Arm
 
-        _arm = Arm()
-    return _arm
+        arm = Arm(robot=name)
+        with _ARMS_GUARD:
+            arm = _ARMS.setdefault(name, arm)
+    return arm
+
+
+def arm_lock(robot: str | None = None) -> threading.Lock:
+    """The lock serializing use of ``get_arm(robot)``."""
+    name = check_robot(robot)
+    with _ARMS_GUARD:
+        return _ARM_LOCKS.setdefault(name, threading.Lock())
+
+
+def simulate_for(robot: str | None):
+    """A ``simulate`` callable on a private Arm of ``robot`` for the fitters
+    (calibrate/drift/dr build their own by default; None keeps that default,
+    which is the SO-101 model)."""
+    name = check_robot(robot)
+    if name == DEFAULT_ROBOT:
+        return None
+    from antares.calibrate import default_simulate
+
+    return default_simulate(robot=name)
 
 
 def default_params():
@@ -185,33 +569,34 @@ def _command_map(arm, cmap):
 
 
 def lock_simulate(lock: dict):
-    """A SimulateFn holding the lock's command map fixed, or None (the
-    callee's default) for a lock without one. For refits warm-started from
-    a lock: the dynamics move, the sensor calibration does not."""
+    """A SimulateFn holding the lock's command map fixed on the lock's robot
+    model, or None (the callee's default: identity map, SO-101) when the lock
+    has neither. For refits warm-started from a lock: the dynamics move, the
+    sensor calibration and the model do not."""
     cmap = command_map_from_lock(lock)
-    if cmap is None:
+    robot = check_robot(lock.get("robot"))
+    if cmap is None and robot == DEFAULT_ROBOT:
         return None
     from antares.calibrate import default_simulate
 
-    return default_simulate(cmap)
+    return default_simulate(cmap, robot=robot)
 
 
-def mesh_dir() -> Path:
+def mesh_dir(robot: str | None = None) -> Path:
     if MESH_DIR is not None:
         return Path(MESH_DIR)
-    from antares.sim import MODEL_PATH
-
-    return Path(MODEL_PATH).parent / "assets"
+    return Path(get_robot(check_robot(robot)).mesh_dir)
 
 
 def _rounded(a: np.ndarray) -> list:
     return np.round(np.asarray(a, dtype=np.float64), ROUND).tolist()
 
 
-def replay_episode(ds: Dataset, episode: int, params=None, command_map=None) -> dict:
+def replay_episode(ds: Dataset, episode: int, params=None, command_map=None, robot: str | None = None) -> dict:
     """Real FK + sim replay for one episode. Angles in degrees, poses (T,nbody,7).
 
     ``command_map`` (a CommandMap, or None for identity) corrects the commands.
+    ``robot`` overrides the model (default: the one for the dataset's family).
     """
     from antares.gap import tracking_error
     from antares.sim import JOINTS
@@ -219,12 +604,12 @@ def replay_episode(ds: Dataset, episode: int, params=None, command_map=None) -> 
     ep = find_episode(ds, episode)
     if params is None:
         params = default_params()
-    arm = get_arm()
-    with _ARM_LOCK:
+    robot = check_robot(robot or dataset_robot(ds))
+    arm = get_arm(robot)
+    with arm_lock(robot), _command_map(arm, command_map):
         arm.apply(params)
         real_q = np.asarray(arm.real_q(ep))
-        with _command_map(arm, command_map):
-            sim_q = np.asarray(arm.replay(ep))
+        sim_q = np.asarray(arm.replay(ep))
         real_poses = np.asarray(arm.fk(real_q))
         sim_poses = np.asarray(arm.fk(sim_q))
         body_names = list(arm.body_names)
@@ -233,6 +618,7 @@ def replay_episode(ds: Dataset, episode: int, params=None, command_map=None) -> 
         "dataset": ds.repo_id,
         "episode": ep.index,
         "fps": ep.fps,
+        "robot": robot,
         "joints": list(JOINTS),
         "body_names": body_names,
         "params": params.to_dict(),
@@ -245,20 +631,19 @@ def replay_episode(ds: Dataset, episode: int, params=None, command_map=None) -> 
     }
 
 
-def score_episodes(params, episodes, command_map=None) -> Any:
+def score_episodes(params, episodes, command_map=None, robot: str | None = None) -> Any:
     """Aggregate GapReport of ``params`` (and ``command_map``) over ``episodes``
-    using the shared Arm."""
+    using the shared Arm of ``robot``."""
     from antares.gap import aggregate, tracking_error
     from antares.sim import JOINTS
 
-    arm = get_arm()
+    arm = get_arm(robot)
     reports = []
-    with _ARM_LOCK:
+    with arm_lock(robot), _command_map(arm, command_map):
         arm.apply(params)
         for ep in episodes:
             real_q = np.asarray(arm.real_q(ep))
-            with _command_map(arm, command_map):
-                sim_q = np.asarray(arm.replay(ep))
+            sim_q = np.asarray(arm.replay(ep))
             reports.append(tracking_error(real_q, sim_q, joint_names=JOINTS))
     return aggregate(reports)
 
@@ -306,8 +691,9 @@ def get_baseline(ds: Dataset, lock_name: str | None):
     thr = gripper_thresholds(np.concatenate([ep.action[:, g] for ep in ds.episodes]))
     eps = baseline_episodes(ds, lock)
     cmap = command_map_from_lock(lock) if lock else None
-    arm = get_arm()
-    with _ARM_LOCK, _command_map(arm, cmap):
+    robot = dataset_robot(ds)
+    arm = get_arm(robot)
+    with arm_lock(robot), _command_map(arm, cmap):
         arm.apply(params)
         bl = residual_baseline(eps, arm, thr)
     out = (bl, thr, params, cmap)
@@ -320,8 +706,9 @@ def _episode_residual(ds: Dataset, ep: Episode, lock_name: str | None, z: float,
     from antares.events import detect_events, residuals, validate_episode
 
     bl, thr, params, cmap = get_baseline(ds, lock_name)
-    arm = get_arm()
-    with _ARM_LOCK, _command_map(arm, cmap):
+    robot = dataset_robot(ds)
+    arm = get_arm(robot)
+    with arm_lock(robot), _command_map(arm, cmap):
         arm.apply(params)
         real_q = np.asarray(arm.real_q(ep))
         sim_q = np.asarray(arm.replay(ep))
@@ -472,6 +859,7 @@ def lock_summary(lock: dict) -> dict:
         "name": lock.get("name"),
         "dataset": lock.get("dataset"),
         "robot_type": lock.get("robot_type"),
+        "robot": lock.get("robot") or DEFAULT_ROBOT,
         "created_at": lock.get("created_at"),
         "params": lock.get("params"),
         "scores": {
@@ -489,19 +877,23 @@ def lock_summary(lock: dict) -> dict:
     }
 
 
-def build_lock(ds: Dataset, train: list, result, name: str | None, **sensor):
+def build_lock(ds: Dataset, train: list, result, name: str | None, robot: str | None = None, **sensor):
     """Make a RobotLock for a finished calibration (digest covers the train split).
 
-    ``sensor`` carries ``command_map``/``dynamics_only`` for a sensor fit.
+    ``robot`` is the registry name the fit ran on (default: the dataset's
+    family). ``sensor`` carries ``command_map``/``dynamics_only`` for a
+    sensor fit.
     """
     from antares.lock import RobotLock
 
+    robot = check_robot(robot or dataset_robot(ds))
     return RobotLock.create(
         dataset=ds.repo_id,
         robot_type=ds.robot_type,
         train_episodes=train,
         result=result,
         name=name,
+        robot=robot,
         **sensor,
     )
 
@@ -569,6 +961,7 @@ def run_drift(
 
     lock = load_lock(lock_name)
     path = _drift_path(lock_name)
+    sim = simulate_for(dataset_robot(ds))
     try:
         scan = drift_scan(
             ds.episodes,
@@ -580,6 +973,7 @@ def run_drift(
             seed=seed,
             on_progress=on_progress,
             should_stop=should_stop,
+            **({"simulate": sim} if sim is not None else {}),
         )
     except ValueError as e:  # e.g. fewer episodes than one window
         raise HTTPException(status_code=400, detail=str(e))
@@ -763,6 +1157,7 @@ def run_calibration(
     per_joint: bool = False,
     per_joint_max_evaluations: int = 600,
     per_joint_sigma0: float | None = None,
+    robot: str | None = None,
     on_progress: Callable[[Any], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
     fit_sensor: bool = False,
@@ -772,6 +1167,7 @@ def run_calibration(
 
     ``per_joint`` adds the per-joint refinement stage after the shared fit,
     with its own evaluation budget and (optionally) CMA-ES step size.
+    ``robot`` overrides the simulator model (default: the dataset's family).
 
     With ``fit_sensor`` the arm's command map is fitted alongside the
     dynamics (see :mod:`antares.sensor`) and stored in the lock, together
@@ -785,6 +1181,7 @@ def run_calibration(
         raise HTTPException(status_code=400, detail="n_train must be >= 1")
     if name is not None:
         _lock_path(name)  # validate the name before spending minutes fitting
+    robot = check_robot(robot or dataset_robot(ds))
     train, eval_ = split_episodes(ds.episodes, n_train, n_eval, seed=seed)
     extra: dict[str, Any] = {}
     if per_joint:
@@ -794,6 +1191,12 @@ def run_calibration(
     if fit_sensor:
         from antares.sensor import calibrate_with_sensor
 
+        if robot != DEFAULT_ROBOT:
+            # The sensor fitter builds its own SO-101 arm by default; give it
+            # one of this model instead.
+            from antares.sensor import sensor_simulate
+
+            extra["simulate"] = sensor_simulate(robot)
         out = calibrate_with_sensor(
             train,
             eval_,
@@ -807,10 +1210,14 @@ def run_calibration(
         )
         lock = build_lock(
             ds, train, out.result, name,
+            robot=robot,
             command_map={**out.command_map.to_dict(), "mode": sensor_mode},
             dynamics_only=out.dynamics_only.to_dict(),
         )
         return out.result, lock.to_dict(), save_lock(lock)
+    sim = simulate_for(robot)
+    if sim is not None:
+        extra["simulate"] = sim
     result = calibrate(
         train,
         eval_,
@@ -821,7 +1228,7 @@ def run_calibration(
         should_stop=should_stop,
         **extra,
     )
-    lock = build_lock(ds, train, result, name)
+    lock = build_lock(ds, train, result, name, robot=robot)
     path = save_lock(lock)
     return result, lock.to_dict(), path
 
@@ -842,6 +1249,7 @@ def _job_worker(job: Job, req: "CalibrateRequest") -> None:
             name=req.name,
             per_joint=req.per_joint,
             per_joint_max_evaluations=req.per_joint_max_evaluations,
+            robot=req.robot,
             on_progress=on_progress,
             should_stop=job.stop.is_set,
             fit_sensor=req.fit_sensor,
@@ -888,6 +1296,7 @@ def run_dr(
     if not pool:
         raise HTTPException(status_code=400, detail="lock holds out every episode of the dataset")
 
+    sim = simulate_for(dataset_robot(ds))
     results = bootstrap_fits(
         pool,
         params,
@@ -988,7 +1397,7 @@ def cross_matrix(
             )
         row_s, row_j = [], []
         for p, cmap in col_params:
-            rep = score_episodes(p, eval_, cmap)
+            rep = score_episodes(p, eval_, cmap, robot=dataset_robot(ds))
             row_s.append(round(float(rep.overall_deg), ROUND))
             row_j.append({k: round(float(v), ROUND) for k, v in rep.per_joint_deg.items()})
         scores.append(row_s)
@@ -1015,14 +1424,15 @@ def run_check(
     from antares.check import check
 
     lock_d = lock if isinstance(lock, dict) else load_lock_dict(lock)
-    arm = get_arm()
+    robot = dataset_robot(ds)
+    arm = get_arm(robot)
 
     def simulate(params, ep):
         arm.apply(params)
         return np.asarray(arm.real_q(ep)), np.asarray(arm.replay(ep))
 
     try:
-        with _ARM_LOCK, _command_map(arm, command_map_from_lock(lock_d)):
+        with arm_lock(robot), _command_map(arm, command_map_from_lock(lock_d)):
             return check(
                 ds.episodes,
                 lock_d,
@@ -1134,8 +1544,9 @@ def compensate_episode_dict(
     if params is None:
         params = default_params()
     cmap = command_map_from_lock(load_lock_dict(lock)) if lock else None
-    arm = get_arm()
-    with _ARM_LOCK, _command_map(arm, cmap):
+    robot = dataset_robot(ds)
+    arm = get_arm(robot)
+    with arm_lock(robot), _command_map(arm, cmap):
         vmax = max_joint_velocity(ds.episodes, arm)
         rep = compensate_episode(arm, ep, params, method=method, real_vmax_deg_s=vmax)
         comp_poses = np.asarray(arm.fk(rep.q_sim_comp))
@@ -1144,6 +1555,7 @@ def compensate_episode_dict(
         "dataset": ds.repo_id,
         "episode": ep.index,
         "fps": rep.fps,
+        "robot": robot,
         "joints": list(JOINTS),
         "lock": lock,
         "method": method,
@@ -1178,11 +1590,12 @@ def compensate_heldout(ds: Dataset, lock_dict: dict, method: str = "ilc") -> dic
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     params = params_from_dict(lock_dict["params"])
-    arm = get_arm()
-    with _ARM_LOCK, _command_map(arm, command_map_from_lock(lock_dict)):
+    robot = dataset_robot(ds)
+    arm = get_arm(robot)
+    with arm_lock(robot), _command_map(arm, command_map_from_lock(lock_dict)):
         summary = compensate_episodes(arm, episodes, params, method=method)
     out = summary.to_dict()
-    out.update(dataset=ds.repo_id, lock=lock_dict.get("name"), method=method, params=params.to_dict(),
+    out.update(dataset=ds.repo_id, robot=robot, lock=lock_dict.get("name"), method=method, params=params.to_dict(),
                validation="sim-only", note=SIM_ONLY_NOTE)
     return out
 
@@ -1207,6 +1620,9 @@ def health() -> dict:
 
 @app.get("/api/datasets")
 def datasets() -> list[dict]:
+    """The pinned demo datasets first, then everything loaded in this process
+    (Hub ids, uploads, local directories), each with ``source``, ``warnings``,
+    ``robot_family`` and the sim ``robot`` used for it."""
     with _DATASETS_LOCK:
         ids = list(DEMO_DATASETS) + [k for k in _DATASETS if k not in DEMO_DATASETS]
     return [dataset_summary(i) for i in ids]
@@ -1214,8 +1630,57 @@ def datasets() -> list[dict]:
 
 @app.post("/api/datasets/load")
 def datasets_load(dataset: str = Query(...)) -> dict:
+    """Load any Hub id / upload / local directory. 400 with the verdict's
+    reasons when the dataset cannot be replayed; warnings ride along in the
+    summary when it can."""
     get_dataset(dataset)
     return dataset_summary(dataset)
+
+
+@app.get("/api/datasets/validate")
+def datasets_validate(dataset: str = Query(...)) -> dict:
+    """Cheap pre-check (meta/info.json only, no data download): the Verdict."""
+    with _DATASETS_LOCK:
+        loaded = dataset in _DATASETS
+    verdict = validate_id(dataset)
+    return {
+        "dataset": dataset,
+        "loaded": loaded,
+        "source": dataset_source(dataset),
+        "robot": model_for_family(verdict.robot_family),
+        **verdict.to_dict(),
+    }
+
+
+@app.post("/api/datasets/upload")
+def datasets_upload(
+    file: UploadFile = File(..., description="a .zip of a LeRobot dataset directory, or one .parquet"),
+    info: UploadFile | None = File(None, description="meta/info.json, required with a bare parquet"),
+    name: str | None = Form(None, description="dataset name; default: the file name"),
+) -> dict:
+    """Bring your own dataset. Registers it as ``upload/<name>`` and returns
+    its summary plus the validation ``verdict``. 413 past 200 MB, 400 when
+    the archive is not a LeRobot dataset or fails validation, 409 when the
+    name is taken by different data."""
+    body, digest, _ = _spool_upload(file)
+    try:
+        info_bytes = info.file.read() if info is not None else None
+        return register_upload(body, filename=file.filename, name=name, info_json=info_bytes, sha256=digest)
+    finally:
+        body.unlink(missing_ok=True)
+
+
+@app.delete("/api/datasets")
+def datasets_delete(dataset: str = Query(...)) -> dict:
+    """Forget a loaded dataset; an upload's extracted files are removed too."""
+    return forget_dataset(dataset)
+
+
+@app.get("/api/robots")
+def robots_list() -> list[dict]:
+    from antares.robots import REGISTRY
+
+    return [r.to_dict() for r in REGISTRY.values()]
 
 
 @app.get("/api/episodes")
@@ -1228,20 +1693,23 @@ def episodes(dataset: str = Query(...)) -> list[dict]:
 
 
 @app.get("/api/model")
-def model() -> dict:
+def model(robot: str | None = Query(None, description="registry name, default so101")) -> dict:
     from antares.sim import model_geometry
 
-    return model_geometry()
+    name = check_robot(robot)
+    out = model_geometry(getattr(get_arm(name), "model", None))
+    out["robot"] = name
+    return out
 
 
 _STL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.stl$", re.IGNORECASE)
 
 
 @app.get("/api/model/mesh/{file}")
-def model_mesh(file: str):
+def model_mesh(file: str, robot: str | None = Query(None)):
     if "/" in file or "\\" in file or ".." in file or not _STL_RE.match(file):
         raise HTTPException(status_code=400, detail="mesh must be a plain *.stl basename")
-    path = mesh_dir() / file
+    path = mesh_dir(robot) / file
     if not path.is_file():
         raise HTTPException(status_code=404, detail=f"no mesh {file}")
     return FileResponse(path, media_type="model/stl", filename=file)
@@ -1253,6 +1721,7 @@ def replay(
     episode: int = Query(...),
     lock: str | None = None,
     baseline: int = 0,
+    robot: str | None = Query(None, description="override the sim model (default: the dataset's family)"),
 ) -> dict:
     ds = get_dataset(dataset)
     params = cmap = None
@@ -1260,7 +1729,7 @@ def replay(
         lock_d = load_lock_dict(lock)
         params = params_from_dict(lock_d["params"])
         cmap = command_map_from_lock(lock_d)
-    out = replay_episode(ds, episode, params, cmap)
+    out = replay_episode(ds, episode, params, cmap, robot=robot)
     out["lock"] = lock if (lock and not baseline) else None
     return out
 
@@ -1273,6 +1742,8 @@ class ReplayRequest(BaseModel):
     # Optional {"gain": [6], "bias": [6]}, as a lock stores it (extra keys such
     # as its "mode" are ignored); omitted means identity.
     command_map: dict[str, Any] | None = None
+    # Sim model override (registry name); default: the dataset's family.
+    robot: str | None = None
 
 
 @app.post("/api/replay")
@@ -1289,7 +1760,7 @@ def replay_with_params(req: ReplayRequest) -> dict:
             status_code=400,
             detail=f"bad params: command_map needs {len(ds.joint_names)} gains and biases, got {cmap.gain.shape}",
         )
-    out = replay_episode(ds, req.episode, params, cmap)
+    out = replay_episode(ds, req.episode, params, cmap, robot=req.robot)
     out["lock"] = None
     return out
 
@@ -1349,12 +1820,15 @@ class CalibrateRequest(BaseModel):
     per_joint_max_evaluations: int = Field(600, ge=1)
     fit_sensor: bool = False
     sensor_mode: Literal["sim", "kinematic"] = "sim"
+    # Sim model override (registry name); default: the dataset's family.
+    robot: str | None = None
 
 
 @app.post("/api/calibrate")
 def calibrate_start(req: CalibrateRequest) -> dict:
     if req.name is not None:
         _lock_path(req.name)  # validate early
+    check_robot(req.robot)
     job = start_job("calibrate", req.dataset, _job_worker, req)
     return {"job_id": job.id}
 

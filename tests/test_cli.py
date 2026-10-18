@@ -50,14 +50,68 @@ def test_no_command_is_usage_error():
     assert e.value.code == 2
 
 
+def _info(**over):
+    names = [f"{j}.pos" for j in JOINTS]
+    base = {"codebase_version": "v3.0", "robot_type": "so101_follower", "fps": 30, "total_episodes": 20,
+            "features": {"action": {"names": names}, "observation.state": {"names": names}}}
+    base.update(over)
+    return base
+
+
 def test_inspect(monkeypatch, capsys):
     import antares.data
+    from antares import server
 
-    monkeypatch.setattr(antares.data, "load_dataset", lambda repo_id, cache_dir=None: _dataset(repo_id))
+    monkeypatch.setattr(server, "fetch_hub_info", lambda repo_id: _info())
+    monkeypatch.setattr(antares.data, "load_dataset", lambda repo_id, cache_dir=None: _dataset(repo_id, n=20))
     assert cli.main(["inspect", "fake/robot"]) == 0
     out = capsys.readouterr().out
-    assert "fake/robot: so101_follower, 3 episodes, 30 frames @ 30 fps" in out
+    assert "fake/robot: so101_follower, 20 episodes, 200 frames @ 30 fps" in out
     assert "shoulder_pan" in out and "gripper" in out
+    assert "sim model: so101" in out and "verdict: ok (family so101)" in out
+
+
+def test_inspect_rejects_without_loading(monkeypatch, capsys):
+    import antares.data
+    from antares import server
+
+    monkeypatch.setattr(server, "fetch_hub_info", lambda repo_id: _info(robot_type="koch", fps=60))
+    monkeypatch.setattr(antares.data, "load_dataset", lambda *a, **k: pytest.fail("must not download a rejected dataset"))
+    assert cli.main(["inspect", "someone/koch_arm"]) == 1
+    out = capsys.readouterr().out
+    assert "verdict: REJECTED" in out and "reason:  robot_type 'koch'" in out and "fps 60" in out
+
+
+def test_inspect_warns_but_loads(monkeypatch, capsys):
+    import antares.data
+    from antares import server
+
+    monkeypatch.setattr(server, "fetch_hub_info", lambda repo_id: _info(total_episodes=8))
+    monkeypatch.setattr(antares.data, "load_dataset", lambda repo_id, cache_dir=None: _dataset(repo_id, n=8))
+    assert cli.main(["inspect", "fake/robot"]) == 0
+    out = capsys.readouterr().out
+    assert "warning: only 8" in out
+
+
+def test_inspect_hub_error_exits_two(monkeypatch, capsys):
+    from antares import server
+
+    def boom(repo_id):
+        raise RuntimeError("offline")
+
+    monkeypatch.setattr(server, "fetch_hub_info", boom)
+    assert cli.main(["inspect", "fake/robot"]) == 2
+    assert "error:" in capsys.readouterr().err
+
+
+def test_replay_rejected_dataset_exits_two(monkeypatch, capsys):
+    from antares import server
+
+    monkeypatch.setattr(server, "_DATASETS", {})
+    monkeypatch.setattr(server, "fetch_hub_info", lambda repo_id: _info(robot_type="koch"))
+    assert cli.main(["replay", "someone/koch", "--episode", "0"]) == 2
+    err = capsys.readouterr().err
+    assert "cannot be replayed" in err and "koch" in err
 
 
 def test_locks_empty_and_listing(monkeypatch, tmp_path, capsys):
@@ -324,8 +378,10 @@ def test_check_missing_lock_or_dataset_exits_two(monkeypatch, capsys):
         raise RuntimeError("offline")
 
     monkeypatch.setattr(antares.data, "load_dataset", no_network)
+    monkeypatch.setattr(server, "fetch_hub_info", no_network)
     assert cli.main(["check", "nope/none", "--lock", "ghost"]) == 2
-    assert "could not load nope/none" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "nope/none" in err and "offline" in err
 
 
 def test_check_accepts_local_dir_and_lock_file(monkeypatch, tmp_path, capsys):
@@ -394,7 +450,7 @@ def test_compensate_prints_three_numbers_and_saves(monkeypatch, capsys, tmp_path
                                                           "result": {"eval_episodes": [1, 2]}}))
     # the --out path converts degrees back to dataset units through the arm's unit map
     unit_map = types.SimpleNamespace(to_units=lambda q: np.degrees(q) * 2.0)
-    monkeypatch.setattr(server, "_arm", types.SimpleNamespace(unit_map=unit_map))
+    monkeypatch.setattr(server, "_ARMS", {"so101": types.SimpleNamespace(unit_map=unit_map)})
 
     out_file = tmp_path / "commands.npy"
     assert cli.main(["compensate", "fake/robot", "--episode", "1", "--lock", "unit-a", "--out", str(out_file)]) == 0
@@ -448,7 +504,7 @@ def test_replay_prints_table(monkeypatch, capsys):
         "gap": {"per_joint_deg": {j: 1.25 for j in JOINTS}, "overall_deg": 1.25},
     }
     monkeypatch.setattr(server, "_DATASETS", {"fake/robot": _dataset()})
-    monkeypatch.setattr(server, "replay_episode", lambda ds, ep, params=None, cmap=None: fake_out)
+    monkeypatch.setattr(server, "replay_episode", lambda ds, ep, params=None, cmap=None, robot=None: fake_out)
     assert cli.main(["replay", "fake/robot", "--episode", "1"]) == 0
     out = capsys.readouterr().out
     assert "episode 1" in out and "default params" in out
@@ -901,7 +957,7 @@ def test_replay_with_lock_passes_command_map(monkeypatch, tmp_path, capsys):
     }))
     seen = {}
 
-    def fake_replay(ds, ep, params=None, command_map=None):
+    def fake_replay(ds, ep, params=None, command_map=None, robot=None):
         seen["cmap"] = command_map
         return {"episode": ep, "real_q": [[0] * 6], "gap": {"per_joint_deg": {}, "overall_deg": 0.5}}
 

@@ -61,32 +61,90 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_inspect(args: argparse.Namespace) -> int:
-    from antares.data import load_dataset
+def _detail(e: Exception) -> str:
+    """Human text for an HTTPException whose detail may be a dict with a message."""
+    d = getattr(e, "detail", None)
+    if isinstance(d, dict):
+        return str(d.get("message") or d)
+    return str(d) if d else f"{type(e).__name__}: {e}"
 
-    ds = load_dataset(args.repo_id)
+
+def _load_dataset(repo_id: str):
+    """``server.get_dataset`` (Hub id, ``upload/<name>`` or a local LeRobot
+    directory) with a readable error instead of a traceback. None on failure."""
+    from fastapi import HTTPException
+
+    from antares import server
+
+    try:
+        return server.get_dataset(repo_id)
+    except HTTPException as e:
+        print(f"error: {_detail(e)}", file=sys.stderr)
+        return None
+
+
+def _print_verdict(v) -> None:
+    print(f"verdict: {'ok' if v.ok else 'REJECTED'}" + (f" (family {v.robot_family})" if v.robot_family else ""))
+    for r in v.reasons:
+        print(f"  reason:  {r}")
+    for w in v.warnings:
+        print(f"  warning: {w}")
+
+
+def cmd_inspect(args: argparse.Namespace) -> int:
+    """Validate a dataset (Hub id or local directory) and summarize it.
+
+    The info.json verdict comes first and costs one small download; a
+    rejected dataset is not loaded. Exit 0 when it can be replayed, 1 if not.
+    """
+    import os
+
+    from fastapi import HTTPException
+
+    from antares import server
+    from antares.robots import model_for_dataset
+    from antares.validate import merge_verdicts, validate_dataset
+
+    try:
+        pre = server.validate_id(args.repo_id)
+    except HTTPException as e:
+        print(f"error: {_detail(e)}", file=sys.stderr)
+        return 2
+    if not pre.ok:
+        print(f"{args.repo_id}: {pre.robot_type or 'unknown robot'}, {pre.n_episodes} episodes @ {pre.fps:g} fps")
+        _print_verdict(pre)
+        return 1
+
+    from antares.data import load_dataset, read_local
+
+    ds = read_local(args.repo_id, repo_id=args.repo_id) if os.path.isdir(args.repo_id) else load_dataset(args.repo_id)
+    v = merge_verdicts(pre, validate_dataset(ds, min_episodes=server.min_episodes_for(args.repo_id)))
     frames = sum(len(e) for e in ds.episodes)
     print(
         f"{ds.repo_id}: {ds.robot_type}, {len(ds.episodes)} episodes, "
         f"{frames} frames @ {ds.fps:g} fps"
     )
     print("joints:", ", ".join(ds.joint_names))
-    return 0
+    print(f"sim model: {model_for_dataset(ds.robot_type)}")
+    _print_verdict(v)
+    return 0 if v.ok else 1
 
 
 def cmd_replay(args: argparse.Namespace) -> int:
     from antares import server
 
-    ds = server.get_dataset(args.repo_id)
+    ds = _load_dataset(args.repo_id)
+    if ds is None:
+        return 2
     params = cmap = None
     if args.lock:
         lock = server.load_lock_dict(args.lock)
         params = server.params_from_dict(lock["params"])
         cmap = server.command_map_from_lock(lock)
-    out = server.replay_episode(ds, args.episode, params, cmap)
+    out = server.replay_episode(ds, args.episode, params, cmap, robot=args.robot)
     gap = out["gap"]
     label = f"lock {args.lock}" if args.lock else "default params"
-    print(f"{ds.repo_id} episode {out['episode']} ({len(out['real_q'])} frames, {label})")
+    print(f"{ds.repo_id} episode {out['episode']} ({len(out['real_q'])} frames, {label}, model {out.get('robot', 'so101')})")
     print(_joint_table(gap["per_joint_deg"], gap["overall_deg"]))
     return 0
 
@@ -94,7 +152,9 @@ def cmd_replay(args: argparse.Namespace) -> int:
 def cmd_calibrate(args: argparse.Namespace) -> int:
     from antares import server
 
-    ds = server.get_dataset(args.repo_id)
+    ds = _load_dataset(args.repo_id)
+    if ds is None:
+        return 2
     stages = f"up to {args.max_evaluations} shared evaluations"
     if args.per_joint:
         stages += f" + {args.per_joint_evaluations} per-joint evaluations"
@@ -128,6 +188,7 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
         per_joint=args.per_joint,
         per_joint_max_evaluations=args.per_joint_evaluations,
         per_joint_sigma0=args.per_joint_sigma0,
+        robot=args.robot,
         on_progress=on_progress,
         fit_sensor=args.fit_sensor,
         sensor_mode=args.sensor_mode,
@@ -200,7 +261,9 @@ def _num(v, fmt: str = "{:.3f}") -> str:
 def cmd_drift(args: argparse.Namespace) -> int:
     from antares import server
 
-    ds = server.get_dataset(args.repo_id)
+    ds = _load_dataset(args.repo_id)
+    if ds is None:
+        return 2
     print(
         f"drift scan of lock {args.lock} over {ds.repo_id}: windows of {args.window} episodes, "
         f"step {args.step}, up to {args.max_evaluations} evaluations each"
@@ -278,7 +341,9 @@ def _ranges_table(ranges: dict) -> str:
 def cmd_dr(args: argparse.Namespace) -> int:
     from antares import server
 
-    ds = server.get_dataset(args.repo_id)
+    ds = _load_dataset(args.repo_id)
+    if ds is None:
+        return 2
     lock = args.lock or server._slug(ds.repo_id)
     print(
         f"deriving DR ranges for lock {lock} from {ds.repo_id}: {args.n_fits} fits x "
@@ -366,8 +431,7 @@ def cmd_check(args: argparse.Namespace) -> int:
             min_episodes=args.min_episodes,
         )
     except Exception as e:  # noqa: BLE001 - HTTPException or loader error
-        detail = getattr(e, "detail", None) or f"{type(e).__name__}: {e}"
-        print(f"error: {detail}", file=sys.stderr)
+        print(f"error: {_detail(e)}", file=sys.stderr)
         return EXIT_USAGE
 
     diagnosis = None
@@ -453,7 +517,9 @@ def _print_summary(title: str, s: dict) -> None:
 def cmd_events(args: argparse.Namespace) -> int:
     from antares import server
 
-    ds = server.get_dataset(args.repo_id)
+    ds = _load_dataset(args.repo_id)
+    if ds is None:
+        return 2
     label = f"lock {args.lock}" if args.lock else "default params"
     if args.episode is None and not args.all:
         print("error: give --episode N or --all", file=sys.stderr)
@@ -532,7 +598,9 @@ def _feasibility_line(f: dict) -> str:
 def cmd_compensate(args: argparse.Namespace) -> int:
     from antares import server
 
-    ds = server.get_dataset(args.repo_id)
+    ds = _load_dataset(args.repo_id)
+    if ds is None:
+        return 2
     lock = server.load_lock_dict(args.lock) if args.lock else None
     params = server.params_from_dict(lock["params"]) if lock else None
     label = f"lock {args.lock}" if args.lock else "default params (no lock: latency 0)"
@@ -570,7 +638,7 @@ def cmd_compensate(args: argparse.Namespace) -> int:
     if args.out:
         import numpy as np
 
-        um = server.get_arm().unit_map
+        um = server.get_arm(out.get("robot")).unit_map
         cmds = um.to_units(np.radians(np.asarray(out["ctrl_comp"], dtype=np.float64)))
         cmap = server.command_map_from_lock(lock) if lock else None
         if cmap is not None:  # back to the raw units the arm is commanded in
@@ -1057,18 +1125,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--reload", action="store_true", help="auto-reload on code changes")
     p.set_defaults(func=cmd_serve)
 
-    p = sub.add_parser("inspect", help="summarize a LeRobot dataset")
-    p.add_argument("repo_id")
+    dataset_help = "Hub dataset id, upload/<name>, or a LeRobot dataset directory on disk"
+    robot_help = "sim model from the registry (so101, so100); default: the dataset's family"
+
+    p = sub.add_parser("inspect", help="validate and summarize a LeRobot dataset")
+    p.add_argument("repo_id", help=dataset_help)
     p.set_defaults(func=cmd_inspect)
 
     p = sub.add_parser("replay", help="replay one episode in sim and print the gap")
-    p.add_argument("repo_id")
+    p.add_argument("repo_id", help=dataset_help)
     p.add_argument("--episode", type=int, required=True)
     p.add_argument("--lock", default=None, help="use a saved lock's parameters")
+    p.add_argument("--robot", default=None, help=robot_help)
     p.set_defaults(func=cmd_replay)
 
     p = sub.add_parser("calibrate", help="fit sim parameters to a dataset and save a lock")
-    p.add_argument("repo_id")
+    p.add_argument("repo_id", help=dataset_help)
+    p.add_argument("--robot", default=None, help=robot_help)
     p.add_argument("--n-train", type=int, default=20)
     p.add_argument("--n-eval", type=int, default=10)
     p.add_argument("--max-evaluations", type=int, default=150)
@@ -1116,7 +1189,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_cross)
 
     p = sub.add_parser("drift", help="refit a lock on sliding episode windows to spot drift")
-    p.add_argument("repo_id")
+    p.add_argument("repo_id", help=dataset_help)
     p.add_argument("--lock", required=True, help="lock whose parameters seed each window")
     p.add_argument("--window", type=int, default=10, help="episodes per window")
     p.add_argument("--step", type=int, default=5, help="episodes between window starts")
@@ -1126,7 +1199,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
     p = sub.add_parser("dr", help="derive domain-randomization ranges from a lock's data")
-    p.add_argument("repo_id")
+    p.add_argument("repo_id", help=dataset_help)
     p.add_argument("--lock", default=None, help="lock to start from (default: dataset slug)")
     p.add_argument("--n-fits", type=int, default=8, help="bootstrap refits")
     p.add_argument("--n-train", type=int, default=12, help="episodes per refit")
@@ -1164,7 +1237,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
     p = sub.add_parser("events", help="detect contact events from the real-sim residual")
-    p.add_argument("repo_id")
+    p.add_argument("repo_id", help=dataset_help)
     p.add_argument("--episode", type=int, default=None)
     p.add_argument("--lock", default=None, help="use a saved lock's parameters")
     p.add_argument("--all", action="store_true", help="summarize across every episode")
@@ -1177,7 +1250,7 @@ def build_parser() -> argparse.ArgumentParser:
         "compensate",
         help="commands that make the calibrated sim track an episode's real trajectory (sim-only)",
     )
-    p.add_argument("repo_id")
+    p.add_argument("repo_id", help=dataset_help)
     p.add_argument("--episode", type=int, default=None, help="episode to compensate")
     p.add_argument("--lock", default=None, help="calibrated lock to compensate against")
     p.add_argument("--method", choices=["shift", "ilc"], default="ilc", help="which commands to save/return")
