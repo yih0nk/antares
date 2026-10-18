@@ -78,10 +78,12 @@ def cmd_replay(args: argparse.Namespace) -> int:
     from antares import server
 
     ds = server.get_dataset(args.repo_id)
-    params = None
+    params = cmap = None
     if args.lock:
-        params = server.params_from_dict(server.load_lock_dict(args.lock)["params"])
-    out = server.replay_episode(ds, args.episode, params)
+        lock = server.load_lock_dict(args.lock)
+        params = server.params_from_dict(lock["params"])
+        cmap = server.command_map_from_lock(lock)
+    out = server.replay_episode(ds, args.episode, params, cmap)
     gap = out["gap"]
     label = f"lock {args.lock}" if args.lock else "default params"
     print(f"{ds.repo_id} episode {out['episode']} ({len(out['real_q'])} frames, {label})")

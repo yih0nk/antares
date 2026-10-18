@@ -395,7 +395,7 @@ def test_replay_prints_table(monkeypatch, capsys):
         "gap": {"per_joint_deg": {j: 1.25 for j in JOINTS}, "overall_deg": 1.25},
     }
     monkeypatch.setattr(server, "_DATASETS", {"fake/robot": _dataset()})
-    monkeypatch.setattr(server, "replay_episode", lambda ds, ep, params=None: fake_out)
+    monkeypatch.setattr(server, "replay_episode", lambda ds, ep, params=None, cmap=None: fake_out)
     assert cli.main(["replay", "fake/robot", "--episode", "1"]) == 0
     out = capsys.readouterr().out
     assert "episode 1" in out and "default params" in out
@@ -646,3 +646,24 @@ def test_fleet_scan_wires_discover_and_scan(monkeypatch, capsys, tmp_path):
     assert "4.000 -> 1.500 deg (62% closed), latency 3 frames, kp 1200" in out
     assert "FAILED bob/x: boom" in out and "skipped carol/y" in out and "saved" in out
     assert "2 robots calibrated" in out  # final tables
+
+
+def test_replay_with_lock_passes_command_map(monkeypatch, tmp_path, capsys):
+    from antares import server
+
+    cmap = {"gain": [1.0] * 6, "bias": [0.0, -2.0, 1.0, 0.0, 0.0, 0.0]}
+    (tmp_path / "unit-a.lock.json").write_text(json.dumps({
+        "name": "unit-a", "params": {"kp": 100.0}, "command_map": cmap, "result": {},
+    }))
+    seen = {}
+
+    def fake_replay(ds, ep, params=None, command_map=None):
+        seen["cmap"] = command_map
+        return {"episode": ep, "real_q": [[0] * 6], "gap": {"per_joint_deg": {}, "overall_deg": 0.5}}
+
+    monkeypatch.setattr(server, "LOCK_DIR", tmp_path)
+    monkeypatch.setattr(server, "LOCK_SUFFIX", ".lock.json")
+    monkeypatch.setattr(server, "_DATASETS", {"fake/robot": _dataset()})
+    monkeypatch.setattr(server, "replay_episode", fake_replay)
+    assert cli.main(["replay", "fake/robot", "--episode", "1", "--lock", "unit-a"]) == 0
+    assert seen["cmap"].bias.tolist() == cmap["bias"]
