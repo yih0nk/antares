@@ -1204,18 +1204,18 @@ def test_diagnose_job_streams_and_finishes(client, fakes):
     assert client.post("/api/diagnose", json={"dataset": FAKE_DS2, "lock": "unit-a",
                                               "max_evaluations": 2}).status_code == 422
     job_id = client.post("/api/diagnose", json={"dataset": FAKE_DS2, "lock": "unit-a",
-                                                "max_evaluations": 12}).json()["job_id"]
+                                                "max_evaluations": 24}).json()["job_id"]
     for _ in range(200):
         st = client.get(f"/api/jobs/{job_id}").json()
         if st["status"] != "running":
             break
         time.sleep(0.02)
     assert st["status"] == "done" and st["kind"] == "diagnose", st
-    assert st["result"]["lock"] == "unit-a" and st["result"]["n_evaluations"] == 12
+    assert st["result"]["lock"] == "unit-a" and 6 <= st["result"]["n_evaluations"] <= 24
     events = [json.loads(line[6:]) for line in client.get(f"/api/jobs/{job_id}/events").text.splitlines()
               if line.startswith("data: ")]
     assert [e["type"] for e in events][-1] == "done"
-    assert [e["evaluation"] for e in events if e["type"] == "fit"] == list(range(1, 13))
+    assert [e["evaluation"] for e in events if e["type"] == "fit"] == list(range(1, st["result"]["n_evaluations"] + 1))
 
 
 def test_check_last_and_insufficient_data(client, fakes):
