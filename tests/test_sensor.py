@@ -108,3 +108,33 @@ def test_calibrate_with_sensor_stops_early():
     eps = make_episodes(3)
     out = calibrate_with_sensor(eps[:2], eps[2:], simulate=toy_simulate, max_evaluations=30, should_stop=lambda: True)
     assert out.result.n_evaluations == 0
+
+
+@pytest.mark.slow
+def test_fit_command_map_on_real_arm_recovers_offsets():
+    """MuJoCo arm, true dynamics known: the fit recovers a hidden command offset."""
+    from antares.sensor import sensor_simulate
+    from antares.sim import Arm
+
+    hidden_map = CommandMap(gain=[1.0, 0.97, 1.03, 1.0, 1.0, 1.0], bias=[2.0, -3.0, 2.0, -1.0, 1.0, 0.0])
+    params = SimParams(kp=200.0, latency_frames=2)
+    hidden = Arm(params=params, command_map=hidden_map)
+    rng = np.random.default_rng(0)
+    T = 90
+    t = np.arange(T) / FPS
+    eps = []
+    for i in range(2):
+        action = np.zeros((T, 6))
+        for j in range(5):
+            action[:, j] = 25 * np.sin(2 * np.pi * rng.uniform(0.2, 0.6) * t + rng.uniform(0, 6))
+        action[:, 5] = 40.0
+        q0 = hidden.unit_map.to_rad(hidden_map.apply(action[0]))
+        seed = Episode(i, FPS, JOINTS, hidden.unit_map.to_units(np.tile(q0, (T, 1))), action)
+        state = hidden.unit_map.to_units(hidden.replay(seed))
+        eps.append(Episode(i, FPS, JOINTS, state, action))
+
+    fit = fit_command_map(params, eps, sensor_simulate())
+    assert fit.rms_after < 0.1 * fit.rms_before
+    for j in FIT_JOINTS:
+        assert fit.command_map.bias[j] == pytest.approx(hidden_map.bias[j], abs=0.3)
+        assert fit.command_map.gain[j] == pytest.approx(hidden_map.gain[j], abs=0.01)
