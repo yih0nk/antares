@@ -835,6 +835,37 @@ def cmd_events(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_task(args: argparse.Namespace) -> int:
+    from antares import server
+    from antares.task import TaskDistribution
+
+    ds = server.get_dataset(args.repo_id)
+    name = args.name or server._slug(ds.repo_id)
+    td = TaskDistribution.from_episodes(list(ds.episodes), name=name, dataset=ds.repo_id, held_gap=args.held_gap)
+    s = td.summary()
+    print(
+        f"{ds.repo_id}: {s['episodes']} episodes, {s['grasps']} grasps, {s['held']} held, "
+        f"{s['missed']} closed on nothing"
+    )
+    rows = []
+    for label, st in (("pick", s["pick"]), ("place", s["place"])):
+        if st is None:
+            continue
+        cm = lambda v, f="+.1f": ", ".join(f"{100 * x:{f}}" for x in v)  # noqa: E731
+        rows.append([label, str(st["n"]), cm(st["mean"]), cm(st["std"], ".1f"), cm(st["min"]), cm(st["max"])])
+    if rows:
+        print("gripper tip in the base frame, cm (x, y, z):")
+        print(_table(["", "n", "mean", "std", "min", "max"], rows))
+    if s["jaw_deg_median"] is not None:
+        print(f"jaw stops at {s['jaw_deg_median']:.1f} deg on a held object (median)")
+    if s["missed_episodes"]:
+        print(f"episodes with a missed grasp: {_episode_list(s['missed_episodes'])}")
+    if not args.no_save:
+        path = td.save(args.out)
+        print(f"saved task {td.name} -> {path}")
+    return 0
+
+
 def _feasibility_line(f: dict) -> str:
     verdict = "ok" if f.get("ok") else f"FLAGGED {', '.join(f.get('flagged_joints', []))}"
     bits = [f"feasibility (sim-only): {verdict}"]
@@ -1669,6 +1700,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--min-frames", type=int, default=5, help="shortest event kept")
     p.set_defaults(func=cmd_events)
 
+
+    p = sub.add_parser("task", help="where objects were picked and placed, from the gripper and FK")
+    p.add_argument("repo_id")
+    p.add_argument("--name", default=None, help="task name (default: dataset slug)")
+    p.add_argument("--held-gap", type=float, default=5.0,
+                   help="jaw this far above the closed command (0..100 units) counts as holding")
+    p.add_argument("--out", default=None, help="output path (default: locks/<name>.task.json)")
+    p.add_argument("--no-save", action="store_true")
+    p.set_defaults(func=cmd_task)
 
     p = sub.add_parser(
         "compensate",

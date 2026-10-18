@@ -1339,3 +1339,20 @@ def test_calibrate_fit_sensor_prints_comparison(monkeypatch, capsys):
     assert seen["fit_sensor"] is True and seen["sensor_mode"] == "kinematic"
     assert "dynamics only" in out and "1.500" in out and "0.750" in out
     assert "sensor calibration" in out and "-2.500" in out and "0.9800" in out
+
+
+def test_task_prints_clouds_and_saves(monkeypatch, capsys, tmp_path):
+    from antares import server
+    from test_task import pick_place_episode
+
+    eps = (pick_place_episode(0), pick_place_episode(1, held_jaw=2.5), pick_place_episode(2))
+    ds = Dataset("fake/robot", "so101", 30.0, eps[0].joint_names, eps)
+    monkeypatch.setattr(server, "_DATASETS", {"fake/robot": ds})
+    out_path = tmp_path / "robot.task.json"
+    assert cli.main(["task", "fake/robot", "--out", str(out_path)]) == 0
+    out = capsys.readouterr().out
+    assert "3 grasps, 2 held, 1 closed on nothing" in out
+    assert "pick" in out and "place" in out
+    assert "episodes with a missed grasp: 1" in out
+    saved = json.loads(out_path.read_text())
+    assert saved["name"] == "robot" and saved["summary"]["held"] == 2
