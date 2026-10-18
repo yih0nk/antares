@@ -39,8 +39,8 @@ body {
 
 .shell {
   display: grid;
-  grid-template-columns: 1fr 320px;
-  grid-template-rows: 56px 1fr 190px;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  grid-template-rows: 56px 1fr 320px;
   grid-template-areas:
     "top top"
     "viewer panel"
@@ -100,6 +100,40 @@ body {
   font-size: 12px;
   color: var(--muted);
   pointer-events: none;
+}
+
+.panes {
+  display: flex;
+  height: 100%;
+}
+
+.pane {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+}
+
+.pane + .pane {
+  border-left: 1px solid var(--border);
+}
+
+.pane-label {
+  position: absolute;
+  left: 16px;
+  bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.view-controls {
+  position: absolute;
+  right: 16px;
+  top: 12px;
+  display: flex;
+  gap: 10px;
 }
 
 .legend span {
@@ -241,7 +275,8 @@ body {
 
 .timeline {
   grid-area: timeline;
-  padding: 12px 20px 14px;
+  /* Extra room below the residual strip so it never sits on the window edge. */
+  padding: 12px 20px 30px;
   border-top: 1px solid var(--border);
   display: flex;
   flex-direction: column;
@@ -267,10 +302,6 @@ body {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
-}
-
-.speeds {
-  margin-left: auto;
 }
 
 .speeds button,
@@ -314,13 +345,15 @@ body {
   flex: 1;
   width: 100%;
   min-height: 0;
+  background: var(--surface);
+  border-radius: 6px;
   cursor: ew-resize;
   touch-action: none;
 }
 
 .trace path {
   fill: none;
-  stroke-width: 1.5;
+  stroke-width: 2.25;
 }
 
 .trace-real {
@@ -338,7 +371,7 @@ body {
 
 .residual {
   width: 100%;
-  height: 36px;
+  height: 56px;
   flex: none;
   cursor: ew-resize;
   touch-action: none;
@@ -795,7 +828,7 @@ body {
 @media (max-width: 800px) {
   .shell {
     grid-template-columns: 1fr;
-    grid-template-rows: 56px 50vh 210px auto;
+    grid-template-rows: 56px 50vh 340px auto;
     grid-template-areas: "top" "viewer" "timeline" "panel";
     height: auto;
     min-height: 100%;

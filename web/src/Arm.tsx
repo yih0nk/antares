@@ -24,6 +24,8 @@ type Props = {
   // playhead is inside one, the material's emissive eases toward `warm`.
   // Only meaningful for a MeshStandardMaterial.
   hotSpans?: number[][] | null;
+  // Hidden by the viewer's real/sim toggle; keeps the trajectory loaded.
+  hidden?: boolean;
 };
 
 const WARM = new THREE.Color("#ff8a5b");
@@ -34,7 +36,7 @@ const toQuat = (q: number[]) => new THREE.Quaternion(q[1], q[2], q[3], q[0]);
 
 const easeOut = (t: number) => 1 - Math.pow(1 - t, 3);
 
-export function Arm({ geometry, poses, clip, playhead, material, snapSeconds = 0.6, hotSpans = null }: Props) {
+export function Arm({ geometry, poses, clip, playhead, material, snapSeconds = 0.6, hotSpans = null, hidden = false }: Props) {
   const files = useMemo(() => [...new Set(geometry.geoms.map((g) => g.mesh))], [geometry]);
   const loaded = useLoader(
     STLLoader,
@@ -123,7 +125,7 @@ export function Arm({ geometry, poses, clip, playhead, material, snapSeconds = 0
   }, [geometry]);
 
   return (
-    <group visible={!!poses}>
+    <group visible={!!poses && !hidden}>
       {geometry.bodies.map((body) => (
         <group key={body.id} ref={(el) => (bodyRefs.current[body.id] = el)}>
           {(geomsByBody.get(body.id) ?? []).map((g, i) => (
