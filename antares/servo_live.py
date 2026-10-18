@@ -23,78 +23,88 @@ from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-import mujoco
 import numpy as np
 
 from antares import servo_bench as sb
 
 
 class StepSim:
-    """One sg92r sim advanced one bench tick at a time (what
-    :meth:`antares.sim.Arm.rollout` does in a batch)."""
+    """One sg92r sim advanced one bench tick at a time, through the same
+    :class:`antares.closedloop.FrameStepper` path :meth:`antares.sim.Arm.rollout`
+    takes in a batch (substeps, clipping and the lock's deadband).
+
+    Locks fitted with a servo model (:attr:`antares.sim.SimParams.servo` other
+    than ``position``) are refused: the stepper has no per-substep servo
+    loop, so their ghost would not be the lock's model.
+    """
 
     def __init__(self, params, fps: float = sb.FPS):
         from antares.sim import Arm
 
+        if params.uses_servo_model:
+            raise ValueError(
+                f"the live view steps the position-actuator model only; this lock uses the "
+                f"{params.servo!r} servo model"
+            )
         self.arm = Arm(robot=sb.ROBOT)
         self.arm.apply(params)
+        self.fps = float(fps)
         self.latency = int(self.arm.params.per_joint("latency_frames", 1)[0])
-        frame_dt = 1.0 / fps
-        self.n_sub = max(1, int(round(frame_dt / self.arm._base_timestep)))
-        self.dt = frame_dt / self.n_sub
         self.pending: deque[float] = deque()
-        self.started = False
+        self.stepper = None
+
+    @property
+    def started(self) -> bool:
+        return self.stepper is not None
 
     def reset(self, q_deg: float, cmd_deg: float) -> None:
-        m, d = self.arm.model, self.arm.data
-        m.opt.timestep = self.dt
-        mujoco.mj_resetData(m, d)
-        d.qpos[self.arm.qpos_ids[0]] = np.radians(q_deg)
-        d.ctrl[self.arm.actuator_ids[0]] = np.radians(cmd_deg)
-        mujoco.mj_forward(m, d)
+        from antares.closedloop import FrameStepper
+
+        if self.stepper is not None:
+            self.stepper.close()
+        self.stepper = FrameStepper(self.arm, np.radians([q_deg]), self.fps)
         self.pending = deque([cmd_deg] * self.latency)
-        self.started = True
 
     def step(self, cmd_deg: float) -> float:
         """Send ``cmd_deg`` and advance one tick; returns the shaft angle (deg)."""
-        m, d = self.arm.model, self.arm.data
+        if self.stepper is None:
+            raise RuntimeError("reset() before step()")
         self.pending.append(cmd_deg)
         applied = self.pending.popleft()
-        lo, hi = self.arm.ctrl_range
-        d.ctrl[self.arm.actuator_ids[0]] = float(np.clip(np.radians(applied), lo[0], hi[0]))
-        mujoco.mj_step(m, d, self.n_sub)
-        return float(np.degrees(d.qpos[self.arm.qpos_ids[0]]))
+        return float(np.degrees(self.stepper.step(np.radians([applied]))[0]))
 
 
 def serial_ticks(port: str, servo: str, start: bool = True) -> Iterator[tuple[float, float, float]]:
     """``(t s, cmd deg, raw counts)`` from the bench sketch over USB.
 
-    With ``start`` it sends ``g`` and restarts the program after each run,
-    so the stick keeps moving for as long as the page is up.
+    The port is opened here, in the caller's thread, so a missing board or
+    pyserial fails before anything is served. With ``start`` it sends ``g``
+    and restarts the program after each run, so the stick keeps moving for
+    as long as the page is up.
     """
+    from antares.servo_serial import BenchSerialError, open_port
+
     try:
-        import serial
-    except ImportError:
-        raise SystemExit("error: live mode needs pyserial: pip install pyserial") from None
-    with serial.Serial(port, 115200, timeout=5) as ser:
-        time.sleep(2.0)  # opening the port resets an Uno
-        ser.reset_input_buffer()
-        col = None
+        ser = open_port(port)
+    except BenchSerialError as e:
+        raise SystemExit(f"error: {e}") from None
+    return _serial_ticks(ser, servo, start)
+
+
+def _serial_ticks(ser, servo: str, start: bool) -> Iterator[tuple[float, float, float]]:
+    from antares.servo_serial import BenchSerialError, run_lines
+
+    with ser:
         t_base = 0.0
         while True:
-            if start:
-                ser.write(b"g")
+            col = None
             last_t = 0.0
-            while True:
-                line = ser.readline().decode(errors="replace").strip()
-                if not line:
-                    raise SystemExit("error: no data from the Arduino for 5 s; is the sketch flashed?")
-                if line.startswith("#done"):
-                    break
-                if line.startswith("#"):
-                    continue
+            for line in run_lines(ser, start=start):
                 parts = line.split(",")
                 if parts[0] == "t_ms":
+                    if f"raw_{servo}" not in parts:
+                        have = ", ".join(p.removeprefix("raw_") for p in parts if p.startswith("raw_"))
+                        raise BenchSerialError(f"the sketch logs servo(s) {have}, not {servo}")
                     col = parts.index(f"raw_{servo}")
                     continue
                 if col is None or len(parts) <= col:
@@ -107,10 +117,24 @@ def serial_ticks(port: str, servo: str, start: bool = True) -> Iterator[tuple[fl
 
 
 def csv_ticks(path: str | Path, servo: str, loop: bool = True) -> Iterator[tuple[float, float, float]]:
-    """A recorded run played back at real speed (for rehearsing without hardware)."""
-    run = sb.read_run(path)
+    """A recorded run played back at real speed (for rehearsing without hardware).
+
+    The CSV is read and checked here, in the caller's thread; only the
+    playback is lazy.
+    """
+    path = Path(path)
+    if not path.is_file():
+        raise SystemExit(f"error: no such replay CSV: {path}")
+    try:
+        run = sb.read_run(path)
+    except ValueError as e:
+        raise SystemExit(f"error: {e}") from None
     if servo not in run.raw:
-        raise SystemExit(f"error: {path} has no raw_{servo} column")
+        raise SystemExit(f"error: {path} has no raw_{servo} column (has {', '.join(run.raw)})")
+    return _replay(run, servo, loop)
+
+
+def _replay(run: sb.Run, servo: str, loop: bool) -> Iterator[tuple[float, float, float]]:
     t_base = 0.0
     while True:
         t0 = time.monotonic()
@@ -124,11 +148,42 @@ def csv_ticks(path: str | Path, servo: str, loop: bool = True) -> Iterator[tuple
             return
 
 
-def pot_for_lock(lock, dataset: str | None = None) -> sb.PotFit:
-    """The counts -> degrees line saved with the dataset the lock was fitted on."""
-    path = Path(dataset or lock.dataset) / "meta" / "info.json"
-    if not path.is_file():
-        raise SystemExit(f"error: no {path}; pass --dataset <the servo's imported dataset> for its pot conversion")
+def dataset_candidates(lock, dataset: str | None = None, lock_path: str | Path | None = None) -> list[Path]:
+    """Where the lock's dataset may be, in the order tried.
+
+    ``calibrate`` records the dataset path as typed, relative to where it
+    ran, and saves the lock under ``locks/`` there; so a relative
+    ``lock.dataset`` is tried against the lock file's directory's parent
+    first, then against the current directory.
+    """
+    if dataset:
+        return [Path(dataset)]
+    ds = Path(lock.dataset)
+    if ds.is_absolute():
+        return [ds]
+    out = []
+    if lock_path is not None:
+        out.append(Path(lock_path).resolve().parent.parent / ds)
+    cwd = Path.cwd() / ds
+    if cwd not in out:
+        out.append(cwd)
+    return out
+
+
+def pot_for_lock(lock, dataset: str | None = None, lock_path: str | Path | None = None) -> sb.PotFit:
+    """The counts -> degrees line saved with the dataset the lock was fitted on.
+
+    ``lock_path`` (where the lock file is) lets a relative ``lock.dataset``
+    resolve from any directory; see :func:`dataset_candidates`.
+    """
+    candidates = dataset_candidates(lock, dataset, lock_path)
+    for root in candidates:
+        path = root / "meta" / "info.json"
+        if path.is_file():
+            break
+    else:
+        tried = " or ".join(str(c / "meta" / "info.json") for c in candidates)
+        raise SystemExit(f"error: no {tried}; pass --dataset <the servo's imported dataset> for its pot conversion")
     bench = json.loads(path.read_text()).get("antares_bench")
     if not bench:
         raise SystemExit(f"error: {path} was not written by `antares bench import`")
@@ -194,13 +249,31 @@ def run_ticks(ticks, pot: sb.PotFit, lock_params, default_params, out: Broadcast
 PAGE = Path(__file__).resolve().parent / "assets" / "sg92r" / "live.html"
 
 
-def serve(ticks, pot: sb.PotFit, lock, host: str = "127.0.0.1", port: int = 8010) -> None:
+def live_info(lock) -> dict:
+    """What ``/info`` reports: the lock's name and held-out score (``None``
+    when the lock has none or it is not finite, so the JSON stays valid)."""
+    from antares.check import _finite_or_none
+
+    return {"lock": lock.name, "ticks": 0, "lock_score": _finite_or_none(getattr(lock.result, "eval_score", None))}
+
+
+def serve(ticks, pot: sb.PotFit, lock, host: str = "127.0.0.1", port: int = 8010) -> int:
+    """Serve the page until ctrl-c, or until the ticks end.
+
+    The ticks are consumed on a worker thread; whatever stops it (the
+    stream ending, the Arduino going quiet, a bad line) also stops the
+    server, so the page never says "live" over a stick that stopped. A
+    failure is raised as ``SystemExit`` with its message; a stream that
+    simply ended returns 0. ``port=0`` picks a free port.
+    """
     from antares.sim import Arm
 
     default_params = Arm(robot=sb.ROBOT).default_params()
     out = Broadcaster()
-    info = {"lock": lock.name, "ticks": 0, "lock_score": getattr(lock.result, "eval_score", None)}
-    worker = threading.Thread(target=run_ticks, args=(ticks, pot, lock.params, default_params, out, info), daemon=True)
+    info = live_info(lock)
+    # Build both sims here so a lock the stepper cannot replay fails before serving.
+    StepSim(lock.params)
+    failure: list[BaseException] = []
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a) -> None:  # quiet
@@ -243,14 +316,34 @@ def serve(ticks, pot: sb.PotFit, lock, host: str = "127.0.0.1", port: int = 8010
 
     server = ThreadingHTTPServer((host, port), Handler)
     server.daemon_threads = True
+
+    def work() -> None:
+        try:
+            run_ticks(ticks, pot, lock.params, default_params, out, info)
+        except BaseException as e:  # noqa: BLE001 - whatever stopped the ticks stops the page
+            failure.append(e)
+        finally:
+            server.shutdown()  # returns once serve_forever() has seen the request
+
+    worker = threading.Thread(target=work, daemon=True)
     worker.start()
-    print(f"live view of lock {lock.name}: http://{host}:{port}  (ctrl-c to stop)")
+    host, port = server.server_address[:2]
+    print(f"live view of lock {lock.name}: http://{host}:{port}  (ctrl-c to stop)", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        pass
+        return 0
     finally:
         server.server_close()
+    if failure:
+        e = failure[0]
+        detail = e.code if isinstance(e, SystemExit) and isinstance(e.code, str) else f"{type(e).__name__}: {e}"
+        raise SystemExit(f"error: the ticks stopped after {info['ticks']} tick(s): {detail}")
+    print(f"the ticks ended after {info['ticks']} tick(s); stopping")
+    return 0
 
 
-__all__ = ["Broadcaster", "StepSim", "csv_ticks", "pot_for_lock", "run_ticks", "serial_ticks", "serve"]
+__all__ = [
+    "Broadcaster", "StepSim", "csv_ticks", "dataset_candidates", "live_info", "pot_for_lock", "run_ticks",
+    "serial_ticks", "serve",
+]

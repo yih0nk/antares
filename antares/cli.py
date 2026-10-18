@@ -3071,11 +3071,61 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", default=None, help="also save the estimate as JSON here")
     p.set_defaults(func=cmd_payload)
 
-    from antares import servo_bench
-
-    servo_bench.add_parser(sub)
+    _add_bench_parser(sub)
 
     return parser
+
+
+def cmd_bench(args: argparse.Namespace) -> int:
+    from antares import servo_bench
+
+    return servo_bench.COMMANDS[args.bench_cmd](args)
+
+
+def _add_bench_parser(sub) -> None:
+    """``antares bench``: a hobby servo on an Arduino as a one-joint robot
+    (:mod:`antares.servo_bench`). Registered here, without importing that
+    module, so ``antares --help`` stays light."""
+    p = sub.add_parser("bench", help="a hobby servo on an Arduino as a one-joint robot (import, simulate, demo, live)")
+    bsub = p.add_subparsers(dest="bench_cmd", required=True)
+
+    b = bsub.add_parser("import", help="turn bench CSVs (bench/capture.py) into a dataset for one servo")
+    b.add_argument("csv", nargs="+", help="runs of the same servo")
+    b.add_argument("--servo", default="a", help="which raw_<servo> column (default a)")
+    b.add_argument("--out", required=True, help="dataset directory to write")
+    b.add_argument("--episode-seconds", type=float, default=5.0, help="episode length (default 5 s)")
+    b.set_defaults(func=cmd_bench)
+
+    b = bsub.add_parser("simulate", help="write the CSV a servo with given parameters would log (no hardware)")
+    b.add_argument("out")
+    b.add_argument("--servo", default="a")
+    b.add_argument("--set", action="append", default=[], metavar="PARAM=VALUE",
+                   help="change a parameter from the sg92r model's defaults, e.g. --set armature=0.0005")
+    b.add_argument("--pot-scale", type=float, default=0.28, help="degrees per pot count")
+    b.add_argument("--pot-offset", type=float, default=-40.0, help="degrees at zero counts")
+    b.add_argument("--noise", type=float, default=1.0, help="pot noise, counts (std)")
+    b.add_argument("--seed", type=int, default=0)
+    b.set_defaults(func=cmd_bench)
+
+    b = bsub.add_parser("demo", help="every servo's recording through every lock, then the payload check")
+    b.add_argument("--servo", action="append", required=True, metavar="NAME=DATASET",
+                   help="a servo's held-out recording (e.g. a=datasets/servo_a_test); repeat per servo")
+    b.add_argument("--lock", action="append", required=True, metavar="NAME=LOCK",
+                   help="that servo's lock (name or path); same NAME as --servo")
+    b.add_argument("--payload", metavar="NAME=DATASET", help="a recording of servo NAME with the coin taped on")
+    b.add_argument("--fresh", metavar="DATASET", help="a recording of the same servo without the coin, for contrast")
+    b.add_argument("--ratio", type=float, default=1.5, help="drift limit as a multiple of the lock's held-out score")
+    b.set_defaults(func=cmd_bench)
+
+    b = bsub.add_parser("live", help="watch the real stick and its sim ghosts move together in the browser")
+    b.add_argument("--lock", required=True, help="the servo's lock (name or path)")
+    b.add_argument("--servo", default="a", help="which raw_<servo> column to follow (default a)")
+    b.add_argument("--port", help="the Arduino's serial port (default: the first one found)")
+    b.add_argument("--replay", metavar="CSV", help="play a recorded run at real speed instead of the Arduino")
+    b.add_argument("--dataset", help="dataset whose pot conversion to use (default: the one the lock was fitted on)")
+    b.add_argument("--host", default="127.0.0.1")
+    b.add_argument("--http-port", type=int, default=8010)
+    b.set_defaults(func=cmd_bench)
 
 
 def main(argv: list[str] | None = None) -> int:
