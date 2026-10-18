@@ -552,3 +552,28 @@ def test_model_geometry_poses_place_raw_stl_files(arm):
         got = place(out["pos"], out["quat"], _read_binary_stl(MESH_DIR / out["mesh"]))
         np.testing.assert_allclose(got.min(0), want.min(0), atol=1e-6)
         np.testing.assert_allclose(got.max(0), want.max(0), atol=1e-6)
+
+
+# -- CommandMap ---------------------------------------------------------------
+
+
+def test_command_map_identity_and_apply():
+    from antares.sim import CommandMap
+
+    ident = CommandMap.identity()
+    assert ident.is_identity()
+    u = np.arange(12.0).reshape(2, 6)
+    np.testing.assert_array_equal(ident.apply(u), u)
+    cm = CommandMap(gain=np.full(6, 2.0), bias=np.arange(6.0))
+    assert not cm.is_identity()
+    np.testing.assert_allclose(cm.apply(u), 2.0 * u + np.arange(6.0))
+
+
+def test_command_map_dict_roundtrip():
+    from antares.sim import CommandMap
+
+    cm = CommandMap(gain=[1.0, 0.9, 1.1, 1.0, 1.0, 1.0], bias=[0.0, -3.0, 2.5, 0.0, 1.0, 0.0])
+    back = CommandMap.from_dict(cm.to_dict())
+    np.testing.assert_array_equal(back.gain, cm.gain)
+    np.testing.assert_array_equal(back.bias, cm.bias)
+    assert CommandMap.from_dict(None).is_identity()

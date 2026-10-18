@@ -225,6 +225,48 @@ class UnitMap:
         )
 
 
+@dataclass(frozen=True, eq=False)
+class CommandMap:
+    """Per-joint correction applied to commands before :class:`UnitMap`:
+    ``u' = gain*u + bias``, in dataset units.
+
+    In teleoperated LeRobot data the commands are the leader arm's readings
+    in the leader's own calibration, while the state is the follower's in
+    its own, so the two are normalized separately and need not agree. This
+    map captures that per-arm disagreement; identity is the old behaviour.
+    """
+
+    gain: np.ndarray  # (6,)
+    bias: np.ndarray  # (6,) dataset units
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "gain", np.asarray(self.gain, dtype=np.float64))
+        object.__setattr__(self, "bias", np.asarray(self.bias, dtype=np.float64))
+        if self.gain.shape != self.bias.shape:
+            raise ValueError("gain and bias must have the same shape")
+
+    @classmethod
+    def identity(cls, n: int = len(JOINTS)) -> CommandMap:
+        return cls(gain=np.ones(n), bias=np.zeros(n))
+
+    def is_identity(self) -> bool:
+        return bool(np.all(self.gain == 1.0) and np.all(self.bias == 0.0))
+
+    def apply(self, u: np.ndarray) -> np.ndarray:
+        """Correct raw command units. (6,) or (T,6)."""
+        return np.asarray(u, dtype=np.float64) * self.gain + self.bias
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"gain": self.gain.tolist(), "bias": self.bias.tolist()}
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any] | None) -> CommandMap:
+        """``None`` (e.g. a lock saved before command maps existed) is identity."""
+        if d is None:
+            return cls.identity()
+        return cls(gain=np.asarray(d["gain"], dtype=np.float64), bias=np.asarray(d["bias"], dtype=np.float64))
+
+
 def load_model(path: str | Path = MODEL_PATH) -> mujoco.MjModel:
     return mujoco.MjModel.from_xml_path(str(path))
 
