@@ -298,6 +298,7 @@ class Arm:
         unit_map: UnitMap | None = None,
         contacts: bool = False,
         model_path: str | Path | None = None,
+        command_map: CommandMap | None = None,
     ):
         self.model_path = Path(model_path) if model_path is not None else MODEL_PATH
         self.model = load_model(self.model_path)
@@ -306,6 +307,7 @@ class Arm:
         self.data = mujoco.MjData(self.model)
         self._fk_data = mujoco.MjData(self.model)
         self.unit_map = unit_map if unit_map is not None else UnitMap.from_model(self.model)
+        self.command_map = command_map if command_map is not None else CommandMap.identity()
         self.body_names: list[str] = [
             mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY, i) for i in range(self.model.nbody)
         ]
@@ -392,16 +394,17 @@ class Arm:
         """Drive the sim with the episode's commands; return sim joint angles (T,6) rad.
 
         Frame 0 is the real initial state (the sim starts there, at rest).
-        For each later frame the command from ``latency_frames`` frames ago
-        is applied (per joint, when latency is per joint) and the physics is
-        advanced one dataset frame. This is :meth:`rollout` with the episode's
-        own commands and initial state.
+        Commands pass through ``command_map`` first. For each later frame the
+        command from ``latency_frames`` frames ago is applied (per joint, when
+        latency is per joint) and the physics is advanced one dataset frame.
+        This is :meth:`rollout` with the episode's own commands and initial
+        state.
         """
         fps = float(fps if fps is not None else episode.fps)
         nq = self.model.nq
         if episode.state.shape[1] != nq or episode.action.shape[1] != nq:
             raise ValueError("episode must have 6 joints")
-        ctrl = self.unit_map.to_rad(episode.action)
+        ctrl = self.unit_map.to_rad(self.command_map.apply(episode.action))
         q0 = self.unit_map.to_rad(episode.state[0])
         return self.rollout(ctrl, q0, fps)
 

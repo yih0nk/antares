@@ -577,3 +577,17 @@ def test_command_map_dict_roundtrip():
     np.testing.assert_array_equal(back.gain, cm.gain)
     np.testing.assert_array_equal(back.bias, cm.bias)
     assert CommandMap.from_dict(None).is_identity()
+
+
+def test_replay_applies_command_map(arm):
+    from antares.sim import CommandMap
+
+    ep = constant_episode([0.0] * 6, [0.0, 10.0, 0.0, 0.0, 0.0, 50.0], 40)
+    base = arm.replay(ep)
+    shifted = Arm(command_map=CommandMap(gain=np.ones(6), bias=[0.0, 5.0, 0.0, 0.0, 0.0, 0.0]))
+    out = shifted.replay(ep)
+    same = Arm().replay(constant_episode([0.0] * 6, [0.0, 15.0, 0.0, 0.0, 0.0, 50.0], 40))
+    np.testing.assert_allclose(out, same, atol=1e-9)
+    assert not np.allclose(out[:, 1], base[:, 1])
+    # the measured state is untouched by the command map
+    np.testing.assert_array_equal(shifted.real_q(ep), arm.real_q(ep))
