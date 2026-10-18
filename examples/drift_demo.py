@@ -53,7 +53,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--lock", default=str(ROOT / "locks" / "svla_so101_pickplace.lock.json"))
     ap.add_argument("--out", default=None, help="write the per-week reports here as JSON")
     args = ap.parse_args(argv)
-    n_eps, n_frames, evals = (6, 150, 90) if args.quick else (10, 300, 240)
+    n_eps, n_frames, evals = (6, 150, 90) if args.quick else (10, 300, 300)
 
     lock = RobotLock.load(args.lock)
     arm, simulate = Arm(), default_simulate()

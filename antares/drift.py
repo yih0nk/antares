@@ -39,7 +39,6 @@ import math
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +46,7 @@ import numpy as np
 
 from antares import __version__
 from antares.data import Episode
+from antares.lock import now_iso
 
 DRIFT_DIR = Path("locks")
 DRIFT_SUFFIX = ".drift.json"
@@ -73,10 +73,6 @@ def _json_float(v: float) -> float | None:
 
 def _parse_float(v: Any) -> float:
     return float("nan") if v is None else float(v)
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _sim_params_from_dict(d: dict) -> Any:
@@ -319,7 +315,7 @@ class DriftScan:
     n_windows_planned: int
     cancelled: bool = False
     elapsed_s: float = 0.0
-    created_at: str = field(default_factory=_now_iso)
+    created_at: str = field(default_factory=now_iso)
     antares_version: str = __version__
     #: Parameters the lock pins (see :func:`antares.lock.pinned_params`); only
     #: these are announced as drifting. None (scans from before seed spread

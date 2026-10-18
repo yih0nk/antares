@@ -15,7 +15,7 @@ import re
 import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, ClassVar, Self
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -52,12 +52,45 @@ def dataset_digest(episodes: Sequence[Episode]) -> str:
     return h.hexdigest()
 
 
-def _now_iso() -> str:
+def now_iso() -> str:
+    """The current UTC time as ``YYYY-MM-DDTHH:MM:SSZ``, the ``created_at`` stamp of every saved record."""
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+class JsonFile:
+    """``default_path``/``save``/``load`` for a record with ``to_dict``/``from_dict``.
+
+    The file is ``<dir>/<file_stem><FILE_SUFFIX>`` (``FILE_DIR`` unless a
+    directory is passed), written as indented JSON with sorted keys and a
+    trailing newline. ``file_stem`` is the record's ``name``; override it
+    to slug or otherwise derive the file name.
+    """
+
+    FILE_SUFFIX: ClassVar[str] = ".json"
+    FILE_DIR: ClassVar[Path] = LOCK_DIR
+
+    @property
+    def file_stem(self) -> str:
+        return self.name  # type: ignore[attr-defined]
+
+    def default_path(self, lock_dir: Path | None = None) -> Path:
+        return Path(lock_dir if lock_dir is not None else self.FILE_DIR) / f"{self.file_stem}{self.FILE_SUFFIX}"
+
+    def save(self, path: Path | None = None) -> Path:
+        path = Path(path) if path is not None else self.default_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(self.to_dict(), indent=2, sort_keys=True) + "\n")  # type: ignore[attr-defined]
+        return path
+
+    @classmethod
+    def load(cls, path: Path | str) -> Self:
+        return cls.from_dict(json.loads(Path(path).read_text()))  # type: ignore[attr-defined]
+
+
 @dataclass(frozen=True)
-class RobotLock:
+class RobotLock(JsonFile):
+    FILE_SUFFIX: ClassVar[str] = LOCK_SUFFIX
+
     name: str
     dataset: str
     robot_type: str
@@ -74,6 +107,9 @@ class RobotLock:
     # Fitted fixed cameras by short name (antares.camera.CameraFit.to_dict());
     # locks saved before camera fits existed load with none.
     cameras: dict[str, Any] = field(default_factory=dict)
+    #: The follower's LeRobot motor calibration the fit used for its unit map
+    #: (antares.lerobot_calib.calibration_record()); None = the model's map.
+    calibration: dict[str, Any] | None = None
 
     @classmethod
     def create(
@@ -86,6 +122,7 @@ class RobotLock:
         command_map: dict[str, Any] | None = None,
         dynamics_only: dict[str, Any] | None = None,
         robot: str = DEFAULT_ROBOT,
+        calibration: dict[str, Any] | None = None,
     ) -> "RobotLock":
         """Build a lock for a finished calibration, stamping time and version."""
         return cls(
@@ -95,11 +132,12 @@ class RobotLock:
             data_sha256=dataset_digest(train_episodes),
             params=result.params,
             result=result,
-            created_at=_now_iso(),
+            created_at=now_iso(),
             antares_version=__version__,
             command_map=command_map,
             dynamics_only=dynamics_only,
             robot=robot,
+            calibration=calibration,
         )
 
     def to_dict(self) -> dict:
@@ -120,6 +158,8 @@ class RobotLock:
             d["dynamics_only"] = self.dynamics_only
         if self.cameras:
             d["cameras"] = dict(self.cameras)
+        if self.calibration is not None:
+            d["calibration"] = self.calibration
         return d
 
     def replace(self, **changes: Any) -> "RobotLock":
@@ -145,20 +185,8 @@ class RobotLock:
             dynamics_only=d.get("dynamics_only"),
             robot=str(d.get("robot") or DEFAULT_ROBOT),
             cameras=dict(d.get("cameras") or {}),
+            calibration=d.get("calibration"),
         )
-
-    def default_path(self, lock_dir: Path = LOCK_DIR) -> Path:
-        return Path(lock_dir) / f"{self.name}{LOCK_SUFFIX}"
-
-    def save(self, path: Path | None = None) -> Path:
-        path = Path(path) if path is not None else self.default_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(self.to_dict(), indent=2, sort_keys=True) + "\n")
-        return path
-
-    @classmethod
-    def load(cls, path: Path | str) -> "RobotLock":
-        return cls.from_dict(json.loads(Path(path).read_text()))
 
 
 #: Parameters taken as physical when a lock carries no seed spread. One frame

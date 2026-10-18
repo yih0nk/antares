@@ -16,13 +16,10 @@ and saves them next to the lock as ``locks/<name>.dr.json``.
 
 from __future__ import annotations
 
-import json
 import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 
@@ -38,7 +35,7 @@ from antares.calibrate import (
     default_simulate,
 )
 from antares.data import Episode
-from antares.lock import LOCK_DIR, slug
+from antares.lock import JsonFile, now_iso, slug
 
 DR_SUFFIX = ".dr.json"
 
@@ -199,10 +196,6 @@ class ParamRange:
         )
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
 def _range_from_values(name: str, nominal: float, values: Sequence[float], percentiles) -> ParamRange:
     scale = SPACE[name][2]
     vals = np.asarray(values, dtype=np.float64)
@@ -217,8 +210,10 @@ def _range_from_values(name: str, nominal: float, values: Sequence[float], perce
 
 
 @dataclass(frozen=True)
-class DRRanges:
+class DRRanges(JsonFile):
     """Per-parameter randomization ranges for one robot, with provenance."""
+
+    FILE_SUFFIX: ClassVar[str] = DR_SUFFIX
 
     name: str
     nominal: SimParams
@@ -232,7 +227,7 @@ class DRRanges:
     percentiles: tuple[float, float] = PERCENTILES
     fit_train_scores: tuple[float, ...] = ()
     fit_episodes: tuple[tuple[int, ...], ...] = ()
-    created_at: str = field(default_factory=_now_iso)
+    created_at: str = field(default_factory=now_iso)
     antares_version: str = __version__
 
     @classmethod
@@ -318,19 +313,6 @@ class DRRanges:
             created_at=str(d.get("created_at", "")),
             antares_version=str(d.get("antares_version", "")),
         )
-
-    def default_path(self, lock_dir: Path = LOCK_DIR) -> Path:
-        return Path(lock_dir) / f"{self.name}{DR_SUFFIX}"
-
-    def save(self, path: Path | None = None) -> Path:
-        path = Path(path) if path is not None else self.default_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(self.to_dict(), indent=2, sort_keys=True) + "\n")
-        return path
-
-    @classmethod
-    def load(cls, path: Path | str) -> "DRRanges":
-        return cls.from_dict(json.loads(Path(path).read_text()))
 
 
 def _json_float(v: float) -> float | None:

@@ -185,6 +185,90 @@ export type CrossMatrix = {
   per_joint: Record<string, number>[][];
 };
 
+// One `antares check` run as the history store records it; `verdict` is the
+// gate's outcome and `score` the fresh episodes' RMS error against `limit`.
+export type CheckVerdict = "ok" | "drifted" | "insufficient_data";
+
+export type HistoryEntry = {
+  at: string;
+  lock: string;
+  dataset: string;
+  verdict: CheckVerdict;
+  passed: boolean;
+  score: number | null;
+  reference: number | null;
+  limit: number | null;
+  n_episodes: number;
+  episodes: number[];
+  worst_joint: string | null;
+  per_joint: Record<string, number | null>;
+  antares_version: string;
+};
+
+// Least-squares line through a lock's check scores over time.
+export type HistoryTrend = {
+  n: number;
+  first: string | null;
+  last: string | null;
+  slope_deg_per_day: number | null;
+  r2: number | null;
+  latest_verdict: CheckVerdict | string | null;
+  n_drifted: number;
+};
+
+// GET /api/history/{lock}: every check of one lock, oldest first.
+export type LockHistory = {
+  lock: string;
+  entries: HistoryEntry[];
+  trend: HistoryTrend | null;
+};
+
+// GET /api/dashboard: one row per saved lock, with what the fleet view needs
+// joined in (drift scan, fleet membership, latest check and trend).
+export type DashboardRobot = {
+  name: string;
+  dataset: string | null;
+  robot_type: string | null;
+  robot: string;
+  created_at: string | null;
+  space: "shared" | "per_joint" | string;
+  baseline_eval_score: number | null;
+  eval_score: number | null;
+  improvement: number | null;
+  per_joint_after: Record<string, number | null> | null;
+  worst_joint: string | null;
+  worst_joint_deg: number | null;
+  latency_frames: ParamValue | null;
+  // The dataset's frame rate when the server knows it (fleet report or a
+  // loaded dataset); turns latency frames into milliseconds.
+  fps: number | null;
+  drift: { exists: boolean; verdict: string | null };
+  in_fleet: boolean;
+  // Parameters a seeded calibration held fixed, when the lock records them.
+  pinned: string[] | null;
+  history: { latest: HistoryEntry | null; trend: HistoryTrend | null };
+  // Registry (locks/registry.json): the physical robot this lock belongs to
+  // and its place in that robot's lineage; all null when unregistered.
+  robot_id: string | null;
+  is_active: boolean | null;
+  version: number | null;
+  n_versions: number | null;
+};
+
+export type FleetSummary = {
+  n_robots: number;
+  median_improvement?: number | null;
+  created_at?: string | null;
+  locks?: string[];
+  [k: string]: unknown;
+};
+
+export type Dashboard = {
+  robots: DashboardRobot[];
+  fleet: FleetSummary | null;
+  generated_at: string;
+};
+
 export type JobEvent =
   | ProgressEvent
   | { type: "done"; lock: { name: string; params: Params }; result: CalibrationResult }
@@ -389,6 +473,13 @@ export const api = {
     fetch(
       `/api/cross?${q({ datasets: datasets.join(","), locks: locks.join(","), n_train: nTrain, n_eval: nEval })}`,
     ).then((r) => json<CrossMatrix>(r)),
+  dashboard: () => fetch("/api/dashboard").then((r) => json<Dashboard>(r)),
+  // A lock that was never checked (or a server without the history store)
+  // answers 404; the fleet view shows that as an empty history.
+  history: (lock: string) =>
+    fetch(`/api/history/${encodeURIComponent(lock)}`).then((r) =>
+      r.status === 404 ? ({ lock, entries: [], trend: null } satisfies LockHistory) : json<LockHistory>(r),
+    ),
   // Zip of the lock as a standalone MJCF (model, sidecar, scene, meshes).
   exportZipUrl: (lock: string) => `/api/locks/${encodeURIComponent(lock)}/export.zip`,
   // ---- cameras ----

@@ -8,6 +8,7 @@ import time
 import sys
 import types
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -1204,18 +1205,18 @@ def test_diagnose_job_streams_and_finishes(client, fakes):
     assert client.post("/api/diagnose", json={"dataset": FAKE_DS2, "lock": "unit-a",
                                               "max_evaluations": 2}).status_code == 422
     job_id = client.post("/api/diagnose", json={"dataset": FAKE_DS2, "lock": "unit-a",
-                                                "max_evaluations": 12}).json()["job_id"]
+                                                "max_evaluations": 24}).json()["job_id"]
     for _ in range(200):
         st = client.get(f"/api/jobs/{job_id}").json()
         if st["status"] != "running":
             break
         time.sleep(0.02)
     assert st["status"] == "done" and st["kind"] == "diagnose", st
-    assert st["result"]["lock"] == "unit-a" and st["result"]["n_evaluations"] == 12
+    assert st["result"]["lock"] == "unit-a" and 6 <= st["result"]["n_evaluations"] <= 24
     events = [json.loads(line[6:]) for line in client.get(f"/api/jobs/{job_id}/events").text.splitlines()
               if line.startswith("data: ")]
     assert [e["type"] for e in events][-1] == "done"
-    assert [e["evaluation"] for e in events if e["type"] == "fit"] == list(range(1, 13))
+    assert [e["evaluation"] for e in events if e["type"] == "fit"] == list(range(1, st["result"]["n_evaluations"] + 1))
 
 
 def test_check_last_and_insufficient_data(client, fakes):
@@ -1678,3 +1679,423 @@ def test_history_get_skips_a_corrupt_line(client, fakes):
     with pytest.warns(UserWarning, match="corrupt history line"):
         d = client.get("/api/history/unit-a").json()
     assert d["trend"]["n"] == 1 and len(d["entries"]) == 1
+
+
+# --------------------------------------------------------------------------
+# fleet dashboard
+# --------------------------------------------------------------------------
+
+COMMITTED_LOCK = Path(__file__).resolve().parents[1] / "locks" / "svla_so101_pickplace.lock.json"
+
+
+def _copy_lock(lock_dir: Path, name: str, **changes) -> dict:
+    """The committed demo lock under a new name (and optional edits)."""
+    body = json.loads(COMMITTED_LOCK.read_text())
+    body["name"] = name
+    body.update(changes)
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    (lock_dir / f"{name}{LOCK_SUFFIX}").write_text(json.dumps(body))
+    return body
+
+
+def test_dashboard_aggregates_locks(client, monkeypatch, tmp_path):
+    lock_dir = tmp_path / "locks"
+    monkeypatch.setattr(server, "LOCK_DIR", lock_dir)
+    monkeypatch.setattr(server, "LOCK_SUFFIX", LOCK_SUFFIX)
+    monkeypatch.setattr(server, "FLEET_DIR", lock_dir / "fleet")
+    monkeypatch.setattr(server, "_DATASETS", {})
+    monkeypatch.setitem(sys.modules, "antares.history", None)  # import -> ImportError
+
+    # no lock dir at all: an empty dashboard, not an error
+    r = client.get("/api/dashboard")
+    assert r.status_code == 200
+    assert r.json()["robots"] == [] and r.json()["fleet"] is None
+    assert r.json()["generated_at"].endswith("Z")
+
+    a = _copy_lock(lock_dir, "arm-a", seeds={"pinned": ["kp", "latency_frames"], "spread": {}})
+    _copy_lock(lock_dir, "arm-b", created_at="2026-10-18T00:00:00Z")
+    expected_after = a["result"]["eval_score"]
+    expected_before = a["result"]["baseline_eval_score"]
+    per_joint = a["result"]["per_joint_after"]
+    body = {k: v for k, v in per_joint.items() if k != "gripper"}
+    worst = max(body, key=body.get)
+    assert per_joint["gripper"] > per_joint[worst]  # the gripper would win if it counted
+
+    # a drift scan for arm-a only (verdict comes from the saved scan)
+    (lock_dir / "arm-a.drift.json").write_text(json.dumps({"lock": "arm-a", "verdict": "no drift"}))
+    # a fleet report that lists arm-b
+    (lock_dir / "fleet").mkdir()
+    (lock_dir / "fleet" / "fleet.json").write_text(json.dumps({
+        "created_at": "2026-10-17T21:44:12Z",
+        "robots": [{"lock": "arm-b", "dataset": a["dataset"], "fps": 30.0}],
+        "summary": {"n_robots": 1, "median_improvement": 0.5},
+    }))
+
+    d = client.get("/api/dashboard").json()
+    assert [r["name"] for r in d["robots"]] == ["arm-b", "arm-a"]  # newest first, like /api/locks
+    by = {r["name"]: r for r in d["robots"]}
+
+    ra = by["arm-a"]
+    assert ra["dataset"] == a["dataset"] and ra["robot_type"] == a["robot_type"]
+    assert ra["baseline_eval_score"] == pytest.approx(expected_before)
+    assert ra["eval_score"] == pytest.approx(expected_after)
+    assert ra["improvement"] == pytest.approx(1 - expected_after / expected_before, abs=1e-6)
+    assert ra["worst_joint"] == worst and ra["worst_joint_deg"] == pytest.approx(per_joint[worst])
+    assert ra["latency_frames"] == a["params"]["latency_frames"]
+    assert ra["drift"] == {"exists": True, "verdict": "no drift"}
+    assert ra["in_fleet"] is False and ra["fps"] is None
+    assert ra["pinned"] == ["kp", "latency_frames"]
+    assert ra["history"] == {"latest": None, "trend": None}
+
+    rb = by["arm-b"]
+    assert rb["created_at"] == "2026-10-18T00:00:00Z"
+    assert rb["drift"] == {"exists": False, "verdict": None}
+    assert rb["in_fleet"] is True and rb["fps"] == 30.0
+    assert rb["pinned"] is None
+
+    assert d["fleet"]["n_robots"] == 1 and d["fleet"]["median_improvement"] == 0.5
+    assert d["fleet"]["created_at"] == "2026-10-17T21:44:12Z" and d["fleet"]["locks"] == ["arm-b"]
+
+
+def test_dashboard_reads_check_history_when_available(client, monkeypatch, tmp_path):
+    lock_dir = tmp_path / "locks"
+    monkeypatch.setattr(server, "LOCK_DIR", lock_dir)
+    monkeypatch.setattr(server, "LOCK_SUFFIX", LOCK_SUFFIX)
+    monkeypatch.setattr(server, "FLEET_DIR", lock_dir / "fleet")
+    monkeypatch.setattr(server, "_DATASETS", {})
+    _copy_lock(lock_dir, "arm-a")
+    _copy_lock(lock_dir, "arm-b")
+
+    entry = {"at": "2026-10-17T10:00:00Z", "lock": "arm-a", "dataset": FAKE_DS, "verdict": "drifted",
+             "passed": False, "score": 2.1, "reference": 1.0, "limit": 1.5, "n_episodes": 5,
+             "episodes": [0, 1, 2, 3, 4], "worst_joint": "elbow_flex", "per_joint": {"elbow_flex": 2.1},
+             "antares_version": "0.0.1"}
+    trend = {"n": 3, "first": "2026-10-10T10:00:00Z", "last": entry["at"], "slope_deg_per_day": 0.1,
+             "r2": 0.9, "latest_verdict": "drifted", "n_drifted": 1}
+    seen = {}
+
+    def history_index(lock_dir):
+        seen["lock_dir"] = Path(lock_dir)
+        return {"locks": [{"lock": "arm-a", "trend": trend, "latest": entry}]}
+
+    monkeypatch.setitem(sys.modules, "antares.history", _module("antares.history", history_index=history_index))
+    by = {r["name"]: r for r in client.get("/api/dashboard").json()["robots"]}
+    assert seen["lock_dir"] == lock_dir
+    assert by["arm-a"]["history"] == {"latest": entry, "trend": trend}
+    assert by["arm-b"]["history"] == {"latest": None, "trend": None}
+
+    # a history module that blows up must not take the dashboard down
+    def broken(lock_dir):
+        raise RuntimeError("corrupt history")
+
+    monkeypatch.setitem(sys.modules, "antares.history", _module("antares.history", history_index=broken))
+    r = client.get("/api/dashboard")
+    assert r.status_code == 200 and all(x["history"]["latest"] is None for x in r.json()["robots"])
+
+
+# ---------------------------------------------------------------------------
+# the follower's LeRobot calibration (real sim modules, no fakes)
+# ---------------------------------------------------------------------------
+
+
+def _real_dataset(repo_id="real/arm", n=3, T=12):
+    eps = []
+    for i in range(n):
+        a = np.zeros((T, 6))
+        a[:, 0] = np.linspace(0, 20, T)
+        a[:, 5] = 50.0
+        eps.append(Episode(index=i, fps=30.0, joint_names=JOINTS, state=a.copy(), action=a))
+    return Dataset(repo_id=repo_id, robot_type="so101_follower", fps=30.0, joint_names=JOINTS, episodes=tuple(eps))
+
+
+def _real_calibration(path, shift_joint=None, shift=0):
+    from antares import lerobot_calib as lc
+    from antares.sim import load_model
+
+    model = load_model()
+    out = {}
+    for i, j in enumerate(JOINTS):
+        span = int(round((model.jnt_range[i, 1] - model.jnt_range[i, 0]) / lc.RAD_PER_TICK))
+        lo = 1000 if j == "gripper" else lc.HALF_TURN - span // 2
+        if j == shift_joint:
+            lo += shift
+        out[j] = lc.MotorCalibration(i + 1, 0, 0, lo, lo + span)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(lc.calibration_to_dict(out)))
+    return out, model
+
+
+def test_calibration_check_route(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "_DATASETS", {"real/arm": _real_dataset()})
+    monkeypatch.setenv("HF_LEROBOT_CALIBRATION", str(tmp_path / "cal"))
+    _real_calibration(tmp_path / "cal" / "robots" / "so101_follower" / "arm.json", "elbow_flex", 80)
+    client = TestClient(server.app)
+    assert client.get("/api/datasets/calibration-check", params={"dataset": "real/arm"}).status_code == 400
+    r = client.get("/api/datasets/calibration-check", params={"dataset": "real/arm", "robot_id": "nope"})
+    assert r.status_code == 404 and "no LeRobot calibration named 'nope'" in r.json()["detail"]
+    r = client.get("/api/datasets/calibration-check", params={"dataset": "real/arm", "robot_id": "arm"})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["dataset"] == "real/arm" and out["robot"] == "so101" and out["robot_id"] == "arm"
+    assert out["source"].endswith("so101_follower/arm.json") and len(out["sha256"]) == 64
+    assert out["flagged"] == ["elbow_flex"] and "use --calibration" in out["message"]
+    rows = {j["joint"]: j for j in out["joints"]}
+    assert rows["elbow_flex"]["max_deg"] == pytest.approx(80 * 360 / 4096, abs=0.15)
+    assert set(rows["elbow_flex"]["at"]) == {"-100", "0", "100"} and rows["elbow_flex"]["range_min"] > 0
+    by_path = client.get("/api/datasets/calibration-check",
+                         params={"dataset": "real/arm", "calibration_path": str(tmp_path / "cal/robots/so101_follower/arm.json")})
+    assert by_path.status_code == 200 and by_path.json()["flagged"] == ["elbow_flex"]
+    bad = tmp_path / "bad.json"
+    bad.write_text("{}")
+    assert client.get("/api/datasets/calibration-check",
+                      params={"dataset": "real/arm", "calibration_path": str(bad)}).status_code == 400
+    assert client.get("/api/datasets/calibration-check",
+                      params={"dataset": "real/arm", "calibration_path": str(tmp_path / "missing.json")}).status_code == 404
+
+
+def test_replay_and_check_apply_the_lock_calibration_map(monkeypatch, tmp_path):
+    """A lock with a calibration block replays on that unit map, not the model's."""
+    from antares import lerobot_calib as lc
+    from antares.sim import SimParams, UnitMap
+
+    ds = _real_dataset()
+    monkeypatch.setattr(server, "_DATASETS", {"real/arm": ds})
+    monkeypatch.setattr(server, "LOCK_DIR", tmp_path / "locks")
+    calib, model = _real_calibration(tmp_path / "arm.json", "shoulder_pan", 200)  # 17.6 deg
+    rec = lc.calibration_record(calib, model, path=tmp_path / "arm.json", robot_id="arm")
+    lock = {"name": "cal-lock", "dataset": "real/arm", "robot_type": "so101_follower", "robot": "so101",
+            "data_sha256": "x", "params": SimParams().to_dict(), "created_at": "now", "antares_version": "0",
+            "result": {"params": SimParams().to_dict(), "baseline": SimParams().to_dict(), "train_score": 1.0,
+                       "eval_score": 1.0, "baseline_train_score": 2.0, "baseline_eval_score": 2.0,
+                       "n_evaluations": 1, "elapsed_s": 0.1, "per_joint_after": {j: 1.0 for j in JOINTS}},
+            "calibration": rec}
+    (tmp_path / "locks").mkdir()
+    (tmp_path / "locks" / "cal-lock.lock.json").write_text(json.dumps(lock))
+    um = server.unit_map_from_lock(lock)
+    np.testing.assert_allclose(um.offset, UnitMap.from_dict(rec["unit_map"]).offset)
+    assert server.unit_map_from_lock({"name": "plain"}) is None
+
+    client = TestClient(server.app)
+    with_lock = client.get("/api/replay", params={"dataset": "real/arm", "episode": 0, "lock": "cal-lock"}).json()
+    plain = client.get("/api/replay", params={"dataset": "real/arm", "episode": 0}).json()
+    assert with_lock["unit_map"] == rec["unit_map"] and plain["unit_map"] is None
+    # the real arm's pan angle is read 17.6 deg further along under its own calibration
+    shift = np.array(with_lock["real_q"])[:, 0] - np.array(plain["real_q"])[:, 0]
+    np.testing.assert_allclose(shift, 200 * 360 / 4096, atol=0.05)
+    # and the shared arm is back on the model's map afterwards
+    arm = server.get_arm("so101")
+    np.testing.assert_allclose(arm.unit_map.offset, UnitMap.from_model(arm.model).offset)
+
+    res = server.run_check(ds, "cal-lock", threshold_deg=5.0, min_episodes=1)
+    assert res.verdict in ("ok", "drifted") and res.n_episodes == 3
+    np.testing.assert_allclose(arm.unit_map.offset, UnitMap.from_model(arm.model).offset)
+    sim = server.lock_simulate(lock)
+    real_q, _ = sim(SimParams(), ds.episodes[0])
+    assert real_q[0, 0] == pytest.approx(um.to_rad(ds.episodes[0].state[0])[0])
+
+
+def test_calibrate_request_forwards_calibration(client, fakes, monkeypatch):
+    seen = {}
+
+    def spy(ds, **kw):
+        seen.update(kw)
+        raise HTTPException(status_code=400, detail="stop here")
+
+    monkeypatch.setattr(server, "run_calibration", spy)
+    job = client.post("/api/calibrate", json={"dataset": FAKE_DS, "calibration_path": "/x/arm.json",
+                                              "robot_type": "so100_follower"}).json()["job_id"]
+    for _ in range(100):
+        if client.get(f"/api/calibrate/{job}").json()["status"] != "running":
+            break
+        time.sleep(0.01)
+    assert seen["calibration_path"] == "/x/arm.json" and seen["robot_id"] is None
+    assert seen["robot_type"] == "so100_follower"
+
+
+def test_run_calibration_records_the_calibration_in_the_lock(monkeypatch, tmp_path):
+    """The real pipeline, two evaluations: the lock carries the calibration
+    block and the fit ran on the calibration-derived unit map."""
+    from antares import lerobot_calib as lc
+    from antares.sim import UnitMap
+
+    ds = _real_dataset(n=4, T=8)
+    monkeypatch.setattr(server, "_DATASETS", {"real/arm": ds})
+    monkeypatch.setattr(server, "LOCK_DIR", tmp_path / "locks")
+    calib, model = _real_calibration(tmp_path / "arm.json", "wrist_flex", 50)
+    result, lock, path = server.run_calibration(
+        ds, n_train=3, n_eval=1, max_evaluations=2, name="cal-fit", calibration_path=str(tmp_path / "arm.json"))
+    cal = lock["calibration"]
+    assert cal["source"] == str(tmp_path / "arm.json") and cal["sha256"] == lc.file_sha256(tmp_path / "arm.json")
+    assert cal["robot_type"] == "so101_follower" and cal["motors"]["wrist_flex"] == calib["wrist_flex"].to_dict()
+    assert cal["unit_map_disagreement_deg"]["wrist_flex"] == pytest.approx(50 * 360 / 4096, abs=0.05)
+    expected = lc.unit_map_from_calibration(calib, model)
+    np.testing.assert_allclose(UnitMap.from_dict(cal["unit_map"]).offset, expected.offset)
+    saved = json.loads(path.read_text())
+    assert saved["calibration"]["robot_id"] is None and saved["calibration"]["anchor"] == "homing"
+    # A robot id with no calibration file on this machine is not an error for
+    # calibrate (the id also names the robot in the registry): the fit runs on
+    # the model's unit map and the lock carries no calibration block.
+    _, lock2, _ = server.run_calibration(ds, n_train=3, n_eval=1, max_evaluations=2, name="no-cal", robot_id="ghost")
+    assert "calibration" not in lock2
+    with pytest.raises(HTTPException) as e:
+        server.resolve_calibration(None, "ghost")
+    assert e.value.status_code == 404
+
+
+# --------------------------------------------------------------------------
+# robot registry: /api/registry, @<robot> on every lock route, dashboard fields
+# --------------------------------------------------------------------------
+
+
+def _register(client, robot, lock, **body):
+    r = client.post(f"/api/registry/{robot}/register", json={"lock": lock, **body})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_registry_routes_register_activate_rollback_remove(client, fakes):
+    assert client.get("/api/registry").json() == {"version": 1, "path": str(fakes / "locks" / "registry.json"), "robots": []}
+    assert client.get("/api/registry/arm_a").status_code == 404
+    write_lock(fakes, "v1", kp=50.0)
+    write_lock(fakes, "v2", kp=60.0)
+    write_lock(fakes, "v3", kp=70.0)
+
+    out = _register(client, "arm_a", "v1", note="first")
+    reg = out["registration"]
+    assert reg["activated"] and reg["version"] == 1 and reg["n_versions"] == 1 and reg["summary"].endswith("(first lock of this robot)")
+    assert out["robot_id"] == "arm_a" and out["active"] == "v1" and out["robot_type"] == "so101_follower"
+    assert out["lineage"][0]["note"] == "first" and out["lineage"][0]["is_active"] and out["lineage"][0]["exists"]
+    assert out["lineage"][0]["pinned"] == ["latency_frames"]  # the stubbed lock module's answer
+    assert out["lineage"][0]["params"]["kp"] == 50.0
+
+    # the fake locks all score 1.2: the newcomer is within 10 % and takes over
+    out = _register(client, "arm_a", "v2")
+    assert out["registration"]["activated"] and out["active"] == "v2" and out["version"] == 2
+    # activate=false registers without activating; a 404 for a lock that does not exist
+    out = _register(client, "arm_a", "v3", activate=False)
+    assert not out["registration"]["activated"] and out["active"] == "v2" and out["n_versions"] == 3
+    assert client.post("/api/registry/arm_a/register", json={"lock": "ghost"}).status_code == 404
+    assert client.post("/api/registry/-bad/register", json={"lock": "v1"}).status_code == 400  # invalid robot id
+    assert client.post("/api/registry/arm_a/register", json={"lock": "v1", "max_regression": -1}).status_code == 422
+
+    listing = client.get("/api/registry").json()
+    (row,) = listing["robots"]
+    assert row["robot_id"] == "arm_a" and row["active"] == "v2" and row["version"] == 2 and row["n_versions"] == 3
+    assert [l["name"] for l in row["locks"]] == ["v1", "v2", "v3"]
+    detail = client.get("/api/registry/arm_a").json()
+    assert [l["version"] for l in detail["lineage"]] == [1, 2, 3]
+    assert len(detail["param_drift"]["comparable"]["latency_frames"]["values"]) == 3
+    assert "kp" in detail["param_drift"]["not_comparable"]
+
+    r = client.post("/api/registry/arm_a/rollback")
+    assert r.status_code == 200 and r.json()["active"] == "v1" and r.json()["previous_active"] == "v2"
+    assert client.post("/api/registry/arm_a/rollback").status_code == 409  # oldest already
+    r = client.post("/api/registry/arm_a/activate", json={"lock": "v3"})
+    assert r.status_code == 200 and r.json()["active"] == "v3" and r.json()["previous_active"] == "v1"
+    assert client.post("/api/registry/arm_a/activate", json={"lock": "nope"}).status_code == 400
+    assert client.post("/api/registry/ghost/activate", json={"lock": "v1"}).status_code == 404
+    assert client.post("/api/registry/ghost/rollback").status_code == 404
+
+    r = client.delete("/api/registry/arm_a")
+    assert r.status_code == 200 and r.json() == {"removed": "arm_a", "locks": ["v1", "v2", "v3"]}
+    assert client.delete("/api/registry/arm_a").status_code == 404
+    assert (fakes / "locks" / "v1.lock.json").is_file()
+    assert client.get("/api/registry").json()["robots"] == []
+
+
+def test_lock_routes_accept_a_robot_reference(client, fakes):
+    write_lock(fakes, "unit-a", kp=50.0)
+    write_lock(fakes, "unit-b", kp=60.0)
+    _register(client, "arm_a", "unit-a")
+
+    assert client.get("/api/locks/@arm_a").json()["name"] == "unit-a"
+    assert client.get("/api/locks/@ghost").status_code == 404
+    assert "unknown robot" in client.get("/api/locks/@ghost").json()["detail"]
+
+    out = client.post("/api/check", json={"dataset": FAKE_DS, "lock": "@arm_a"}).json()
+    assert out["lock"] == "unit-a" and out["verdict"] == "ok"
+    (rec,) = _history_lines(fakes, "unit-a")
+    assert rec["lock"] == "unit-a" and not (fakes / "locks" / "@arm_a.history.jsonl").exists()
+    h = client.get("/api/history/@arm_a").json()
+    assert h["lock"] == "unit-a" and len(h["entries"]) == 1
+    assert client.get("/api/history/@ghost").status_code == 404
+    assert client.post("/api/check", json={"dataset": FAKE_DS, "lock": "@ghost"}).status_code == 404
+
+    r = client.get(f"/api/replay?dataset={FAKE_DS}&episode=0&lock=%40arm_a")
+    assert r.status_code == 200 and r.json()["lock"] == "@arm_a"
+    assert client.get(f"/api/compensate?dataset={FAKE_DS}&episode=0&lock=%40arm_a").status_code == 200
+    assert client.post("/api/drift", json={"dataset": FAKE_DS, "lock": "@ghost"}).status_code == 404
+    assert client.post("/api/diagnose", json={"dataset": FAKE_DS, "lock": "@ghost"}).status_code == 404
+
+    # the reference follows the active lock
+    _register(client, "arm_a", "unit-b", activate=True)
+    assert client.get("/api/locks/@arm_a").json()["name"] == "unit-b"
+    # a plain name never touches the registry, and a lock can not be deleted through a reference
+    assert client.get("/api/locks/unit-a").json()["name"] == "unit-a"
+    assert client.delete("/api/locks/@arm_a").status_code == 400
+    assert (fakes / "locks" / "unit-b.lock.json").is_file()
+
+
+def test_calibrate_with_robot_id_registers_the_lock(client, fakes):
+    assert client.post("/api/calibrate", json={"dataset": FAKE_DS, "robot_id": "bad/id"}).status_code == 400
+    r = client.post("/api/calibrate", json={"dataset": FAKE_DS, "name": "unit-a", "robot_id": "arm_a"})
+    assert r.status_code == 200
+    job = r.json()["job_id"]
+    with client.stream("GET", f"/api/calibrate/{job}/events") as resp:
+        events = sse_events(resp)
+    done = events[-1]
+    assert done["type"] == "done" and done["lock"]["name"] == "unit-a"
+    reg = done["registration"]
+    assert reg["robot_id"] == "arm_a" and reg["lock"] == "unit-a" and reg["activated"] and reg["version"] == 1
+    st = client.get(f"/api/jobs/{job}").json()
+    assert st["status"] == "done" and st["registration"]["active"] == "unit-a"
+    detail = client.get("/api/registry/arm_a").json()
+    assert detail["active"] == "unit-a" and detail["lineage"][0]["dataset"] == FAKE_DS
+    assert client.get("/api/locks/@arm_a").json()["name"] == "unit-a"
+
+    # a second calibration of the same robot: same score, so it takes over by the rule
+    r = client.post("/api/calibrate", json={"dataset": FAKE_DS, "name": "unit-b", "robot_id": "arm_a"})
+    with client.stream("GET", f"/api/calibrate/{r.json()['job_id']}/events") as resp:
+        done = sse_events(resp)[-1]
+    assert done["registration"]["version"] == 2 and done["registration"]["activated"]
+    # ...unless told not to
+    r = client.post("/api/calibrate", json={"dataset": FAKE_DS, "name": "unit-c", "robot_id": "arm_a", "activate": False})
+    with client.stream("GET", f"/api/calibrate/{r.json()['job_id']}/events") as resp:
+        done = sse_events(resp)[-1]
+    assert not done["registration"]["activated"] and client.get("/api/locks/@arm_a").json()["name"] == "unit-b"
+    # without robot_id the done event has no registration key, as before
+    r = client.post("/api/calibrate", json={"dataset": FAKE_DS, "name": "unit-d"})
+    with client.stream("GET", f"/api/calibrate/{r.json()['job_id']}/events") as resp:
+        done = sse_events(resp)[-1]
+    assert "registration" not in done
+
+
+def test_dashboard_rows_carry_registry_fields(client, monkeypatch, tmp_path):
+    lock_dir = tmp_path / "locks"
+    monkeypatch.setattr(server, "LOCK_DIR", lock_dir)
+    monkeypatch.setattr(server, "LOCK_SUFFIX", LOCK_SUFFIX)
+    monkeypatch.setattr(server, "FLEET_DIR", lock_dir / "fleet")
+    monkeypatch.setattr(server, "_DATASETS", {})
+    monkeypatch.setitem(sys.modules, "antares.history", None)
+    _copy_lock(lock_dir, "arm-a-v1", created_at="2026-10-01T00:00:00Z")
+    _copy_lock(lock_dir, "arm-a-v2", created_at="2026-10-08T00:00:00Z")
+    _copy_lock(lock_dir, "loose", created_at="2026-10-09T00:00:00Z")
+
+    # no registry file: every row unregistered, as before
+    by = {r["name"]: r for r in client.get("/api/dashboard").json()["robots"]}
+    assert all(r["robot_id"] is None and r["is_active"] is None and r["version"] is None and r["n_versions"] is None
+               for r in by.values())
+
+    assert client.post("/api/registry/arm_a/register", json={"lock": "arm-a-v1"}).status_code == 200
+    assert client.post("/api/registry/arm_a/register", json={"lock": "arm-a-v2"}).status_code == 200
+    by = {r["name"]: r for r in client.get("/api/dashboard").json()["robots"]}
+    assert by["arm-a-v1"]["robot_id"] == "arm_a" and by["arm-a-v1"]["is_active"] is False
+    assert by["arm-a-v1"]["version"] == 1 and by["arm-a-v1"]["n_versions"] == 2
+    assert by["arm-a-v2"]["robot_id"] == "arm_a" and by["arm-a-v2"]["is_active"] is True and by["arm-a-v2"]["version"] == 2
+    assert by["loose"]["robot_id"] is None and by["loose"]["version"] is None
+
+    # a corrupt registry must not take the dashboard down
+    (lock_dir / "registry.json").write_text("{nope")
+    r = client.get("/api/dashboard")
+    assert r.status_code == 200 and all(x["robot_id"] is None for x in r.json()["robots"])
+    assert client.get("/api/registry").status_code == 500

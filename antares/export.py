@@ -46,10 +46,12 @@ import numpy as np
 from antares import __version__
 from antares.lock import RobotLock
 from antares.sim import JOINTS, MESH_DIR, MODEL_PATH, STANDARD_GRAVITY, Arm, CommandMap, SimParams, UnitMap
+from antares.task import OBJECT_SIZE, TaskDistribution, scene_xml
 
 SCENE_PATH: Path = MODEL_PATH.parent / "scene.xml"
 SIDECAR_SUFFIX = ".antares.json"
 SCENE_FILENAME = "scene.xml"
+TASK_FILENAME = "task.json"
 ASSETS_DIRNAME = "assets"
 EXPORT_FORMAT = "antares.export/1"
 
@@ -250,6 +252,13 @@ def _score_text(v: float, unit: str = " deg") -> str:
     return "n/a" if s is None else f"{s:.3f}{unit}"
 
 
+def _fmt_param(v: ParamValue) -> str:
+    """A scalar as :func:`_fmt`; a per-joint tuple as ``[v0 v1 ... v5]``."""
+    if isinstance(v, (tuple, list)):
+        return "[" + " ".join(_fmt(x) for x in v) + "]"
+    return _fmt(v)
+
+
 def header_lines(lock: RobotLock) -> list[str]:
     r = lock.result
     p = lock.params
@@ -260,9 +269,9 @@ def header_lines(lock: RobotLock) -> list[str]:
         f"created_at:  {lock.created_at}",
         f"held-out tracking RMSE: {_score_text(r.baseline_eval_score)} before -> "
         f"{_score_text(r.eval_score)} after ({len(r.eval_episodes)} episodes)",
-        f"baked: kp={_fmt(p.kp)} kv={_fmt(p.kv)} damping={_fmt(p.damping)} "
-        f"armature={_fmt(p.armature)} frictionloss={_fmt(p.frictionloss)} "
-        f"gravity_scale={_fmt(float(p.per_joint('gravity_scale')[0]))} (scales option gravity)",
+        f"baked: kp={_fmt_param(p.kp)} kv={_fmt_param(p.kv)} damping={_fmt_param(p.damping)} "
+        f"armature={_fmt_param(p.armature)} frictionloss={_fmt_param(p.frictionloss)} "
+        f"gravity_scale={_fmt_param(float(p.per_joint('gravity_scale')[0]))} (scales option gravity)",
         f"latency_frames: {p.latency_frames} (command delay in dataset frames; MJCF cannot "
         f"express this, apply it in your control loop; see the .antares.json sidecar)",
     ]
@@ -300,7 +309,7 @@ def sidecar_dict(lock: RobotLock, model: mujoco.MjModel, model_file: str, meshdi
         "params": lock.params.to_dict(),
         "baked_params": list(BAKED_PARAMS),
         "sidecar_params": list(SIDECAR_PARAMS),
-        "latency_frames": int(lock.params.latency_frames),
+        "latency_frames": lock.params.to_dict()["latency_frames"],  # int, or six ints for a per-joint lock
         "latency_note": (
             "Command delay in dataset frames (at the dataset's recording rate). "
             "Not representable in MJCF: delay each ctrl by latency_frames frames."
@@ -387,18 +396,36 @@ def export_mjcf(lock: RobotLock, out_path: Path, bundle_assets: bool = True) -> 
     return out_path
 
 
-def export_scene(lock: RobotLock, out_dir: Path, bundle_assets: bool = True) -> Path:
+def export_scene(
+    lock: RobotLock,
+    out_dir: Path,
+    bundle_assets: bool = True,
+    task: TaskDistribution | None = None,
+    object_size: float = OBJECT_SIZE,
+) -> Path:
     """Export the arm into ``out_dir`` plus a ``scene.xml`` (floor, light,
     skybox from the Menagerie scene) that includes it, so
     ``python -m mujoco.viewer --mjcf <out_dir>/scene.xml`` works. Returns the
-    scene path; the arm is at ``<out_dir>/<lock.name>.xml``."""
+    scene path; the arm is at ``<out_dir>/<lock.name>.xml``.
+
+    With a ``task`` (see :mod:`antares.task`) the scene also gets a free cube
+    at the logged mean pick position and a marker at the mean place, and the
+    task is copied next to it as ``task.json`` for
+    :meth:`~antares.task.TaskDistribution.sample` and
+    :func:`~antares.task.set_task`."""
     out_dir = Path(out_dir)
+    objects = scene_xml(task, object_size) if task is not None else None  # may raise: before anything is written
     arm_path = export_mjcf(lock, out_dir / f"{lock.name}.xml", bundle_assets=bundle_assets)
 
     scene = SCENE_PATH.read_text()
     scene, n = re.subn(r'<include file="[^"]+"/>', f'<include file="{arm_path.name}"/>', scene, count=1)
     if n == 0:
         raise ExportError("scene.xml has no <include>")
+    if objects is not None:
+        if scene.count("</worldbody>") != 1:
+            raise ExportError("scene.xml needs exactly one </worldbody>")
+        scene = scene.replace("</worldbody>", objects + "  </worldbody>")
+        task.save(out_dir / TASK_FILENAME)
     scene = insert_header(
         scene,
         _comment(
@@ -414,13 +441,18 @@ def export_scene(lock: RobotLock, out_dir: Path, bundle_assets: bool = True) -> 
     return scene_path
 
 
-def export_zip(lock: RobotLock) -> bytes:
+def export_zip(lock: RobotLock, targets: Sequence[str] = (), fps: float | None = None) -> bytes:
     """Zip of ``export_scene(lock, bundle_assets=True)``: ``<name>/`` holding
-    the arm XML, sidecar, ``scene.xml`` and ``assets/*.stl``."""
+    the arm XML, sidecar, ``scene.xml`` and ``assets/*.stl``, plus the files
+    of each extra export target (:data:`antares.export_targets.TARGETS`)."""
     buf = io.BytesIO()
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp) / lock.name
         export_scene(lock, root, bundle_assets=True)
+        if targets:
+            from antares.export_targets import export_targets
+
+            export_targets(lock, root, targets, fps=fps)
         with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             for p in sorted(root.rglob("*")):
                 if p.is_file():
@@ -438,20 +470,24 @@ def read_sidecar(xml_path: Path) -> dict[str, Any]:
 
 
 def load_exported_arm(xml_path: Path, contacts: bool = False) -> Arm:
-    """An :class:`Arm` driven by an exported model: gains/joint values come
-    from the XML, ``latency_frames``, the servo ``deadband`` (which MJCF
-    cannot express) and the command map from the sidecar (0, 0 and
-    identity if it is missing)."""
+    """An :class:`Arm` driven by an exported model. The parameters come from
+    the sidecar when it is there (its ``params`` carry per-joint values,
+    ``latency_frames`` and the servo ``deadband``, which the XML cannot), else the gains/joint values
+    compiled into the XML with latency 0; the command map likewise comes
+    from the sidecar (identity if it is missing)."""
     xml_path = Path(xml_path)
-    latency, deadband, cmap = 0, 0.0, None
+    params: SimParams | None = None
+    cmap = None
     sc = sidecar_path(xml_path)
     if sc.is_file():
         side = json.loads(sc.read_text())
-        latency = int(side.get("latency_frames", 0))
-        deadband = side.get("params", {}).get("deadband", 0.0)
+        if isinstance(side.get("params"), dict):
+            params = SimParams.from_dict(side["params"])
         cmap = CommandMap.from_dict(side.get("command_map"))
     arm = Arm(model_path=xml_path, contacts=contacts, command_map=cmap)
-    arm.apply(SimParams.from_model(arm.model, latency_frames=latency).replace(deadband=deadband))
+    if params is None:
+        params = SimParams.from_model(arm.model, latency_frames=0)
+    arm.apply(params)
     return arm
 
 

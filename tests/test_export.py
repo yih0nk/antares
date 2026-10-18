@@ -359,3 +359,41 @@ def test_export_carries_the_command_map(tmp_path):
     # a lock without one exports identity
     plain = read_sidecar(export_mjcf(make_lock(), tmp_path / "b.xml", bundle_assets=False))
     assert CommandMap.from_dict(plain["command_map"]).is_identity()
+
+
+def test_export_scene_with_task(tmp_path):
+    from test_task import pick_place_episode
+
+    from antares.task import OBJECT_BODY, OBJECT_JOINT, PLACE_SITE, TaskDistribution, set_task
+
+    td = TaskDistribution.from_episodes([pick_place_episode(0), pick_place_episode(1)], name="toy")
+    scene = export_scene(make_lock(), tmp_path / "out", task=td, object_size=0.04)
+    assert (tmp_path / "out" / "task.json").is_file()
+    m = mujoco.MjModel.from_xml_path(str(scene))
+    assert m.nq == 6 + 7  # arm first, then the cube's free joint
+    body = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, OBJECT_BODY)
+    site = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_SITE, PLACE_SITE)
+    assert body >= 0 and site >= 0
+    np.testing.assert_allclose(m.body_pos[body][:2], td.picks.mean(axis=0)[:2], atol=1e-5)
+    np.testing.assert_allclose(m.site_pos[site], td.places.mean(axis=0), atol=1e-5)
+
+    d = mujoco.MjData(m)
+    inst = {"pick": [0.25, 0.05, 0.0], "place": [0.2, -0.1, 0.02], "start_q": td.start_q[0].tolist()}
+    set_task(m, d, inst, size=0.04)
+    a = m.jnt_qposadr[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, OBJECT_JOINT)]
+    np.testing.assert_allclose(d.qpos[a : a + 3], [0.25, 0.05, 0.02])  # lifted to rest on the floor
+    np.testing.assert_allclose(d.qpos[:6], td.start_q[0])
+    np.testing.assert_allclose(m.site_pos[site], inst["place"])
+    for _ in range(200):
+        mujoco.mj_step(m, d)
+    assert d.qpos[a + 2] == pytest.approx(0.02, abs=2e-3)  # sits on the floor, does not fall through
+
+
+def test_scene_xml_needs_a_held_grasp():
+    from test_task import SHUT, pick_place_episode
+
+    from antares.task import TaskDistribution, scene_xml
+
+    td = TaskDistribution.from_episodes([pick_place_episode(0, held_jaw=SHUT)], name="toy")
+    with pytest.raises(ValueError):
+        scene_xml(td)

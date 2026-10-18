@@ -13,6 +13,11 @@
   --anomaly: #e2b35a;
   /* the sim driven by lag-compensated commands */
   --comp: #3fd6b8;
+  /* verdict of a robot's last `antares check` (fleet view) */
+  --ok: #9fd8a8;
+  --drifted: var(--warm);
+  --insufficient: var(--anomaly);
+  --never: var(--muted);
 }
 
 * {
@@ -929,5 +934,422 @@ body {
     right: 16px;
     top: 64px;
     width: auto;
+  }
+}
+
+/* ---- fleet dashboard ---- */
+
+.shell.fleet-shell {
+  grid-template-columns: 1fr;
+  grid-template-rows: 56px 1fr;
+  grid-template-areas:
+    "top"
+    "fleet";
+}
+
+.topbar .views {
+  margin-left: 8px;
+}
+
+.topbar .views button {
+  padding: 5px 12px;
+}
+
+.fleet {
+  grid-area: fleet;
+  min-height: 0;
+  overflow: auto;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.fleet-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.fleet-head .label {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.fleet-error {
+  padding: 10px 12px;
+  border: 1px solid #5a2a35;
+  background: #23131a;
+  color: #ffb4c0;
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.fleet-empty {
+  padding: 40px 0;
+  text-align: center;
+  font-size: 13px;
+}
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 12px;
+}
+
+.tile {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tile .value {
+  font-size: 30px;
+  font-weight: 600;
+  line-height: 1.1;
+}
+
+.tile .value.drifted {
+  color: var(--drifted);
+}
+
+.tile .value.never {
+  color: var(--never);
+}
+
+.fleet-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.fleet-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.fleet-table th {
+  text-align: left;
+  padding: 0;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.fleet-table th button {
+  width: 100%;
+  background: none;
+  border: 0;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  text-align: left;
+  padding: 10px 12px;
+  cursor: pointer;
+}
+
+.fleet-table th button:hover,
+.fleet-table th button.on {
+  color: var(--text);
+}
+
+.sort-dir {
+  margin-left: 4px;
+  font-size: 9px;
+}
+
+.fleet-table td {
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+.fleet-table td.nowrap {
+  white-space: nowrap;
+}
+
+.fleet-table td .faint {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.fleet-table tr.robot {
+  cursor: pointer;
+}
+
+.fleet-table tr.robot:hover td,
+.fleet-table tr.robot.open td {
+  background: var(--bg);
+}
+
+.fleet-table tr.robot.open td {
+  border-bottom: 0;
+}
+
+.fleet-table tr.fleet-detail td {
+  border-top: 0;
+  padding: 4px 12px 16px;
+  white-space: normal;
+  background: var(--bg);
+}
+
+.robot-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+}
+
+.robot-name .mono {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chip.tiny {
+  font-size: 10px;
+  padding: 1px 6px;
+  cursor: default;
+}
+
+.chip.verdict {
+  cursor: default;
+}
+
+.chip.verdict.ok {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+.chip.verdict.drifted {
+  border-color: var(--drifted);
+  color: var(--drifted);
+}
+
+.chip.verdict.insufficient {
+  border-color: var(--insufficient);
+  color: var(--insufficient);
+}
+
+.chip.verdict.never {
+  color: var(--never);
+}
+
+.check-cell {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+
+/* registry grouping: one header row per robot, its lineage indented below */
+.fleet-table tr.group-head td {
+  background: var(--surface);
+}
+
+.fleet-table tr.group-head.expanded td {
+  border-bottom: 0;
+}
+
+.fleet-table tr.group-head .robot-id {
+  font-weight: 600;
+}
+
+.fleet-table .caret {
+  display: inline-block;
+  width: 10px;
+  font-size: 9px;
+  color: var(--muted);
+}
+
+.fleet-table tr.lineage td {
+  border-top: 1px dashed var(--border);
+}
+
+.fleet-table tr.lineage td:first-child {
+  padding-left: 28px;
+}
+
+.fleet-table tr.group-divider td {
+  padding: 12px 12px 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  background: var(--bg);
+  cursor: default;
+}
+
+.chip.version {
+  border-color: var(--border);
+  color: var(--muted);
+}
+
+.chip.version.active {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+.check-cell .mono {
+  white-space: nowrap;
+}
+
+/* the lock's own per-joint error, as a tick on the last check's bar */
+.bar-ref {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--text);
+  border-radius: 1px;
+}
+
+.bar-track.with-ref {
+  overflow: visible;
+}
+
+.swatch.tick {
+  width: 2px;
+  height: 12px;
+  border-radius: 1px;
+  background: var(--text);
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) minmax(260px, 1fr);
+  gap: 20px 32px;
+  align-items: start;
+  padding-top: 8px;
+}
+
+.detail-grid section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.detail-grid .detail-notes {
+  grid-column: 1 / -1;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 24px;
+}
+
+.detail-grid .detail-notes > div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.spark.history {
+  width: 100%;
+  max-width: 480px;
+  height: auto;
+}
+
+.spark-limit {
+  stroke: var(--warm);
+  stroke-width: 1;
+  opacity: 0.8;
+}
+
+.spark-dot {
+  stroke: var(--surface);
+  stroke-width: 1.5;
+  fill: var(--sim);
+}
+
+.spark-dot.ok {
+  fill: var(--ok);
+}
+
+.spark-dot.drifted {
+  fill: var(--drifted);
+}
+
+.spark-dot.insufficient {
+  fill: var(--insufficient);
+}
+
+.bar-row.static {
+  cursor: default;
+}
+
+.bar-row.static:hover {
+  background: none;
+}
+
+.bar.check {
+  background: var(--sim);
+}
+
+.bar.check.ok {
+  background: var(--ok);
+}
+
+.bar.check.drifted {
+  background: var(--drifted);
+}
+
+.bar.check.insufficient {
+  background: var(--insufficient);
+}
+
+.legend-inline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+
+.legend-inline span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.swatch.base {
+  background: #3a4256;
+}
+
+.swatch.spark-ref {
+  background: var(--muted);
+}
+
+.swatch.ok {
+  background: var(--ok);
+}
+
+.swatch.drifted {
+  background: var(--drifted);
+}
+
+.swatch.insufficient {
+  background: var(--insufficient);
+}
+
+.swatch.never {
+  background: var(--never);
+}
+
+@media (max-width: 800px) {
+  .shell.fleet-shell {
+    grid-template-rows: 56px 1fr;
+    grid-template-areas: "top" "fleet";
+    height: 100%;
+  }
+
+  .detail-grid {
+    grid-template-columns: 1fr;
   }
 }

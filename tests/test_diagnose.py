@@ -138,10 +138,12 @@ def test_weaker_gain_is_named():
     d = diagnose(eps, lock_of(), simulate=toy_simulate, max_evaluations=120)
     assert d.explained
     # in the toy servo kp, kv and damping only enter through (kv+damping)/kp,
-    # so any of them can carry the change; it must be named and alone suffice
-    top = d.causes[0]
-    assert top.name in ("kp", "kv", "damping")
-    assert top.recovers_deg > 0.5 * d.gap_deg
+    # so the change can be split between them in any proportion (and CMA-ES
+    # splits it differently across platforms); a gain must lead the causes
+    # and the refit must close the gap
+    assert d.causes[0].name in ("kp", "kv", "damping")
+    assert d.causes[0].recovers_deg > 0.3 * d.gap_deg
+    assert d.refit_deg < 0.1 * d.stale_deg
 
 
 def test_unchanged_arm_names_nothing():
@@ -151,6 +153,26 @@ def test_unchanged_arm_names_nothing():
     assert d.gap_deg == pytest.approx(0.0, abs=1e-9)
     assert d.causes == []
     assert all(c.recovers_deg == 0.0 for c in d.changes)
+    assert d.unchanged and "no change found" in d.summary()
+    assert d.to_dict()["unchanged"] is True
+
+
+def test_lag_and_a_weaker_gain_together_are_both_named():
+    eps = make_episodes(TRUE.replace(latency_frames=3, kp=TRUE.kp * 0.5), seed=5)
+    d = diagnose(eps, lock_of(), simulate=toy_simulate)
+    assert d.explained, d.summary()
+    names = [c.name for c in d.causes]
+    assert "latency_frames" in names and {c.name: c for c in d.changes}["latency_frames"].value == 2
+    assert set(names) & {"kp", "kv", "damping"}  # the gain change is named too
+    assert not d.unchanged
+
+
+def test_a_change_too_small_to_matter_is_not_kept():
+    """A gain that moved 0.2% lowers the error less than the step threshold."""
+    eps = make_episodes(TRUE.replace(kp=TRUE.kp * 0.998), seed=6)
+    d = diagnose(eps, lock_of(), simulate=toy_simulate)
+    assert all(c.value == (0 if c.name == "latency_frames" else 1.0) for c in d.changes), d.changes
+    assert d.unchanged and d.causes == []
 
 
 def test_drift_outside_the_dynamics_is_not_explained():
@@ -167,7 +189,7 @@ def test_refit_and_held_out_halves_are_disjoint():
     eps = make_episodes(TRUE.replace(latency_frames=2), n=6)
     d = diagnose(eps, lock_of(), simulate=toy_simulate, max_evaluations=20)
     assert d.refit_episodes == [0, 2, 4] and d.held_out_episodes == [1, 3, 5]
-    assert d.n_evaluations == 20  # the budget is exact: no generation overshoots it
+    assert 6 <= d.n_evaluations <= 20  # the budget is a cap, prune included: nothing overshoots it
 
 
 def test_budget_is_exact_and_bounded_below():
@@ -175,12 +197,16 @@ def test_budget_is_exact_and_bounded_below():
     calls = []
     d = diagnose(eps, lock_of(), simulate=lambda p, e: calls.append(1) or toy_simulate(p, e),
                  max_evaluations=37, on_progress=lambda n, best: calls.append(("p", n, best)))
-    assert d.n_evaluations == 37
+    assert d.n_evaluations <= 37
     progress = [c for c in calls if isinstance(c, tuple)]
-    assert [n for _, n, _ in progress] == list(range(1, 38))
-    assert all(b2 <= b1 for (_, _, b1), (_, _, b2) in zip(progress, progress[1:]))  # best never worsens
-    with pytest.raises(ValueError, match="max_evaluations must be >= 10"):
-        diagnose(eps, lock_of(), simulate=toy_simulate, max_evaluations=9)
+    # up to the last progress event every simulation belongs to a counted evaluation
+    # (2 refit episodes each); only the held-out scoring comes after
+    last = max(i for i, c in enumerate(calls) if isinstance(c, tuple))
+    assert sum(1 for c in calls[:last] if c == 1) == d.n_evaluations * 2
+    assert [n for _, n, _ in progress] == list(range(1, d.n_evaluations + 1))
+    assert all(math.isfinite(b) for _, _, b in progress)  # the refit error in degrees, not the penalized value
+    with pytest.raises(ValueError, match="max_evaluations must be >= 20"):
+        diagnose(eps, lock_of(), simulate=toy_simulate, max_evaluations=19)
 
 
 def test_should_stop_ends_the_search_with_the_best_so_far():
@@ -237,9 +263,9 @@ def test_latency_shifts_the_lock_clamps_alike_are_scanned_once():
     eps = make_episodes(p, n=4)
     scanned = []
     d = diagnose(eps, lock_of(p), simulate=lambda q, e: scanned.append(q.latency_frames) or toy_simulate(q, e),
-                 max_evaluations=10)
-    assert d.n_evaluations == 10  # 5 distinct shifts scanned, not 6, then the refit
-    assert set(scanned[:10]) == {0, 2, 4, 6, 8} or sorted(set(scanned[:10])) == [0, 1, 2, 3, 4]
+                 max_evaluations=20)
+    assert d.n_evaluations <= 20  # 5 distinct shifts scanned, not 6, then the refit and prune
+    assert sorted(set(scanned[:10])) == [0, 1, 2, 3, 4]
 
 
 def test_causes_are_gated_on_the_lock_pinned_parameters():
@@ -344,3 +370,59 @@ def test_real_arm_unchanged_names_nothing(arm_lock):
     # only sensor noise is left: the refit barely improves and nothing is named
     assert d.gap_deg < 0.05, d.summary()
     assert d.causes == []
+
+
+# -- real SO-101 dataset ---------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def real(arm_lock):
+    """The lock's held-out episodes from the real SO-101 dataset.
+
+    Skips when the dataset is not cached and cannot be downloaded.
+    """
+    from antares.data import load_dataset
+
+    lock, simulate = arm_lock
+    try:
+        ds = load_dataset(lock.dataset)
+    except Exception as exc:  # noqa: BLE001 - offline, no cache
+        pytest.skip(f"{lock.dataset} unavailable: {exc}")
+    held_out = [e for e in ds.episodes if e.index in set(lock.result.eval_episodes)]
+    assert len(held_out) >= 4
+    return lock, held_out, simulate
+
+
+def _lagged(ep: Episode, frames: int) -> Episode:
+    src = np.maximum(np.arange(len(ep)) - frames, 0)
+    return Episode(ep.index, ep.fps, ep.joint_names, ep.state[src], ep.action)
+
+
+def _weakened(ep: Episode, factor: float) -> Episode:
+    return Episode(ep.index, ep.fps, ep.joint_names, ep.state[0] + factor * (ep.state - ep.state[0]), ep.action)
+
+
+@pytest.mark.slow
+def test_real_unchanged_recordings_report_no_change(real):
+    lock, held_out, simulate = real
+    d = diagnose(held_out, lock, simulate=simulate)
+    assert d.causes == [], d.summary()
+    assert d.unchanged, d.summary()
+
+
+@pytest.mark.slow
+def test_real_extra_lag_is_named_as_lag(real):
+    """On the real arm a higher kv can mimic a frame of lag; the lag must win."""
+    lock, held_out, simulate = real
+    d = diagnose([_lagged(e, 2) for e in held_out], lock, simulate=simulate)
+    assert d.explained, d.summary()
+    assert d.causes[0].name == "latency_frames" and d.causes[0].value == 2, d.summary()
+    kv = {c.name: c for c in d.changes}["kv"]
+    assert 0.5 < kv.value < 2.0, d.summary()  # no large velocity-gain swing standing in for it
+
+
+@pytest.mark.slow
+def test_real_scaled_motion_is_not_explained(real):
+    lock, held_out, simulate = real
+    d = diagnose([_weakened(e, 0.9) for e in held_out], lock, simulate=simulate)
+    assert not d.explained and d.causes == [], d.summary()
