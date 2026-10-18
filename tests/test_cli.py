@@ -691,8 +691,8 @@ def test_calibrate_fit_sensor_prints_comparison(monkeypatch, capsys):
 
     monkeypatch.setattr(server, "_DATASETS", {"fake/robot": _dataset()})
     monkeypatch.setattr(server, "run_calibration", fake_run)
-    assert cli.main(["calibrate", "fake/robot", "--fit-sensor"]) == 0
+    assert cli.main(["calibrate", "fake/robot", "--fit-sensor", "--sensor-mode", "kinematic"]) == 0
     out = capsys.readouterr().out
-    assert seen["fit_sensor"] is True
+    assert seen["fit_sensor"] is True and seen["sensor_mode"] == "kinematic"
     assert "dynamics only" in out and "1.500" in out and "0.750" in out
     assert "sensor calibration" in out and "-2.500" in out and "0.9800" in out

@@ -130,6 +130,7 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
         per_joint_sigma0=args.per_joint_sigma0,
         on_progress=on_progress,
         fit_sensor=args.fit_sensor,
+        sensor_mode=args.sensor_mode,
     )
     r = result.to_dict()
     only = lock.get("dynamics_only")
@@ -784,6 +785,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--fit-sensor",
         action="store_true",
         help="also fit the per-joint command offset/scale and compare against dynamics only",
+    )
+    p.add_argument(
+        "--sensor-mode",
+        choices=("sim", "kinematic"),
+        default="sim",
+        help="with --fit-sensor: fit the map through the sim, alternating with the dynamics "
+        "(sim, default), or pre-fit it from still frames and freeze it (kinematic)",
     )
     p.set_defaults(func=cmd_calibrate)
 
