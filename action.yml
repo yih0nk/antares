@@ -36,6 +36,12 @@ inputs:
     description: Fewer episodes than this fails the job as insufficient data.
     required: false
     default: "5"
+  explain:
+    description: >-
+      On drift, refit the lock on the fresh episodes and name the parameter
+      change that explains it (extra lag, a weaker servo, more friction).
+    required: false
+    default: "false"
   python-version:
     description: Python version to set up.
     required: false
@@ -57,6 +63,11 @@ outputs:
   limit:
     description: The limit the score was held to, in degrees.
     value: ${{ steps.check.outputs.limit }}
+  cause:
+    description: >-
+      With explain, the likely cause of a drift (e.g. "latency_frames +1
+      frame"); empty when the robot passed or no single change explains it.
+    value: ${{ steps.check.outputs.cause }}
   report:
     description: Path of the JSON CheckResult.
     value: ${{ steps.check.outputs.report }}
@@ -91,6 +102,7 @@ runs:
         RATIO: ${{ inputs.ratio }}
         LAST: ${{ inputs.last }}
         MIN_EPISODES: ${{ inputs.min-episodes }}
+        EXPLAIN: ${{ inputs.explain }}
         ACTION_PATH: ${{ github.action_path }}
       run: |
         set -o pipefail
@@ -102,10 +114,12 @@ runs:
         args=("$DATASET" --lock "$LOCK" --ratio "$RATIO" --min-episodes "$MIN_EPISODES")
         [ -n "$THRESHOLD" ] && args+=(--threshold "$THRESHOLD")
         [ -n "$LAST" ] && args+=(--last "$LAST")
+        explain=()
+        [ "$EXPLAIN" = "true" ] && explain=(--explain)
 
         report="$RUNNER_TEMP/antares-check.json"
         set +e
-        antares check "${args[@]}" --json > "$report"
+        antares check "${args[@]}" "${explain[@]}" --json > "$report"
         code=$?
         set -e
         echo "report=$report" >> "$GITHUB_OUTPUT"
@@ -117,11 +131,16 @@ runs:
         print("verdict=" + str(d.get("verdict")))
         print("score=" + ("" if d.get("score") is None else f"{d['score']:.4f}"))
         print("limit=" + ("" if d.get("limit") is None else f"{d['limit']:.4f}"))
+        diag = d.get("diagnosis") or {}
+        causes = [c for c in diag.get("changes", []) if c["name"] in diag.get("causes", [])]
+        causes.sort(key=lambda c: -(c.get("recovers_deg") or 0))
+        print("cause=" + ", ".join(f"{c['name']} {c['change']}" for c in causes))
         PY
           # Human-readable table in the job log and the step summary.
           {
             echo '```'
             antares check "${args[@]}" || true
+            python -c 'import json, sys; d = json.load(open(sys.argv[1])).get("diagnosis"); d and print("\n" + d["summary"])' "$report"
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
         fi
