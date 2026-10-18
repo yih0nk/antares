@@ -208,9 +208,17 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
 
     if not _load_factor_files(args.factors_file):
         return EXIT_USAGE
+    from antares.calibrate import default_factor_names
+
+    # +/- edits apply to what this fit would search by default: the servo
+    # model's fields with --servo, and a per-joint stage derived from the
+    # shared selection, as calibrate builds them.
+    servo = args.servo != "position"
     try:
-        fit = factors.parse_selection(args.factors, "shared")
-        per = factors.parse_selection(args.per_joint_factors, "per_joint")
+        fit = factors.parse_selection(args.factors, "shared", defaults=default_factor_names(servo)[0])
+        per = factors.parse_selection(
+            args.per_joint_factors, "per_joint", defaults=default_factor_names(servo, fit)[1]
+        )
     except (KeyError, ValueError) as e:
         print(f"--factors: {str(e).strip(chr(39))}", file=sys.stderr)
         return EXIT_USAGE

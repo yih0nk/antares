@@ -1396,10 +1396,18 @@ def run_calibration(
     if n_seeds > 1:
         extra["n_seeds"] = int(n_seeds)
     try:
+        if factors is not None or per_joint_factors is not None:
+            # +/- edits apply to what this fit searches by default (the servo
+            # model's fields on a servo start).
+            from antares.calibrate import default_factor_names
+
+            servo_fit = start.uses_servo_model
         if factors is not None:
-            extra["fit_factors"] = _factor_names(factors, "shared")
+            extra["fit_factors"] = _factor_names(factors, "shared", default_factor_names(servo_fit)[0])
         if per_joint_factors is not None:
-            extra["per_joint_factors"] = _factor_names(per_joint_factors, "per_joint")
+            extra["per_joint_factors"] = _factor_names(
+                per_joint_factors, "per_joint", default_factor_names(servo_fit, extra.get("fit_factors"))[1]
+            )
     except (KeyError, ValueError) as e:
         raise HTTPException(status_code=400, detail=str(e).strip("'\"")) from e
     if fit_sensor:
@@ -1455,14 +1463,15 @@ def run_calibration(
     return result, lock.to_dict(), path
 
 
-def _factor_names(selection: list[str], stage: str) -> list[str] | None:
-    """Resolve a factor selection (names, or ``+x``/``-y`` edits of the
-    stage's defaults) into the list calibrate takes (``None``: defaults)."""
+def _factor_names(selection: list[str], stage: str, defaults=None) -> list[str] | None:
+    """Resolve a factor selection (names, or ``+x``/``-y`` edits of
+    ``defaults``, what the fit searches without one) into the list calibrate
+    takes (``None``: defaults)."""
     from antares import factors
 
     if not selection:
         raise ValueError(f"{stage} factors: an empty list leaves nothing to fit; omit it for the defaults")
-    out = factors.parse_selection(",".join(selection), stage)
+    out = factors.parse_selection(",".join(selection), stage, defaults=defaults)
     return None if out is None else list(out)
 def resolve_calibration(
     calibration_path, robot_id: str | None, robot_type: str = "so101_follower", *, strict: bool = True
