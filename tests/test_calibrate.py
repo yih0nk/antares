@@ -634,17 +634,28 @@ def test_spaces_add_optional_terms():
 
 
 def test_calibrate_fit_deadband_per_joint_stage():
+    # Three joints want a 0.02 rad band and the others none, so the shared
+    # stage can only compromise and the per-joint stage has something to win.
+    # The residual depends on the deadband alone: with the toy servo in the
+    # loop, a CMA-ES step in the other 42 per-joint dims costs far more than
+    # any deadband gain and the stage never beats the shared optimum.
     eps = make_episodes(2)
+    target = np.array([0.02, 0.02, 0.02, 0.0, 0.0, 0.0])
 
     def sim(params, ep):
-        real, simq = fake_simulate(params, ep)
-        return real, simq + (params.per_joint("deadband") - 0.01)  # best at 0.01 rad everywhere
+        return ep.state, ep.state + (params.per_joint("deadband") - target)
 
     res = calibrate(eps[:1], eps[1:], simulate=sim, max_evaluations=40, popsize=6,
-                    fit_deadband=True, per_joint=True, per_joint_max_evaluations=40)
+                    fit_deadband=True, per_joint=True, per_joint_max_evaluations=200)
     assert [s["name"] for s in res.stages] == ["shared", "per_joint"]
-    assert "deadband" in res.to_dict()["params"]
-    assert np.all(np.abs(res.params.per_joint("deadband") - 0.01) < 0.004)
+    shared = res.stages[0]["params"]["deadband"]
+    assert isinstance(shared, float) and 0.0 < shared < 0.02  # one compromise value
+    assert res.space == "per_joint" and res.params.is_per_joint("deadband")
+    assert len(res.to_dict()["params"]["deadband"]) == 6
+    assert res.train_score < res.stages[0]["train_score"]
+    band = res.params.per_joint("deadband")
+    # the gripper is left out of the score, so its band is unconstrained
+    np.testing.assert_allclose(band[:5], target[:5], atol=0.003)
 
 
 @pytest.mark.slow
