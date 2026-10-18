@@ -2026,6 +2026,7 @@ class CheckRequest(BaseModel):
     min_episodes: int = Field(5, ge=1)
     explain: bool = False
     explain_evaluations: int = Field(240, ge=10, le=2000)
+    record: bool = True
 
 
 @app.post("/api/check")
@@ -2034,6 +2035,8 @@ def check_drift(req: CheckRequest) -> dict:
 
     With ``explain`` a drifted result also carries ``diagnosis``: the
     parameter changes a refit found and which of them explain the drift.
+    Unless ``record`` is false the result (insufficient data included) is
+    appended to ``LOCK_DIR/<lock>.history.jsonl``; see ``GET /api/history``.
     """
     _lock_path(req.lock)  # validate the name before loading a dataset
     ds = get_dataset(req.dataset)
@@ -2046,6 +2049,13 @@ def check_drift(req: CheckRequest) -> dict:
         min_episodes=req.min_episodes,
     )
     out = result.to_dict()
+    if req.record:
+        from antares import history
+
+        try:
+            history.append(result, LOCK_DIR, name=req.lock)
+        except OSError as e:  # the verdict stands; say why it was not recorded
+            out["history_error"] = str(e)
     if req.explain and result.verdict == "drifted":
         try:
             out["diagnosis"] = run_diagnose(
@@ -2055,6 +2065,28 @@ def check_drift(req: CheckRequest) -> dict:
             out["diagnosis"] = None
             out["diagnosis_error"] = str(e.detail)
     return out
+
+
+@app.get("/api/history")
+def history_list() -> dict:
+    """Every lock in the lock dir with its check trend and latest recorded check."""
+    from antares import history
+
+    return {"locks": history.summary_all(LOCK_DIR)}
+
+
+@app.get("/api/history/{lock}")
+def history_get(lock: str) -> dict:
+    """The checks recorded for ``lock`` (oldest first) and their trend.
+
+    404 when the lock does not exist; a lock with no checks yet has
+    ``entries: []`` and a trend with ``n`` 0.
+    """
+    from antares import history
+
+    if not _lock_path(lock).is_file():  # 400 on a bad name
+        raise HTTPException(status_code=404, detail=f"no lock named {lock!r}")
+    return history.report(lock, LOCK_DIR)
 
 
 class DiagnoseRequest(BaseModel):
