@@ -59,12 +59,16 @@ def _hub_file(repo_id: str, filename: str) -> Path:
         return p
     from huggingface_hub.utils import EntryNotFoundError
 
-    from antares.hub import download
+    from antares.hub import HubUnavailable, download
 
     try:
         return download(repo_id, filename)
     except EntryNotFoundError as e:
         raise VideoUnavailable(f"{repo_id} has no {filename}") from e
+    except HubUnavailable as e:
+        # Offline (or behind a portal) with no cached copy: the same outcome
+        # as a dataset without the file, so the callers' fallbacks apply.
+        raise VideoUnavailable(str(e)) from e
 
 
 def dataset_info(repo_id: str) -> dict[str, Any]:

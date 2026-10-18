@@ -199,11 +199,11 @@ def hub_search(
 
 
 def fetch_info(repo_id: str) -> dict[str, Any]:
-    """Download only ``meta/info.json`` (cached by huggingface_hub) and parse it."""
-    from huggingface_hub import hf_hub_download
+    """Download only ``meta/info.json`` (through :func:`antares.hub.download`,
+    so the Hub cache and offline mode apply) and parse it."""
+    from antares.hub import download
 
-    path = hf_hub_download(repo_id, "meta/info.json", repo_type="dataset")
-    return json.loads(Path(path).read_text())
+    return json.loads(download(repo_id, "meta/info.json").read_text())
 
 
 def fetch_data_files(repo_id: str, api: Any = None) -> tuple[int, int]:
