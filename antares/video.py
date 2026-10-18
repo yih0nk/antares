@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -25,6 +26,7 @@ from antares.data import Dataset
 from antares.lock import slug
 
 FRAME_CACHE: Path = Path(os.environ.get("ANTARES_FRAME_CACHE", ".cache/antares/frames"))
+CLIP_CACHE: Path = Path(os.environ.get("ANTARES_CLIP_CACHE", ".cache/antares/clips"))
 VIDEO_PREFIX = "observation.images."
 
 
@@ -326,7 +328,93 @@ def frame_jpeg(frame: np.ndarray, quality: int = 80) -> bytes:
     return bytes(buf)
 
 
+# --------------------------------------------------------------------------
+# One episode as a browser-playable clip
+# --------------------------------------------------------------------------
+
+
+# Browser formats: H.264 mp4 plays in Chrome, Safari and Firefox; VP9 webm is
+# for Chromium builds without H.264 (the headless test browser).
+CLIP_FORMATS = {
+    "mp4": ("libx264", {"crf": "23", "preset": "veryfast"}),
+    "webm": ("libvpx-vp9", {"crf": "34", "b": "0", "deadline": "realtime", "cpu-used": "8", "row-mt": "1"}),
+}
+
+
+def episode_clip(repo_id: str, camera: str, episode: int, dataset: Dataset | None = None, fmt: str = "mp4") -> Path:
+    """``episode`` of ``camera`` as its own clip (``fmt`` mp4 or webm) whose
+    frame 0 is the episode's frame 0, for the viewer's video underlay.
+
+    The dataset's AV1 files hold many episodes back to back, and not every
+    browser decodes AV1 (Safari before M3 Macs does not), so the episode is
+    re-encoded once and kept under ``.cache/antares/clips/``.
+    """
+    av = _require_av()
+    from fractions import Fraction
+
+    if fmt not in CLIP_FORMATS:
+        raise ValueError(f"clip format must be one of {sorted(CLIP_FORMATS)}, not {fmt!r}")
+    codec, codec_options = CLIP_FORMATS[fmt]
+    out = CLIP_CACHE / slug(repo_id) / camera_name(camera) / f"ep{episode:05d}.{fmt}"
+    if out.is_file():
+        return out
+    segs = episode_segments(repo_id, camera, dataset)
+    if episode not in segs:
+        raise VideoUnavailable(f"episode {episode} not in {repo_id}'s {camera} video index")
+    seg = segs[episode]
+    cam = find_camera(repo_id, camera)
+    src = video_file(repo_id, camera, seg.chunk, seg.file)
+    rate = Fraction(cam.fps).limit_denominator(1001)
+    half = 0.5 / cam.fps
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_name(f"{out.stem}.{os.getpid()}.{threading.get_ident()}.tmp.{fmt}")
+    written = 0
+    try:
+        opts = {"movflags": "+faststart"} if fmt == "mp4" else {}
+        with av.open(str(src)) as inp, av.open(str(tmp), "w", options=opts) as dst:
+            stream = inp.streams.video[0]
+            stream.thread_type = "AUTO"
+            enc = dst.add_stream(codec, rate=rate)
+            # yuv420p needs even sides.
+            enc.width, enc.height = cam.width - cam.width % 2, cam.height - cam.height % 2
+            enc.pix_fmt = "yuv420p"
+            enc.options = dict(codec_options)
+            inp.seek(int(max(0.0, seg.from_ts - half) / stream.time_base), stream=stream, backward=True)
+            last = None
+            for frame in inp.decode(stream):
+                if frame.time is None:
+                    continue
+                last = frame
+                # Every wanted frame this decoded frame reaches (a dropped
+                # source frame repeats the one before it).
+                while written < seg.length and frame.time >= seg.from_ts + written / cam.fps - half:
+                    written = _encode(enc, dst, frame, written, 1 / rate)
+                if written >= seg.length:
+                    break
+            while last is not None and written < seg.length:  # past the end of the file
+                written = _encode(enc, dst, last, written, 1 / rate)
+            for packet in enc.encode():
+                dst.mux(packet)
+        if written == 0:
+            raise VideoUnavailable(f"no frames for episode {episode} in {src}")
+        os.replace(tmp, out)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return out
+
+
+def _encode(enc, dst, frame, i: int, time_base) -> int:
+    f = frame.reformat(width=enc.width, height=enc.height, format="yuv420p")
+    f.pts = i
+    f.time_base = time_base
+    for packet in enc.encode(f):
+        dst.mux(packet)
+    return i + 1
+
+
 __all__ = [
+    "CLIP_CACHE",
+    "CLIP_FORMATS",
     "FRAME_CACHE",
     "CameraInfo",
     "Segment",
@@ -336,6 +424,7 @@ __all__ = [
     "cameras_from_info",
     "dataset_info",
     "decode_at",
+    "episode_clip",
     "episode_segments",
     "find_camera",
     "frame_jpeg",
