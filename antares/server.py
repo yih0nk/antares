@@ -36,7 +36,7 @@ from pydantic import BaseModel, Field
 
 import antares
 from antares.data import Dataset, Episode
-from antares.robots import DEFAULT_ROBOT, get_robot, model_for_dataset
+from antares.robots import DEFAULT_ROBOT, get_robot, model_for_dataset, model_for_family
 from antares.validate import Verdict, merge_verdicts, robot_family, validate_dataset, validate_dataset_info
 
 # Datasets the demo offers out of the box.
@@ -1490,7 +1490,14 @@ def datasets_validate(dataset: str = Query(...)) -> dict:
     """Cheap pre-check (meta/info.json only, no data download): the Verdict."""
     with _DATASETS_LOCK:
         loaded = dataset in _DATASETS
-    return {"dataset": dataset, "loaded": loaded, "source": dataset_source(dataset), **validate_id(dataset).to_dict()}
+    verdict = validate_id(dataset)
+    return {
+        "dataset": dataset,
+        "loaded": loaded,
+        "source": dataset_source(dataset),
+        "robot": model_for_family(verdict.robot_family),
+        **verdict.to_dict(),
+    }
 
 
 @app.post("/api/datasets/upload")

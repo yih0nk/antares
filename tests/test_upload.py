@@ -236,6 +236,7 @@ def test_validate_endpoint_for_hub_ids(client, app, monkeypatch):
     monkeypatch.setattr(server, "fetch_hub_info", lambda rid: info(50, robot_type="so100"))
     v = client.get("/api/datasets/validate", params={"dataset": "someone/so100_arm"}).json()
     assert v["ok"] and v["robot_family"] == "so100" and v["loaded"] is False and v["source"] == "hub"
+    assert v["robot"] == server.model_for_family("so100")
     monkeypatch.setattr(server, "fetch_hub_info", lambda rid: info(50, robot_type="bi_so100_follower"))
     v = client.get("/api/datasets/validate", params={"dataset": "someone/bimanual"}).json()
     assert not v["ok"] and any("bimanual" in r for r in v["reasons"])
