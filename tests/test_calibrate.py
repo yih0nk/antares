@@ -709,3 +709,12 @@ def test_calibrate_from_a_servo_start_fits_the_servo_terms():
     assert res.params.kp == start.kp and res.params.forcerange == start.forcerange
     d = res.to_dict()["params"]
     assert d["servo"] == "sts3215" and "servo_gain" in d
+
+
+def test_seed_spread_of_servo_fits_covers_the_servo_fields():
+    from antares.calibrate import SERVO_SPACE, param_spread_of
+
+    fits = [SimParams.sts3215(servo_gain=0.8, damping=0.004), SimParams.sts3215(servo_gain=0.82, damping=0.04)]
+    spread, pinned = param_spread_of(fits)
+    assert set(spread) == set(SERVO_SPACE)
+    assert "servo_gain" in pinned and "damping" not in pinned and "kp" not in spread

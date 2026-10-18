@@ -433,13 +433,15 @@ def param_spread_of(params: Sequence[SimParams]) -> tuple[dict[str, dict[str, fl
     *pinned* when the fits agree on it: ratio at most :data:`PINNED_RATIO`,
     or latency within :data:`PINNED_LATENCY_FRAMES` frames. Other parameters
     moved between fits of equal quality and are not physical measurements.
+    Servo-model fits are compared on :data:`SERVO_SPACE`, the fields they fit.
     """
     params = list(params)
     if len(params) < 2:
         raise ValueError("spread needs at least two fits")
     spread: dict[str, dict[str, float]] = {}
     pinned: list[str] = []
-    for name, (_, _, scale) in SPACE.items():
+    space = SERVO_SPACE if params[0].uses_servo_model else SPACE
+    for name, (_, _, scale) in space.items():
         values = np.concatenate([np.asarray(p.per_joint(name), dtype=np.float64) for p in params])
         lo, hi = float(values.min()), float(values.max())
         if scale == "log":
