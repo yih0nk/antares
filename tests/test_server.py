@@ -8,6 +8,7 @@ import time
 import sys
 import types
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -1498,3 +1499,115 @@ def test_lock_simulate_holds_the_lock_command_map():
     _, mapped = sim(SimParams(), ep)
     plain = server.lock_simulate({"command_map": {"gain": [1.0] * 6, "bias": [0.0] * 6}})(SimParams(), ep)[1]
     assert mapped[-1, 1] > plain[-1, 1]
+
+
+# --------------------------------------------------------------------------
+# fleet dashboard
+# --------------------------------------------------------------------------
+
+COMMITTED_LOCK = Path(__file__).resolve().parents[1] / "locks" / "svla_so101_pickplace.lock.json"
+
+
+def _copy_lock(lock_dir: Path, name: str, **changes) -> dict:
+    """The committed demo lock under a new name (and optional edits)."""
+    body = json.loads(COMMITTED_LOCK.read_text())
+    body["name"] = name
+    body.update(changes)
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    (lock_dir / f"{name}{LOCK_SUFFIX}").write_text(json.dumps(body))
+    return body
+
+
+def test_dashboard_aggregates_locks(client, monkeypatch, tmp_path):
+    lock_dir = tmp_path / "locks"
+    monkeypatch.setattr(server, "LOCK_DIR", lock_dir)
+    monkeypatch.setattr(server, "LOCK_SUFFIX", LOCK_SUFFIX)
+    monkeypatch.setattr(server, "FLEET_DIR", lock_dir / "fleet")
+    monkeypatch.setattr(server, "_DATASETS", {})
+    monkeypatch.setitem(sys.modules, "antares.history", None)  # import -> ImportError
+
+    # no lock dir at all: an empty dashboard, not an error
+    r = client.get("/api/dashboard")
+    assert r.status_code == 200
+    assert r.json()["robots"] == [] and r.json()["fleet"] is None
+    assert r.json()["generated_at"].endswith("Z")
+
+    a = _copy_lock(lock_dir, "arm-a", seeds={"pinned": ["kp", "latency_frames"], "spread": {}})
+    _copy_lock(lock_dir, "arm-b", created_at="2026-10-18T00:00:00Z")
+    expected_after = a["result"]["eval_score"]
+    expected_before = a["result"]["baseline_eval_score"]
+    per_joint = a["result"]["per_joint_after"]
+    body = {k: v for k, v in per_joint.items() if k != "gripper"}
+    worst = max(body, key=body.get)
+    assert per_joint["gripper"] > per_joint[worst]  # the gripper would win if it counted
+
+    # a drift scan for arm-a only (verdict comes from the saved scan)
+    (lock_dir / "arm-a.drift.json").write_text(json.dumps({"lock": "arm-a", "verdict": "no drift"}))
+    # a fleet report that lists arm-b
+    (lock_dir / "fleet").mkdir()
+    (lock_dir / "fleet" / "fleet.json").write_text(json.dumps({
+        "created_at": "2026-10-17T21:44:12Z",
+        "robots": [{"lock": "arm-b", "dataset": a["dataset"], "fps": 30.0}],
+        "summary": {"n_robots": 1, "median_improvement": 0.5},
+    }))
+
+    d = client.get("/api/dashboard").json()
+    assert [r["name"] for r in d["robots"]] == ["arm-b", "arm-a"]  # newest first, like /api/locks
+    by = {r["name"]: r for r in d["robots"]}
+
+    ra = by["arm-a"]
+    assert ra["dataset"] == a["dataset"] and ra["robot_type"] == a["robot_type"]
+    assert ra["baseline_eval_score"] == pytest.approx(expected_before)
+    assert ra["eval_score"] == pytest.approx(expected_after)
+    assert ra["improvement"] == pytest.approx(1 - expected_after / expected_before, abs=1e-6)
+    assert ra["worst_joint"] == worst and ra["worst_joint_deg"] == pytest.approx(per_joint[worst])
+    assert ra["latency_frames"] == a["params"]["latency_frames"]
+    assert ra["drift"] == {"exists": True, "verdict": "no drift"}
+    assert ra["in_fleet"] is False and ra["fps"] is None
+    assert ra["pinned"] == ["kp", "latency_frames"]
+    assert ra["history"] == {"latest": None, "trend": None}
+
+    rb = by["arm-b"]
+    assert rb["created_at"] == "2026-10-18T00:00:00Z"
+    assert rb["drift"] == {"exists": False, "verdict": None}
+    assert rb["in_fleet"] is True and rb["fps"] == 30.0
+    assert rb["pinned"] is None
+
+    assert d["fleet"]["n_robots"] == 1 and d["fleet"]["median_improvement"] == 0.5
+    assert d["fleet"]["created_at"] == "2026-10-17T21:44:12Z" and d["fleet"]["locks"] == ["arm-b"]
+
+
+def test_dashboard_reads_check_history_when_available(client, monkeypatch, tmp_path):
+    lock_dir = tmp_path / "locks"
+    monkeypatch.setattr(server, "LOCK_DIR", lock_dir)
+    monkeypatch.setattr(server, "LOCK_SUFFIX", LOCK_SUFFIX)
+    monkeypatch.setattr(server, "FLEET_DIR", lock_dir / "fleet")
+    monkeypatch.setattr(server, "_DATASETS", {})
+    _copy_lock(lock_dir, "arm-a")
+    _copy_lock(lock_dir, "arm-b")
+
+    entry = {"at": "2026-10-17T10:00:00Z", "lock": "arm-a", "dataset": FAKE_DS, "verdict": "drifted",
+             "passed": False, "score": 2.1, "reference": 1.0, "limit": 1.5, "n_episodes": 5,
+             "episodes": [0, 1, 2, 3, 4], "worst_joint": "elbow_flex", "per_joint": {"elbow_flex": 2.1},
+             "antares_version": "0.0.1"}
+    trend = {"n": 3, "first": "2026-10-10T10:00:00Z", "last": entry["at"], "slope_deg_per_day": 0.1,
+             "r2": 0.9, "latest_verdict": "drifted", "n_drifted": 1}
+    seen = {}
+
+    def history_index(lock_dir):
+        seen["lock_dir"] = Path(lock_dir)
+        return {"locks": [{"lock": "arm-a", "trend": trend, "latest": entry}]}
+
+    monkeypatch.setitem(sys.modules, "antares.history", _module("antares.history", history_index=history_index))
+    by = {r["name"]: r for r in client.get("/api/dashboard").json()["robots"]}
+    assert seen["lock_dir"] == lock_dir
+    assert by["arm-a"]["history"] == {"latest": entry, "trend": trend}
+    assert by["arm-b"]["history"] == {"latest": None, "trend": None}
+
+    # a history module that blows up must not take the dashboard down
+    def broken(lock_dir):
+        raise RuntimeError("corrupt history")
+
+    monkeypatch.setitem(sys.modules, "antares.history", _module("antares.history", history_index=broken))
+    r = client.get("/api/dashboard")
+    assert r.status_code == 200 and all(x["history"]["latest"] is None for x in r.json()["robots"])
