@@ -39,7 +39,7 @@ body {
 
 .shell {
   display: grid;
-  grid-template-columns: 1fr 320px;
+  grid-template-columns: minmax(0, 1fr) 320px;
   grid-template-rows: 56px 1fr 214px;
   grid-template-areas:
     "top top"
@@ -102,10 +102,38 @@ body {
   pointer-events: none;
 }
 
-.show-toggle {
+.panes {
+  display: flex;
+  height: 100%;
+}
+
+.pane {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+}
+
+.pane + .pane {
+  border-left: 1px solid var(--border);
+}
+
+.pane-label {
+  position: absolute;
+  left: 16px;
+  bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.view-controls {
   position: absolute;
   right: 16px;
   top: 12px;
+  display: flex;
+  gap: 10px;
 }
 
 .legend span {

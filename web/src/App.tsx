@@ -1,5 +1,5 @@
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Canvas, useFrame } from "@react-three/fiber";
+import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Grid, OrbitControls } from "@react-three/drei";
 import {
   api,
@@ -18,6 +18,7 @@ import {
   type Replay,
   type Residual,
 } from "./api";
+import * as THREE from "three";
 import { Arm, compMaterial, ghostMaterial, realMaterial, type Playhead } from "./Arm";
 import { CameraView } from "./CameraView";
 import { CrossHeatmap, JointTrace, ResidualStrip, Sparkline } from "./Charts";
@@ -55,6 +56,8 @@ type Calibration = {
   result?: CalibrationResult;
   error?: string;
 };
+
+const noop = () => {};
 
 const short = (id: string) => id.split("/").pop() ?? id;
 
@@ -117,6 +120,24 @@ function Driver({
   return null;
 }
 
+const CAMERA_POSITION: [number, number, number] = [0.62, 0.48, 0.72];
+const CAMERA_TARGET: [number, number, number] = [0, 0.16, 0];
+// Widest view the default camera frames the whole arm in; narrower panes
+// (side by side) pull the camera back so the arm still fits.
+const FRAMED_ASPECT = 1.6;
+
+function FitCamera() {
+  const camera = useThree((s) => s.camera);
+  const aspect = useThree((s) => s.size.width / Math.max(1, s.size.height));
+  useEffect(() => {
+    const k = Math.max(1, FRAMED_ASPECT / aspect);
+    const [x, y, z] = CAMERA_POSITION;
+    const [tx, ty, tz] = CAMERA_TARGET;
+    camera.position.set(tx + (x - tx) * k, ty + (y - ty) * k, tz + (z - tz) * k);
+  }, [camera, aspect]);
+  return null;
+}
+
 // One 3D view: the real arm, the sim ghost and (optionally) the
 // lag-compensated sim for one episode, with its own playhead and camera.
 function Scene({
@@ -133,6 +154,7 @@ function Scene({
   frames,
   speed,
   onFrame,
+  ghostMat = ghostMaterial,
 }: {
   geometry: Geometry | null;
   realPoses: number[][][] | null;
@@ -147,9 +169,12 @@ function Scene({
   frames: number;
   speed: number;
   onFrame: (f: number) => void;
+  // A second pane gets its own copy: the warm glow on hot spans animates it.
+  ghostMat?: THREE.Material;
 }) {
   return (
-    <Canvas shadows camera={{ position: [0.62, 0.48, 0.72], fov: 38, near: 0.01, far: 20 }}>
+    <Canvas shadows camera={{ position: CAMERA_POSITION, fov: 38, near: 0.01, far: 20 }}>
+      <FitCamera />
       <color attach="background" args={["#0b0d12"]} />
       <ambientLight intensity={0.55} />
       <directionalLight position={[0.8, 1.6, 0.6]} intensity={1.3} castShadow shadow-mapSize={[1024, 1024]} />
@@ -179,7 +204,7 @@ function Scene({
               poses={simPoses}
               clip={clip}
               playhead={playhead}
-              material={ghostMaterial}
+              material={ghostMat}
               hotSpans={hotSpans}
               hidden={show === "real"}
             />
@@ -195,7 +220,7 @@ function Scene({
         </Suspense>
       )}
       <Driver playhead={playhead} playing={playing} fps={fps} frames={frames} speed={speed} onFrame={onFrame} />
-      <OrbitControls makeDefault target={[0, 0.16, 0]} />
+      <OrbitControls makeDefault target={CAMERA_TARGET} />
     </Canvas>
   );
 }
@@ -226,6 +251,10 @@ export default function App() {
   const [playing, setPlaying] = useState(true);
   const [speed, setSpeed] = useState(1);
   const [show, setShow] = useState<Show>("both");
+  // A second episode shown side by side with the first; null when off.
+  const [compare, setCompare] = useState<number | null>(null);
+  const [compareBase, setCompareBase] = useState<Replay | null>(null);
+  const [compareReplay, setCompareReplay] = useState<Replay | null>(null);
   const [frame, setFrame] = useState(0);
   const [joint, setJoint] = useState("shoulder_pan");
   const [calib, setCalib] = useState<Calibration | null>(null);
@@ -243,6 +272,8 @@ export default function App() {
   const [compBusy, setCompBusy] = useState(false);
 
   const playhead = useMemo<Playhead>(() => ({ frame: 0 }), []);
+  const comparePlayhead = useMemo<Playhead>(() => ({ frame: 0 }), []);
+  const compareGhostMat = useMemo(() => ghostMaterial.clone(), []);
 
   // ---- initial load ---------------------------------------------------------
   useEffect(() => {
@@ -290,6 +321,7 @@ export default function App() {
     setReplay(null);
     setBaseline(null);
     setGhost(DEFAULT);
+    setCompare(null);
     api
       .loadDataset(dataset)
       .then((info) => {
@@ -332,11 +364,53 @@ export default function App() {
       (e) => live && setError(`Replay failed: ${e.message}`),
     );
     playhead.frame = 0;
+    comparePlayhead.frame = 0;
     setFrame(0);
     return () => {
       live = false;
     };
-  }, [dataset, episode, playhead]);
+  }, [dataset, episode, playhead, comparePlayhead]);
+
+  // ---- second episode, side by side -----------------------------------------
+  // Its ghost follows the first pane's choice: default, the same lock, or the
+  // live fit's current best parameters. Both panes restart together.
+  useEffect(() => {
+    setCompareBase(null);
+    setCompareReplay(null);
+    if (!dataset || compare == null) return;
+    let live = true;
+    api.replay(dataset, compare, null).then(
+      (r) => live && setCompareBase(r),
+      (e) => live && setError(`Replay of episode ${compare} failed: ${e.message}`),
+    );
+    return () => {
+      live = false;
+    };
+  }, [dataset, compare]);
+
+  useEffect(() => {
+    playhead.frame = 0;
+    comparePlayhead.frame = 0;
+    setFrame(0);
+  }, [compare, playhead, comparePlayhead]);
+
+  const liveParams = ghost === LIVE ? replay?.params ?? null : null;
+  useEffect(() => {
+    if (!dataset || compare == null) return;
+    if (ghost === DEFAULT) {
+      setCompareReplay(compareBase);
+      return;
+    }
+    if (ghost === LIVE && !liveParams) return;
+    let live = true;
+    (ghost === LIVE && liveParams ? api.replayParams(dataset, compare, liveParams) : api.replay(dataset, compare, ghost)).then(
+      (r) => live && setCompareReplay(r),
+      () => {}, // the first pane already reports replay errors
+    );
+    return () => {
+      live = false;
+    };
+  }, [dataset, compare, ghost, compareBase, liveParams]);
 
   // ---- ghost replay for a saved lock ----------------------------------------
   useEffect(() => {
@@ -570,8 +644,10 @@ export default function App() {
   // Camera fits live with a lock: the ghost's, or the dataset's first saved one.
   const cameraLock = ghost !== DEFAULT && ghost !== LIVE ? ghost : dsLocks[0]?.name ?? null;
 
+  const compareFrames = compareBase?.real_poses.length ?? 0;
   const seek = (f: number) => {
     playhead.frame = f;
+    if (compareFrames) comparePlayhead.frame = f % compareFrames;
     setFrame(Math.floor(f));
   };
 
@@ -626,21 +702,63 @@ export default function App() {
       ) : (
       <>
       <main className="viewer">
-        <Scene
-          geometry={geometry}
-          realPoses={baseline?.real_poses ?? null}
-          simPoses={replay?.sim_poses ?? null}
-          compPoses={compPoses}
-          hotSpans={hotSpans}
-          clip={clip}
-          show={show}
-          playhead={playhead}
-          playing={playing}
-          fps={fps}
-          frames={frames}
-          speed={speed}
-          onFrame={setFrame}
-        />
+        <div className="panes">
+          <div className="pane">
+            <Scene
+              geometry={geometry}
+              realPoses={baseline?.real_poses ?? null}
+              simPoses={replay?.sim_poses ?? null}
+              compPoses={compPoses}
+              hotSpans={hotSpans}
+              clip={clip}
+              show={show}
+              playhead={playhead}
+              playing={playing}
+              fps={fps}
+              frames={frames}
+              speed={speed}
+              onFrame={setFrame}
+            />
+            {compare != null && <div className="pane-label">episode {episode ?? "--"} · {deg(ghostGap?.overall_deg)}</div>}
+          </div>
+          {compare != null && (
+            <div className="pane">
+              <Scene
+                geometry={geometry}
+                realPoses={compareBase?.real_poses ?? null}
+                simPoses={compareReplay?.sim_poses ?? null}
+                compPoses={null}
+                hotSpans={null}
+                clip={`${dataset}#${compare}`}
+                show={show}
+                playhead={comparePlayhead}
+                playing={playing}
+                fps={compareBase?.fps ?? fps}
+                frames={compareFrames}
+                speed={speed}
+                onFrame={noop}
+                ghostMat={compareGhostMat}
+              />
+              <div className="pane-label">
+                <select
+                  className="picker"
+                  value={compare}
+                  onChange={(e) => setCompare(Number(e.target.value))}
+                  aria-label="Episode shown beside the first"
+                >
+                  {episodes
+                    .filter((e) => e.index !== episode)
+                    .map((e) => (
+                      <option key={e.index} value={e.index}>
+                        episode {e.index} · {e.duration_s.toFixed(1)}s
+                      </option>
+                    ))}
+                </select>
+                {deg(compareReplay?.gap?.overall_deg)}
+              </div>
+            </div>
+          )}
+        </div>
 
         <div className="legend">
           {show !== "sim" && (
@@ -668,12 +786,24 @@ export default function App() {
           )}
         </div>
 
-        <div className="segmented show-toggle" role="group" aria-label="Arms shown">
-          {SHOW.map((v) => (
-            <button key={v} className={show === v ? "on" : ""} onClick={() => setShow(v)}>
-              {v === "both" ? "Real + sim" : v === "real" ? "Real only" : "Sim only"}
+        <div className="view-controls">
+          <div className="segmented">
+            <button
+              className={compare != null ? "on" : ""}
+              onClick={() => setCompare(compare != null ? null : episodes.find((e) => e.index !== episode)?.index ?? null)}
+              disabled={episodes.length < 2}
+              title="Play a second episode side by side with the first"
+            >
+              Side by side
             </button>
-          ))}
+          </div>
+          <div className="segmented" role="group" aria-label="Arms shown">
+            {SHOW.map((v) => (
+              <button key={v} className={show === v ? "on" : ""} onClick={() => setShow(v)}>
+                {v === "both" ? "Real + sim" : v === "real" ? "Real only" : "Sim only"}
+              </button>
+            ))}
+          </div>
         </div>
 
         {(dsState === "loading" || (!baseline && !error)) && (
@@ -981,7 +1111,11 @@ export default function App() {
           <select
             className="picker"
             value={episode ?? ""}
-            onChange={(e) => setEpisode(Number(e.target.value))}
+            onChange={(e) => {
+              const ep = Number(e.target.value);
+              if (ep === compare) setCompare(null);
+              setEpisode(ep);
+            }}
             disabled={!episodes.length}
           >
             {episodes.map((e) => (
