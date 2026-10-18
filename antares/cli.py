@@ -1431,14 +1431,28 @@ def _load_lock_arg(lock: str) -> dict:
 def cmd_synth(args: argparse.Namespace) -> int:
     from antares import server, synth
 
+    arm = None
     if args.lock:
         from antares.check import _lock_view
+        from antares.sim import Arm
 
         try:
-            params = _lock_view(_load_lock_arg(args.lock))[2]
+            lock_d = _load_lock_arg(args.lock)
+            params = _lock_view(lock_d)[2]
+            # The lock's own sim: its sensor and unit maps shape the recording
+            # just as they shape the replay `antares check` scores it with.
+            arm = Arm(
+                robot=server.check_robot(lock_d.get("robot")),
+                command_map=server.command_map_from_lock(lock_d),
+                **({"unit_map": um} if (um := server.unit_map_from_lock(lock_d)) is not None else {}),
+            )
         except Exception as e:  # noqa: BLE001 - HTTPException, bad JSON or a lock without params
             detail = getattr(e, "detail", None) or f"{type(e).__name__}: {e}"
             print(f"--lock: {detail}", file=sys.stderr)
+            return EXIT_USAGE
+        if arm.n_joints != 6:
+            print(f"--lock: synth generates SO-arm motions; {arm.robot.name} has {arm.n_joints} joints",
+                  file=sys.stderr)
             return EXIT_USAGE
     else:
         params = server.default_params()
@@ -1459,6 +1473,7 @@ def cmd_synth(args: argparse.Namespace) -> int:
         seed=args.seed,
         noise_units=args.noise,
         repo_id=args.out,
+        arm=arm,
     )
     synth.write_local(ds, args.out)
     print(f"wrote {len(ds.episodes)} episodes x {args.frames} frames -> {args.out}")
