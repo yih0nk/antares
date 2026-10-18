@@ -12,6 +12,8 @@ import {
   type Geometry,
   type JobEvent,
   type LockSummary,
+  type ObjectsFit,
+  type ObjectTrack,
   type Params,
   type ParamValue,
   type ProgressEvent,
@@ -22,6 +24,7 @@ import {
 import { Arm, compMaterial, ghostMaterial, realMaterial, type Playhead } from "./Arm";
 import { CameraView } from "./CameraView";
 import { SceneGeometry } from "./Scene";
+import { ObjectMarker } from "./Objects";
 import { CrossHeatmap, JointTrace, ResidualStrip, Sparkline } from "./Charts";
 import { AddDataset } from "./AddDataset";
 import { FleetView } from "./Fleet";
@@ -158,6 +161,9 @@ export default function App() {
   const [compBusy, setCompBusy] = useState(false);
   // The static scene (table, workspace) fitted for the camera lock, if any.
   const [scene, setScene] = useState<SceneFit | null>(null);
+  // The manipulated object fitted for the camera lock, and this episode's track.
+  const [objects, setObjects] = useState<ObjectsFit | null>(null);
+  const [track, setTrack] = useState<ObjectTrack | null>(null);
 
   const playhead = useMemo<Playhead>(() => ({ frame: 0 }), []);
 
@@ -503,6 +509,38 @@ export default function App() {
     };
   }, [cameraLock]);
 
+  // ---- objects fit saved for the camera lock ---------------------------------
+  useEffect(() => {
+    if (!cameraLock) {
+      setObjects(null);
+      return;
+    }
+    let live = true;
+    api.objects(cameraLock).then(
+      (r) => live && setObjects(r.objects),
+      () => live && setObjects(null),
+    );
+    return () => {
+      live = false;
+    };
+  }, [cameraLock]);
+
+  // ---- the object's per-frame track for this episode -------------------------
+  // Fetched once per episode (the saved track, or a few seconds of tracking
+  // on the server the first time); the viewer reads it at the playhead.
+  useEffect(() => {
+    setTrack(null);
+    if (!dataset || episode == null || !cameraLock || !objects || objects.lock !== cameraLock) return;
+    let live = true;
+    api.objectsTrack(dataset, episode, cameraLock).then(
+      (t) => live && setTrack(t),
+      () => live && setTrack(null),
+    );
+    return () => {
+      live = false;
+    };
+  }, [dataset, episode, cameraLock, objects]);
+
   const seek = (f: number) => {
     playhead.frame = f;
     setFrame(Math.floor(f));
@@ -587,6 +625,7 @@ export default function App() {
                 />
                 <Arm geometry={geometry} poses={compPoses} clip={clip} playhead={playhead} material={compMaterial} />
                 <SceneGeometry scene={scene} />
+                <ObjectMarker track={track} playhead={playhead} />
               </group>
             </Suspense>
           )}
@@ -611,6 +650,12 @@ export default function App() {
           {scene && (
             <span className="muted small">
               table at {(scene.table.z * 1000).toFixed(0)} mm, workspace box from the logs
+            </span>
+          )}
+          {track && (
+            <span className="muted small">
+              <i className="swatch" style={{ background: `rgb(${track.rgb.join(",")})` }} /> object from the video
+              {track.source[Math.min(track.source.length - 1, frame)] === "held" ? " (held: fingertip from FK)" : ""}
             </span>
           )}
           {inEvent && (
@@ -792,6 +837,9 @@ export default function App() {
           busy={running}
           scene={scene}
           onSceneChange={setScene}
+          objects={objects}
+          onObjectsChange={setObjects}
+          track={track}
           onError={setError}
         />
 

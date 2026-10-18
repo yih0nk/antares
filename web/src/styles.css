@@ -649,6 +649,23 @@ body {
   opacity: 0.85;
 }
 
+/* the tracked object: solid box where the camera sees it, dashed where the
+   position comes from FK (held) or is carried forward (hidden) */
+.cam-obj {
+  fill: none;
+  stroke-width: 2;
+}
+
+.cam-obj.held,
+.cam-obj.hidden {
+  stroke-dasharray: 5 4;
+  opacity: 0.8;
+}
+
+.cam-obj-dot {
+  stroke: none;
+}
+
 .cam-empty {
   position: absolute;
   inset: 0;

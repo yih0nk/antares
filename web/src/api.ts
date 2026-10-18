@@ -434,6 +434,99 @@ export type SceneView = {
   n_geoms: number;
 };
 
+// ---- objects (antares.objects / antares.payload): the manipulated object ----
+
+type Quartiles = { n: number; median: number; q1: number; q3: number; iqr: number; max?: number; std?: number };
+
+// One episode's summary as saved in locks/<lock>.objects.json.
+export type ObjectTrackSummary = {
+  episode: number;
+  camera: string;
+  n_frames: number;
+  n_visible: number;
+  picks: number[][]; // [[grasp, release], ...] held windows
+  start_pose: number[] | null;
+  end_pose: number[] | null;
+  end_source: "vision" | "fk" | "none";
+  footprint_m: number[] | null;
+  fk_grasp: number[] | null;
+  fk_release: number[] | null;
+  vision_vs_fk_m: number | null;
+  end_vs_fk_m: number | null;
+  note: string;
+};
+
+export type ObjectCloud = { n: number; mean: number[]; std: number[]; min: number[]; max: number[]; points: number[][] };
+
+// The residual-based mass estimate; `verdict` says whether it is a measurement.
+export type PayloadEstimate = {
+  kp: Record<string, number>;
+  mass_kg: number | null;
+  mass_iqr_kg: number | null;
+  mass: Quartiles | null;
+  mass_by_joint: Record<string, Quartiles | null>;
+  payload_deg: Record<string, Quartiles | null>;
+  motion_deg: Record<string, Quartiles | null>;
+  mass_per_step_kg: Record<string, number | null>;
+  mass_noise_floor_kg: Record<string, number | null>;
+  n_ok: number;
+  n_episodes: number;
+  verdict: string;
+  assumptions: string[];
+};
+
+// GET /api/objects?lock=: locks/<lock>.objects.json.
+export type ObjectsFit = {
+  lock: string;
+  dataset: string;
+  camera: string;
+  robot: string;
+  table_z: number;
+  object_half_height: number;
+  prior: { lab: number[]; spread: number[]; area_px: number; rgb: number[]; n_samples: number };
+  description: string;
+  tracks: ObjectTrackSummary[];
+  start: ObjectCloud | null;
+  end: ObjectCloud | null;
+  footprint_m: { long: Quartiles | null; short: Quartiles | null } | null;
+  vision_vs_fk_m: Quartiles | null;
+  end_vs_fk_m: Quartiles | null;
+  vision_vs_fk_offset_m: number[] | null;
+  vision_vs_fk_centred_m: Quartiles | null;
+  cross_camera: Record<string, unknown> | null;
+  payload: PayloadEstimate | null;
+  n_episodes: number;
+  n_tracked: number;
+  elapsed_s: number;
+  created_at: string;
+};
+
+// GET /api/objects/track: one episode frame by frame. `source` says where
+// each position comes from; `centroid`/`bbox` are pixels in the fit's camera.
+export type ObjectTrack = ObjectTrackSummary & {
+  dataset: string;
+  lock: string;
+  rgb: number[];
+  half_height: number;
+  frames: number[];
+  xyz: number[][]; // (T, 3) base frame, m
+  visible: boolean[];
+  source: ("vision" | "held" | "hidden")[];
+  centroid: (number[] | null)[];
+  bbox: (number[] | null)[]; // [x, y, w, h]
+};
+
+export type ObjectsProgressEvent =
+  | { type: "progress"; stage: "prior"; i: number; n: number; elapsed_s: number; prior: ObjectsFit["prior"] }
+  | { type: "progress"; stage: "track"; episode: number; i: number; n: number; elapsed_s: number; track: ObjectTrackSummary }
+  | { type: "progress"; stage: "cross"; cross_camera: Record<string, unknown> }
+  | { type: "progress"; stage: "payload"; episode: number; i: number; n: number; mass_kg: number | null };
+
+export type ObjectsJobEvent =
+  | ObjectsProgressEvent
+  | { type: "done"; fit: ObjectsFit & { path: string } }
+  | { type: "error"; message: string };
+
 async function json<T>(r: Response): Promise<T> {
   if (!r.ok) {
     let body: unknown = null;
@@ -574,6 +667,17 @@ export const api = {
     }).then((r) => json<SceneFit & { path: string }>(r)),
   sceneView: (dataset: string, camera: string, episode: number, frame: number, lock: string) =>
     fetch(`/api/scene/view?${q({ dataset, camera, episode, frame, lock })}`).then((r) => json<SceneView>(r)),
+  // ---- objects ----
+  objects: (lock: string) =>
+    fetch(`/api/objects?${q({ lock })}`).then((r) => json<{ lock: string; objects: ObjectsFit | null }>(r)),
+  objectsFit: (dataset: string, lock: string, camera?: string) =>
+    fetch("/api/objects/fit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(camera ? { dataset, lock, camera } : { dataset, lock }),
+    }).then((r) => json<{ job_id: string }>(r)),
+  objectsTrack: (dataset: string, episode: number, lock: string) =>
+    fetch(`/api/objects/track?${q({ dataset, episode, lock })}`).then((r) => json<ObjectTrack>(r)),
   jobEvents: (jobId: string) => new EventSource(`/api/jobs/${jobId}/events`),
   cancelJob: (jobId: string) => fetch(`/api/jobs/${jobId}/cancel`, { method: "POST" }).then((r) => json(r)),
 };
