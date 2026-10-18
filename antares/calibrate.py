@@ -234,8 +234,6 @@ class SearchSpace:
 
 SHARED = SearchSpace(SPACE, per_joint=False)
 PER_JOINT = SearchSpace(PER_JOINT_SPACE, per_joint=True)
-#: :data:`SHARED` plus the gravity load.
-SHARED_GRAVITY = SearchSpace({**SPACE, **GRAVITY_SPACE}, per_joint=False)
 
 
 def spaces(fit_gravity: bool = False, fit_deadband: bool = False) -> tuple[SearchSpace, SearchSpace]:
@@ -711,8 +709,8 @@ def calibrate(
     optimum with step size ``per_joint_sigma0``; ``per_joint_popsize`` of
     None takes CMA-ES's default for that dimensionality.
 
-    ``fit_gravity=True`` adds ``gravity_scale`` to the shared stage
-    (:data:`SHARED_GRAVITY`); the per-joint stage keeps the shared value.
+    ``fit_gravity=True`` adds ``gravity_scale`` to the shared stage (see
+    :func:`spaces`); the per-joint stage keeps the shared value.
     ``fit_deadband=True`` adds the servo ``deadband``: one value in the
     shared stage, one per joint in the per-joint stage.
 
@@ -889,7 +887,6 @@ __all__ = [
     "DEADBAND_SPACE",
     "spaces",
     "SHARED",
-    "SHARED_GRAVITY",
     "PER_JOINT",
     "SimulateFn",
     "ProgressEvent",

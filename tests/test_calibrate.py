@@ -594,13 +594,16 @@ def test_calibrate_with_real_arm_smoke():
 
 
 def test_fit_gravity_adds_one_shared_dimension():
-    from antares.calibrate import GRAVITY_SPACE, SHARED_GRAVITY
+    import antares.calibrate as cal
+    from antares.calibrate import GRAVITY_SPACE, spaces
 
-    assert SHARED_GRAVITY.name == "shared"
-    assert SHARED_GRAVITY.dims == DIMS + ("gravity_scale",)
-    p = SHARED_GRAVITY.decode(SHARED_GRAVITY.encode(SimParams(gravity_scale=0.4)))
+    shared, per_joint = spaces(fit_gravity=True)
+    assert shared.name == "shared" and per_joint == PER_JOINT
+    assert shared.dims == DIMS + ("gravity_scale",)
+    p = shared.decode(shared.encode(SimParams(gravity_scale=0.4)))
     assert p.gravity_scale == pytest.approx(0.4)
     assert GRAVITY_SPACE["gravity_scale"][:2] == (0.0, 2.0)
+    assert not hasattr(cal, "SHARED_GRAVITY")  # spaces() is the one source of the optional spaces
 
 
 def test_calibrate_fit_gravity_searches_gravity_scale():
