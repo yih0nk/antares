@@ -1993,8 +1993,10 @@ def replay(
 class ReplayRequest(BaseModel):
     dataset: str
     episode: int
-    # A value is a scalar or a per-joint list of 6, as SimParams.from_dict accepts.
-    params: dict[str, float | list[float]]
+    # A value is a scalar or a per-joint list of 6, as SimParams.from_dict
+    # accepts; ``servo`` (the actuator model's name, written by a servo-model
+    # fit's to_dict) is a string. Anything else is rejected by params_from_dict.
+    params: dict[str, float | list[float] | str]
     # Optional {"gain": [6], "bias": [6]}, as a lock stores it (extra keys such
     # as its "mode" are ignored); omitted means identity.
     command_map: dict[str, Any] | None = None

@@ -38,9 +38,15 @@ class FakeParams:
     armature: float = 0.01
     frictionloss: float = 0.05
     latency_frames: int = 0
+    # the servo model's name and its gain, written only with a servo model (as SimParams)
+    servo: str = "position"
+    servo_gain: float = 1.0
 
     def to_dict(self):
-        return self.__dict__.copy()
+        d = self.__dict__.copy()
+        if self.servo == "position":
+            del d["servo"], d["servo_gain"]
+        return d
 
     @classmethod
     def from_dict(cls, d):
@@ -553,6 +559,19 @@ def test_replay_with_explicit_params(client, fakes):
     assert out["gap"]["overall_deg"] < base["gap"]["overall_deg"]
     bad = client.post("/api/replay", json={"dataset": FAKE_DS, "episode": 99, "params": params})
     assert bad.status_code == 404
+
+
+def test_replay_with_servo_model_params(client, fakes):
+    # A --servo calibration's best_params carry the string ``servo``; the web
+    # UI posts them for the live ghost, so the request model must accept it
+    # and hand it to SimParams.from_dict rather than answering 422.
+    params = {**FakeParams().to_dict(), "servo": "sts3215", "servo_gain": 1.2}
+    r = client.post("/api/replay", json={"dataset": FAKE_DS, "episode": 0, "params": params})
+    assert r.status_code == 200, r.text
+    assert r.json()["params"]["servo"] == "sts3215" and r.json()["params"]["servo_gain"] == 1.2
+    # a value that is neither a number, a list nor a string is still a 422
+    bad = client.post("/api/replay", json={"dataset": FAKE_DS, "episode": 0, "params": {**params, "kp": {"a": 1}}})
+    assert bad.status_code == 422
 
 
 def test_replay_with_per_joint_param_lists(client, fakes):
