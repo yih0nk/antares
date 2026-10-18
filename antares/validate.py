@@ -173,7 +173,7 @@ def validate_dataset_info(
     rt = robot_type.lower()
     if not robot_type:
         v.reasons.append("robot_type missing (expected so100, so101 or so_follower)")
-    elif _BIMANUAL_RE.search(rt) and (_SO100_RE.search(rt) or _SO101_RE.search(rt)):
+    elif _BIMANUAL_RE.search(rt) and re.search(r"so[-_ ]?(?:arm)?[-_ ]?10[01]|so[-_]?follower", rt):
         v.reasons.append(f"robot_type {robot_type!r} is a bimanual rig; antares simulates one six-joint arm")
     elif v.robot_family is None:
         v.reasons.append(f"robot_type {robot_type!r} is not an SO-100/101")
@@ -302,7 +302,10 @@ def merge_verdicts(info: Verdict, data: Verdict) -> Verdict:
     """The data verdict with the info verdict's extra warnings folded in."""
     out = Verdict.from_dict(data.to_dict())
     out.codebase_version = out.codebase_version or info.codebase_version
+    counted = any(w.startswith("only ") for w in out.warnings)
     for w in info.warnings:
+        if w.startswith("only ") and counted:
+            continue  # the loaded data already said how many episodes are usable
         if w not in out.warnings:
             out.warnings.append(w)
     for r in info.reasons:
