@@ -1406,7 +1406,11 @@ def cmd_synth(args: argparse.Namespace) -> int:
     else:
         params = server.default_params()
     try:
-        params = synth.worn(params, synth.parse_changes(args.wear))
+        from antares.diagnose import apply_change
+
+        # apply_change is worn() plus the servo mapping: on a servo lock a kp
+        # factor scales the servo's gain instead of the derived (recomputed) kp
+        params = apply_change(params, synth.parse_changes(args.wear))
     except ValueError as e:
         print(f"--wear: {e}", file=sys.stderr)
         return EXIT_USAGE
