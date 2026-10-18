@@ -13,14 +13,20 @@ FPS = 30.0
 LENGTHS = [12, 15]  # two episodes back to back in one file
 
 
-def _source(path, W=66, H=50):
-    """A file whose frame k is filled with grey level 8*k, so a decoded frame names its index."""
+def _source(path, W=66, H=50, dropped=()):
+    """A file whose frame k is filled with grey level 8*k, so a decoded frame
+    names its index; frames in ``dropped`` are missing (a timestamp gap)."""
+    from fractions import Fraction
+
     with av.open(str(path), "w") as out:
         s = out.add_stream("libx264", rate=int(FPS))
         s.width, s.height, s.pix_fmt = W, H, "yuv420p"
         s.options = {"crf": "0", "preset": "ultrafast"}
         for k in range(sum(LENGTHS)):
+            if k in dropped:
+                continue
             f = av.VideoFrame.from_ndarray(np.full((H, W, 3), 8 * k, np.uint8), format="rgb24")
+            f.pts, f.time_base = k, Fraction(1, int(FPS))
             for p in s.encode(f):
                 out.mux(p)
         for p in s.encode():
@@ -61,6 +67,12 @@ def test_clip_is_cached(stubbed):
     mtime = a.stat().st_mtime_ns
     assert video.episode_clip("fake/ds", "up", 0) == a and a.stat().st_mtime_ns == mtime
     assert not list(a.parent.glob("*.tmp.mp4"))
+
+
+def test_datasets_with_the_same_name_get_their_own_clips(stubbed):
+    a = video.episode_clip("alice/so100_test", "up", 0)
+    b = video.episode_clip("bob/so100_test", "up", 0)
+    assert a != b and a.is_file() and b.is_file()
 
 
 def test_unknown_episode_or_format_is_refused(stubbed):

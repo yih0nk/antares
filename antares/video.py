@@ -13,6 +13,7 @@ Decoding needs PyAV (``pip install "antares[video]"``); it ships dav1d.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
@@ -355,15 +356,25 @@ def episode_clip(repo_id: str, camera: str, episode: int, dataset: Dataset | Non
     if fmt not in CLIP_FORMATS:
         raise ValueError(f"clip format must be one of {sorted(CLIP_FORMATS)}, not {fmt!r}")
     codec, codec_options = CLIP_FORMATS[fmt]
-    out = CLIP_CACHE / slug(repo_id) / camera_name(camera) / f"ep{episode:05d}.{fmt}"
-    if out.is_file():
-        return out
     segs = episode_segments(repo_id, camera, dataset)
     if episode not in segs:
         raise VideoUnavailable(f"episode {episode} not in {repo_id}'s {camera} video index")
     seg = segs[episode]
     cam = find_camera(repo_id, camera)
     src = video_file(repo_id, camera, seg.chunk, seg.file)
+    # Keyed by the full dataset id (fleet datasets share names across
+    # accounts) and the source file, so a re-recorded local dataset re-encodes.
+    full_id = str(Path(repo_id).resolve()) if _is_local(repo_id) else repo_id
+    st = src.stat()
+    source = f"{st.st_size}:{st.st_mtime_ns}:{seg.from_ts}:{seg.length}:{cam.width}x{cam.height}@{cam.fps}"
+    out = (
+        CLIP_CACHE
+        / f"{slug(repo_id)}-{hashlib.sha1(full_id.encode()).hexdigest()[:10]}"
+        / camera_name(camera)
+        / f"ep{episode:05d}-{hashlib.sha1(source.encode()).hexdigest()[:10]}.{fmt}"
+    )
+    if out.is_file():
+        return out
     rate = Fraction(cam.fps).limit_denominator(1001)
     half = 0.5 / cam.fps
     out.parent.mkdir(parents=True, exist_ok=True)
