@@ -6,6 +6,9 @@ import {
   type CameraJobEvent,
   type CameraOverlay,
   type CameraProgressEvent,
+  type ObjectsFit,
+  type ObjectsJobEvent,
+  type ObjectTrack,
   type SceneFit,
   type SceneView,
 } from "./api";
@@ -30,8 +33,24 @@ type Props = {
   // The scene fit saved for `lock`, owned by the app (the 3D viewer draws it too).
   scene: SceneFit | null;
   onSceneChange: (scene: SceneFit | null) => void;
+  // The objects fit saved for `lock` and this episode's per-frame track,
+  // both owned by the app (the 3D viewer draws the tracked box too).
+  objects: ObjectsFit | null;
+  onObjectsChange: (fit: ObjectsFit | null) => void;
+  track: ObjectTrack | null;
   onError: (message: string) => void;
 };
+
+type ObjectsJob = {
+  jobId: string;
+  status: "running" | "done" | "error" | "cancelled";
+  i: number;
+  n: number;
+  stage: string;
+  error?: string;
+};
+
+const grams = (kg: number | null | undefined) => (kg == null || !isFinite(kg) ? "--" : `${(kg * 1000).toFixed(0)} g`);
 
 type ViewMode = "overlay" | "sim" | "both";
 
@@ -57,8 +76,11 @@ const stageLabel = (ev?: CameraProgressEvent) => {
 const mm = (v: number | null | undefined) => (v == null || !isFinite(v) ? "--" : `${(v * 1000).toFixed(1)} mm`);
 const cm = (v: number) => `${(v * 100).toFixed(0)}`;
 
-export function CameraView({ dataset, episode, frame, playing, lock, busy, scene, onSceneChange, onError }: Props) {
+export function CameraView({ dataset, episode, frame, playing, lock, busy, scene, onSceneChange, objects, onObjectsChange, track, onError }: Props) {
   const [cameras, setCameras] = useState<CameraInfo[]>([]);
+  const [objectsJob, setObjectsJob] = useState<ObjectsJob | null>(null);
+  const objectsSourceRef = useRef<EventSource | null>(null);
+  useEffect(() => () => objectsSourceRef.current?.close(), []);
   const [camera, setCamera] = useState<string>("");
   const [fits, setFits] = useState<Record<string, CameraFit>>({});
   const [job, setJob] = useState<Job | null>(null);
@@ -204,6 +226,55 @@ export function CameraView({ dataset, episode, frame, playing, lock, busy, scene
     setJob((j) => (j ? { ...j, status: j.status === "running" ? "cancelled" : j.status } : j));
   };
 
+  // ---- objects fit job: track the object through every episode -------------
+  const startObjectsFit = async () => {
+    if (!dataset || !lock) return;
+    let jobId: string;
+    try {
+      ({ job_id: jobId } = await api.objectsFit(dataset, lock, fit ? camera : undefined));
+    } catch (e) {
+      onError(`Could not start the object fit: ${(e as Error).message}`);
+      return;
+    }
+    setObjectsJob({ jobId, status: "running", i: 0, n: 0, stage: "starting" });
+    objectsSourceRef.current?.close();
+    const src = api.jobEvents(jobId);
+    objectsSourceRef.current = src;
+    src.onmessage = (msg) => {
+      const ev = JSON.parse(msg.data) as ObjectsJobEvent;
+      if (ev.type === "progress") {
+        setObjectsJob((j) =>
+          j && j.jobId === jobId
+            ? {
+                ...j,
+                stage: ev.stage,
+                i: "i" in ev ? ev.i : j.i,
+                n: "n" in ev ? ev.n : j.n,
+              }
+            : j,
+        );
+      } else if (ev.type === "done") {
+        src.close();
+        setObjectsJob((j) => (j && j.jobId === jobId ? { ...j, status: "done" } : j));
+        onObjectsChange(ev.fit);
+      } else if (ev.type === "error") {
+        src.close();
+        setObjectsJob((j) => (j && j.jobId === jobId ? { ...j, status: "error", error: ev.message } : j));
+      }
+    };
+    src.onerror = () => {
+      if (src.readyState === EventSource.CLOSED) {
+        setObjectsJob((j) => (j && j.jobId === jobId && j.status === "running" ? { ...j, status: "error", error: "lost the progress stream" } : j));
+      }
+    };
+  };
+
+  const stopObjectsFit = async () => {
+    if (!objectsJob) return;
+    await api.cancelJob(objectsJob.jobId).catch(() => {});
+    setObjectsJob((j) => (j ? { ...j, status: j.status === "running" ? "cancelled" : j.status } : j));
+  };
+
   const polygons = useMemo(
     () => (overlay?.sim_polygons ?? []).map((p) => p.map(([x, y]) => `${x},${y}`).join(" ")),
     [overlay],
@@ -218,6 +289,22 @@ export function CameraView({ dataset, episode, frame, playing, lock, busy, scene
   const h = overlay?.height ?? info?.height ?? 480;
   const anyFit = Object.keys(fits).length > 0;
   const sceneForLock = scene && scene.lock === lock ? scene : null;
+  const objectsForLock = objects && objects.lock === lock ? objects : null;
+  const objectsRunning = objectsJob?.status === "running" || objectsJob?.status === "cancelled";
+  // The tracked object's box on the shown frame: solid when the camera saw it
+  // there, dashed when the position is the FK fingertip (held) or carried forward.
+  const objectBox = useMemo(() => {
+    if (!track || !showOverlay || track.episode !== overlay.episode || track.camera !== camera) return null;
+    const f = Math.min(track.xyz.length - 1, Math.max(0, overlay.frame));
+    const source = track.source[f];
+    const bbox = track.bbox[f];
+    const colour = `rgb(${track.rgb.join(",")})`;
+    if (source === "vision" && bbox) return { source, x: bbox[0], y: bbox[1], w: bbox[2], h: bbox[3], colour };
+    // Not seen: draw the box where the last sighting was, or at the fingertip.
+    const c = track.centroid[f];
+    const side = Math.sqrt(objectsForLock?.prior.area_px ?? 900);
+    return c ? { source, x: c[0] - side / 2, y: c[1] - side / 2, w: side, h: side, colour } : null;
+  }, [track, showOverlay, overlay, camera, objectsForLock]);
 
   if (!dataset) return null;
 
@@ -232,6 +319,20 @@ export function CameraView({ dataset, episode, frame, playing, lock, busy, scene
           {polygons.map((p, i) => (
             <polygon key={i} points={p} className="cam-sim" vectorEffect="non-scaling-stroke" />
           ))}
+          {objectBox && (
+            <g>
+              <rect
+                x={objectBox.x}
+                y={objectBox.y}
+                width={objectBox.w}
+                height={objectBox.h}
+                className={`cam-obj ${objectBox.source}`}
+                style={{ stroke: objectBox.colour }}
+                vectorEffect="non-scaling-stroke"
+              />
+              <circle cx={objectBox.x + objectBox.w / 2} cy={objectBox.y + objectBox.h / 2} r={3} className="cam-obj-dot" style={{ fill: objectBox.colour }} />
+            </g>
+          )}
         </svg>
       )}
       {!showOverlay && (
@@ -396,6 +497,94 @@ export function CameraView({ dataset, episode, frame, playing, lock, busy, scene
           >
             {sceneBusy ? "Fitting scene…" : sceneForLock ? "Fit scene again" : "Fit scene from logs"}
           </button>
+
+          <div className="label">Objects</div>
+          {objectsForLock ? (
+            <>
+              <div className="muted small">
+                <i className="swatch" style={{ background: `rgb(${objectsForLock.prior.rgb.join(",")})` }} /> {objectsForLock.description} · seen in{" "}
+                {objectsForLock.camera}, {objectsForLock.n_tracked} of {objectsForLock.n_episodes} episodes
+              </div>
+              <div className="scene-stats">
+                <div>
+                  <span className="muted small">footprint</span>
+                  <div className="mono" title="oriented extent of the object's pixels back-projected onto the table plane, median over episodes (height assumed from the scene fit)">
+                    {objectsForLock.footprint_m?.long && objectsForLock.footprint_m?.short
+                      ? `${(objectsForLock.footprint_m.long.median * 100).toFixed(1)} × ${(objectsForLock.footprint_m.short.median * 100).toFixed(1)} cm`
+                      : "--"}
+                  </div>
+                </div>
+                <div>
+                  <span className="muted small">vision vs FK</span>
+                  <div
+                    className="mono"
+                    title={`distance between where the camera saw the object before the grasp and where FK puts the fingertip at the grasp, median over episodes${
+                      objectsForLock.vision_vs_fk_offset_m ? ` (of which a fixed offset of ${objectsForLock.vision_vs_fk_offset_m.map((v) => (v * 100).toFixed(1)).join(", ")} cm)` : ""
+                    }`}
+                  >
+                    {objectsForLock.vision_vs_fk_m ? `${(objectsForLock.vision_vs_fk_m.median * 100).toFixed(1)} cm` : "--"}
+                  </div>
+                </div>
+                <div>
+                  <span className="muted small">start pose spread</span>
+                  <div className="mono" title="std of the vision start poses over episodes (x, y)">
+                    {objectsForLock.start ? `${(objectsForLock.start.std[0] * 100).toFixed(1)} × ${(objectsForLock.start.std[1] * 100).toFixed(1)} cm` : "--"}
+                  </div>
+                </div>
+                <div>
+                  <span className="muted small">mass from the residual</span>
+                  <div className="mono" title={objectsForLock.payload?.verdict ?? "payload estimate not run"}>
+                    {objectsForLock.payload?.mass_kg != null && objectsForLock.payload.verdict.startsWith("consistent")
+                      ? `${grams(objectsForLock.payload.mass_kg)} ± ${grams((objectsForLock.payload.mass_iqr_kg ?? 0) / 2)}`
+                      : objectsForLock.payload
+                        ? "below the noise"
+                        : "--"}
+                  </div>
+                </div>
+              </div>
+              {objectsForLock.payload && !objectsForLock.payload.verdict.startsWith("consistent") && (
+                <div className="muted small">{objectsForLock.payload.verdict}</div>
+              )}
+            </>
+          ) : (
+            <div className="muted small">
+              {sceneForLock ? "find the object in the video, track it, and weigh it from the residual" : "fit the scene first; the object sits on its table plane"}
+            </div>
+          )}
+          {!objectsRunning ? (
+            <button
+              className="cta secondary"
+              onClick={startObjectsFit}
+              disabled={busy || running || sceneBusy || !lock || !sceneForLock}
+              title={lock ? `saved to locks/${lock}.objects.json (a few minutes: every frame of every episode)` : "calibrate first so there is a lock to attach the objects to"}
+            >
+              {objectsForLock ? "Track object again" : "Find and track the object"}
+            </button>
+          ) : (
+            <button className="cta secondary" onClick={stopObjectsFit} disabled={objectsJob?.status === "cancelled"}>
+              {objectsJob?.status === "cancelled" ? "Stopping…" : "Stop and keep what is tracked"}
+            </button>
+          )}
+          {objectsJob && (
+            <div className="muted small">
+              {objectsJob.status === "running" &&
+                (objectsJob.stage === "track"
+                  ? `tracking episode ${objectsJob.i} / ${objectsJob.n}`
+                  : objectsJob.stage === "payload"
+                    ? `weighing: ${objectsJob.i} / ${objectsJob.n} episodes replayed`
+                    : objectsJob.stage === "cross"
+                      ? "cross-camera check"
+                      : "learning the object's colour")}
+              {objectsJob.status === "cancelled" && "stopping after this episode"}
+              {objectsJob.status === "done" && `saved for lock ${lock}`}
+              {objectsJob.status === "error" && <span className="bad">{objectsJob.error}</span>}
+            </div>
+          )}
+          {objectsForLock && (
+            <div className="muted small">
+              box on the frame: solid where the camera sees the object, dashed while it is held (fingertip from FK) or hidden
+            </div>
+          )}
         </>
       )}
     </section>

@@ -46,12 +46,13 @@ import numpy as np
 from antares import __version__
 from antares.lock import RobotLock
 from antares.sim import JOINTS, MESH_DIR, MODEL_PATH, STANDARD_GRAVITY, Arm, CommandMap, SimParams, UnitMap
-from antares.task import OBJECT_SIZE, TaskDistribution, scene_xml
+from antares.task import OBJECT_BODY, OBJECT_JOINT, OBJECT_MASS, OBJECT_SIZE, PLACE_SITE, TaskDistribution, scene_xml
 
 SCENE_PATH: Path = MODEL_PATH.parent / "scene.xml"
 SIDECAR_SUFFIX = ".antares.json"
 SCENE_FILENAME = "scene.xml"
 TASK_FILENAME = "task.json"
+OBJECTS_FILENAME = "objects.json"
 ASSETS_DIRNAME = "assets"
 EXPORT_FORMAT = "antares.export/1"
 
@@ -368,6 +369,68 @@ def write_backdrops(scene: Any, lock_dir: Path | str, out_dir: Path) -> dict[str
 
 
 # --------------------------------------------------------------------------
+# the manipulated object (antares.objects)
+# --------------------------------------------------------------------------
+
+
+def object_elements(fit: Any, mass: float | None = None) -> str:
+    """``<worldbody>`` children for an :class:`antares.objects.ObjectFit`: a
+    free box with the vision footprint at the mean vision start pose, the
+    estimated mass (or :data:`antares.task.OBJECT_MASS` when the payload
+    estimate was below the noise), coloured like the object, and a place
+    marker at the mean vision end pose. Same body/joint/site names as the
+    task cube, so :func:`antares.task.set_task` moves it too."""
+    fp = fit.footprint
+    if fp is None or fit.start is None:
+        raise ValueError("objects fit has no footprint or start poses: nothing to put in the scene")
+    hh = float(fit.object_half_height)
+    half = (fp[0] / 2.0, fp[1] / 2.0, hh)
+    pos = np.asarray(fit.start["mean"], dtype=np.float64)
+    pos[2] = fit.table_z + hh
+    m = mass if mass is not None else (fit.mass_kg if fit.mass_kg is not None else OBJECT_MASS)
+    rgb = tuple(v / 255.0 for v in fit.prior.rgb)
+    mass_note = (
+        f"mass {m:.4g} kg from the residual" if fit.mass_kg is not None else
+        f"mass {m:.4g} kg assumed (payload estimate below the noise: {(fit.payload or {}).get('verdict', 'not run')})"
+    )
+    place = np.asarray(fit.end["mean"], dtype=np.float64) if fit.end else pos
+    return (
+        f"    <!-- Antares object from the video: {fit.description}; footprint {fp[0] * 100:.1f} x {fp[1] * 100:.1f} cm "
+        f"(height {2 * hh * 100:.1f} cm assumed); {mass_note}; start pose = mean of {fit.start['n']} vision start poses -->\n"
+        f'    <body name="{OBJECT_BODY}" pos="{_vec(np.round(pos, 4))}">\n'
+        f'      <freejoint name="{OBJECT_JOINT}"/>\n'
+        f'      <geom type="box" size="{_vec(tuple(round(v, 4) for v in half))}" mass="{_fmt(round(m, 5))}" '
+        f'friction="1 5e-3 1e-4" rgba="{_vec(tuple(round(v, 3) for v in rgb))} 1"/>\n'
+        f"    </body>\n"
+        f'    <site name="{PLACE_SITE}" pos="{_vec(np.round(place, 4))}" size="{_fmt(round(hh, 4))}" type="sphere" rgba="0.2 0.8 0.3 0.4"/>\n'
+    )
+
+
+def objects_sidecar(fit: Any) -> dict[str, Any]:
+    """``objects.json`` next to the scene: the start/end pose distributions
+    (for ``set_task``-style sampling), footprint, colour and the mass estimate."""
+    return {
+        "format": EXPORT_FORMAT,
+        "lock": fit.lock,
+        "dataset": fit.dataset,
+        "camera": fit.camera,
+        "description": fit.description,
+        "rgb": list(fit.prior.rgb),
+        "footprint_m": None if fit.footprint is None else list(fit.footprint),
+        "half_height_m": fit.object_half_height,
+        "table_z": fit.table_z,
+        "mass_kg": fit.mass_kg,
+        "measured_mass_kg": fit.measured_mass_kg,
+        "payload_verdict": (fit.payload or {}).get("verdict"),
+        "start": fit.start,
+        "end": fit.end,
+        "vision_vs_fk_m": fit.vision_vs_fk_m,
+        "note": "start/end are vision poses on the table plane (base frame, m); draw a start pose and "
+        "add ~1 cm of jitter, as antares.objects.ObjectFit.sample_start does.",
+    }
+
+
+# --------------------------------------------------------------------------
 # lock -> files
 # --------------------------------------------------------------------------
 
@@ -553,6 +616,7 @@ def export_scene(
     object_size: float = OBJECT_SIZE,
     scene_fit: Any | None = None,
     lock_dir: Path | str | None = None,
+    objects_fit: Any | None = None,
 ) -> Path:
     """Export the arm into ``out_dir`` plus a ``scene.xml`` (light and skybox
     from the Menagerie scene) that includes it, so
@@ -570,9 +634,29 @@ def export_scene(
     scene also carries the table at the fitted height and, per fitted
     camera, its backdrop image on a quad filling the camera's view (PNGs
     under ``backdrops/``); otherwise the Menagerie checker floor stays.
+
+    With an :class:`antares.objects.ObjectFit` (``objects_fit``, or the one
+    saved as ``<lock_dir>/<lock>.objects.json``) the free body is the object
+    seen in the video instead of the task cube: its vision footprint, its
+    estimated mass and the mean vision start pose, with the start/end
+    distributions in ``objects.json``. The objects fit wins when both it
+    and a ``task`` exist; the task is still written as ``task.json``, with
+    its picks taken from vision (``source = "vision"``).
     """
     out_dir = Path(out_dir)
-    objects = scene_xml(task, object_size) if task is not None else None  # may raise: before anything is written
+    if objects_fit is None and lock_dir is not None:
+        from antares.objects import load_object_fit
+
+        objects_fit = load_object_fit(lock.name, lock_dir)
+    if objects_fit is not None and (objects_fit.footprint is None or objects_fit.start is None):
+        objects_fit = None  # a fit that saw nothing: fall back to the task cube
+    if objects_fit is not None:
+        objects = object_elements(objects_fit)
+        if task is not None:
+            starts = {int(t["episode"]): t["start_pose"] for t in objects_fit.tracks if t.get("start_pose") is not None}
+            task = task.with_vision_picks(starts)
+    else:
+        objects = scene_xml(task, object_size) if task is not None else None  # may raise: before anything is written
     arm_path = export_mjcf(lock, out_dir / f"{lock.name}.xml", bundle_assets=bundle_assets)
 
     if scene_fit is None and lock_dir is not None:
@@ -588,7 +672,10 @@ def export_scene(
         if scene.count("</worldbody>") != 1:
             raise ExportError("scene.xml needs exactly one </worldbody>")
         scene = scene.replace("</worldbody>", objects + "  </worldbody>")
-        task.save(out_dir / TASK_FILENAME)
+        if task is not None:
+            task.save(out_dir / TASK_FILENAME)
+        if objects_fit is not None:
+            (out_dir / OBJECTS_FILENAME).write_text(json.dumps(objects_sidecar(objects_fit), indent=2) + "\n")
     lines = [
         f"Antares scene for lock {lock.name}: includes the calibrated arm {arm_path.name}.",
         f"View it: python -m mujoco.viewer, passing {SCENE_FILENAME} as the mjcf argument.",
@@ -600,6 +687,12 @@ def export_scene(
             f"Static scene from the logs: table at z={scene_fit.table.z:.4f} m"
             + (f", backdrops for {', '.join(sorted(files))}" if files else "")
             + ". Look through a fitted camera to see the real cell behind the sim arm."
+        )
+    if objects_fit is not None:
+        fp = objects_fit.footprint
+        lines.append(
+            f"Object from the video: {objects_fit.description} ({fp[0] * 100:.1f} x {fp[1] * 100:.1f} cm), "
+            f"free body {OBJECT_BODY} at the mean vision start pose; start/end distributions in {OBJECTS_FILENAME}."
         )
     scene = insert_header(scene, _comment(lines))
     scene_path = out_dir / SCENE_FILENAME
@@ -670,6 +763,7 @@ __all__ = [
     "BAKED_PARAMS",
     "EXPORT_FORMAT",
     "ExportError",
+    "OBJECTS_FILENAME",
     "SCENE_FILENAME",
     "SCENE_PATH",
     "SIDECAR_SUFFIX",
@@ -681,6 +775,8 @@ __all__ = [
     "insert_header",
     "insert_scene",
     "load_exported_arm",
+    "object_elements",
+    "objects_sidecar",
     "read_sidecar",
     "referenced_meshes",
     "scene_elements",

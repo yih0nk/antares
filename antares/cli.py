@@ -1880,6 +1880,345 @@ def cmd_scene_fit(args: argparse.Namespace) -> int:
     return 0
 
 
+def _fmt_or_dash(v, digits: int = 2, suffix: str = "") -> str:
+    return "-" if v is None else f"{v:.{digits}f}{suffix}"
+
+
+def _policy_train_table(meta: dict) -> str:
+    m = meta["metrics"]
+    rows = []
+    for label, d in (
+        ("policy", m["policy"]),
+        ("hold state", m["baselines"]["hold_state"]),
+        ("repeat command", m["baselines"]["repeat_command"]),
+    ):
+        rows.append([
+            label,
+            f"{d['train']['rmse_deg']:.3f}",
+            f"{d['eval']['rmse_deg']:.3f}",
+            f"{d['eval']['first_rmse_deg']:.3f}",
+            f"{d['eval']['mse_units']:.2f}",
+        ])
+    return _table(
+        ["predictor", "train rmse (deg)", "held-out rmse (deg)", "held-out first action (deg)", "held-out mse (units^2)"],
+        rows,
+    )
+
+
+def cmd_policy_train(args: argparse.Namespace) -> int:
+    from fastapi import HTTPException
+
+    from antares import server
+
+    ds = _load_dataset(args.repo_id)
+    if ds is None:
+        return 2
+
+    def progress(p) -> None:
+        if p.epoch == 1 or p.epoch % 10 == 0 or p.epoch == p.epochs:
+            print(
+                f"  epoch {p.epoch}/{p.epochs}: train {p.train_mse:.4f}  eval {p.eval_mse:.4f}"
+                f"  (best {p.best_eval_mse:.4f} at {p.best_epoch}, {p.elapsed_s:.0f}s)",
+                file=sys.stderr,
+            )
+
+    try:
+        lock = server.load_lock_dict(args.lock)
+        meta = server.run_policy_training(
+            ds, lock, epochs=args.epochs, name=args.name, seed=args.seed, on_progress=progress
+        )
+    except HTTPException as e:
+        print(f"error: {_detail(e)}", file=sys.stderr)
+        return 2
+    m = meta["metrics"]
+    feats = ", ".join(k for k, v in meta["features"].items() if v) or "states only"
+    print(
+        f"{ds.repo_id}: chunked policy (K={meta['k']} states + {feats} -> H={meta['h']} actions, "
+        f"{meta['n_params']} params) on lock {lock['name']}'s split: "
+        f"{len(meta['train_episodes'])} train / {len(meta['eval_episodes'])} held-out episodes"
+        + (f", {len(meta['dropped_episodes'])} without a grasp dropped" if meta["dropped_episodes"] else "")
+    )
+    print(
+        f"{meta['n_train_windows']} / {meta['n_eval_windows']} windows, {m['epochs_run']} epochs "
+        f"(best at {m['best_epoch']}), {meta['elapsed_s']:.1f}s, obs noise {meta['obs_noise_units']} units"
+    )
+    print(_policy_train_table(meta))
+    print(
+        "held-out: beats hold-state " + ("yes" if m["beats_hold_state"] else "NO")
+        + ", beats repeat-command " + ("yes" if m["beats_repeat_command"] else "NO")
+        + " (chunk RMS over the body joints; the first-action column is what a receding horizon executes)"
+    )
+    print(f"saved {meta['path']}")
+    return 0
+
+
+def _shadow_tables(out: dict) -> str:
+    s = out["summary"]
+    rows = []
+    for name, v in s["variants"].items():
+        rows.append([
+            name,
+            _fmt_or_dash(v["sim_vs_real_deg"], 3),
+            _fmt_or_dash(v.get("divergence_deg"), 3),
+            _fmt_or_dash(v["grasp_error_cm"]),
+            _fmt_or_dash(v.get("grasp_divergence_cm")),
+            _fmt_or_dash(v["replay_vs_real_deg"], 3),
+        ])
+    head = _table(
+        ["sim", "policy: sim vs real (deg)", "vs default sim (deg)", "grasp-point err (cm)", "grasp vs default (cm)", "logged cmds: sim vs real (deg)"],
+        rows,
+    )
+    names = list(s["variants"])
+    ep_rows = []
+    for e in out["episodes"]:
+        ep_rows.append(
+            [str(e["episode"]), str(e["n_frames"]), f"{e['action_error_deg']:.2f}"]
+            + [f"{e['sim_vs_real_deg'][n]:.2f}" for n in names]
+            + [f"{e['divergence_deg'][n]:.2f}" for n in names if n in e["divergence_deg"]]
+        )
+    per_ep = _table(
+        ["episode", "frames", "policy vs logged (deg)"]
+        + [f"{n}: sim vs real" for n in names]
+        + [f"{n}: vs default" for n in names if n != out["baseline"]],
+        ep_rows,
+    )
+    worst = []
+    for n in names:
+        for w in s["variants"][n].get("worst_frames", [])[:3]:
+            worst.append(f"{n}: episode {w['episode']} frame {w['frame']} ({w['deg']:.1f} deg)")
+    lines = [
+        f"shadow (open loop): the policy's commands on the real observations, rolled through each sim; "
+        f"{s['n_episodes']} held-out episodes, {s['n_frames']} frames; policy vs logged commands {s['action_error_deg']:.3f} deg",
+        head,
+        per_ep,
+    ]
+    if worst:
+        lines.append("largest default-vs-calibrated disagreement: " + "; ".join(worst))
+    if s.get("skipped_episodes"):
+        lines.append(f"skipped (no grasp point): {s['skipped_episodes']}")
+    return "\n".join(lines)
+
+
+def _closedloop_tables(out: dict) -> str:
+    s = out["summary"]
+    rows = []
+    for name, v in s["variants"].items():
+        rows.append([
+            name,
+            f"{v['trajectory_rms_deg']:.2f}",
+            _fmt_or_dash(v["approach_rms_deg"]),
+            _fmt_or_dash(v["grasp_error_cm"]),
+            _fmt_or_dash(v["min_tip_distance_cm"]),
+            f"{v['n_success']}/{v['n_judged']}",
+            f"{v['n_closed']}/{v['n_judged']}",
+            _fmt_or_dash(v["close_frame_offset"], 1),
+        ])
+    head = _table(
+        ["sim", "trajectory rms (deg)", "approach rms (deg)", "grasp-point err (cm)", "closest approach (cm)",
+         f"within {out['success_cm']:.0f} cm", "closed gripper", "close offset (frames)"],
+        rows,
+    )
+    names = out["run_names"]
+    by_ep: dict[int, dict[str, dict]] = {}
+    for r in out["runs"]:
+        by_ep.setdefault(r["episode"], {})[r["variant"]] = r
+    ep_rows = []
+    for ep, runs in sorted(by_ep.items()):
+        row = [str(ep)]
+        for n in names:
+            r = runs.get(n)
+            if r is None:
+                row.append("-")
+            elif r["grasp_error_cm"] is None:
+                row.append("never closed")
+            else:
+                row.append(f"{r['grasp_error_cm']:.1f} cm" + (" ok" if r["success"] else ""))
+        ep_rows.append(row)
+    per_ep = _table(["episode"] + [f"{n}: grasp err" for n in names], ep_rows)
+    lines = [
+        f"closed loop: the policy drives each sim from the real initial state, same goal and clock; "
+        f"{s['n_episodes']} held-out episodes (success = fingertip within {out['success_cm']:.0f} cm of the real grasp point when the gripper closes)",
+        head,
+        per_ep,
+    ]
+    if s.get("skipped_episodes"):
+        lines.append(f"skipped (no grasp point): {s['skipped_episodes']}")
+    return "\n".join(lines)
+
+
+def cmd_policy_evaluate(args: argparse.Namespace) -> int:
+    from fastapi import HTTPException
+
+    from antares import server
+
+    ds = _load_dataset(args.repo_id)
+    if ds is None:
+        return 2
+    modes = ["shadow", "closedloop"] if args.mode == "both" else [args.mode]
+    robots = [r.strip() for r in args.robots.split(",") if r.strip()] if args.robots else None
+    try:
+        lock = server.load_lock_dict(args.lock)
+        for i, mode in enumerate(modes):
+            out = server.run_policy_evaluation(
+                ds, lock, args.policy, mode, robots, save=not args.no_save,
+                on_progress=lambda ev: print(f"  {ev['mode']}: episode {ev['episode']} ({ev['i']}/{ev['n']})", file=sys.stderr),
+            )
+            if i:
+                print()
+            print(f"{ds.repo_id}, lock {lock['name']}, policy {out['policy']} ({out['note']})")
+            print(_shadow_tables(out) if mode == "shadow" else _closedloop_tables(out))
+            if out.get("missing_locks"):
+                print(f"not evaluated (no such lock): {', '.join(out['missing_locks'])}")
+            if out.get("path"):
+                print(f"saved {out['path']}")
+    except HTTPException as e:
+        print(f"error: {_detail(e)}", file=sys.stderr)
+        return 2
+    return 0
+
+
+def _cm(v, fmt="{:+.1f}") -> str:
+    return "-" if v is None else ", ".join(fmt.format(100 * x) for x in v)
+
+
+def _payload_lines(est: dict) -> list[str]:
+    """The payload summary as printed by ``objects-fit`` and ``payload``."""
+    lines = [f"payload from the residual: {est.get('verdict', '')}"]
+    rows = []
+    for j in ("shoulder_lift", "elbow_flex"):
+        pd, md, mj = est["payload_deg"].get(j), est["motion_deg"].get(j), est["mass_by_joint"].get(j)
+        if not pd:
+            continue
+        step, floor = est.get("mass_per_step_kg", {}).get(j), est.get("mass_noise_floor_kg", {}).get(j)
+        rows.append([
+            j, f"{est['kp'][j]:.1f}", f"{(est.get('lever_m') or {}).get(j) or float('nan'):.3f}",
+            f"{pd['median']:+.3f} ({pd['iqr']:.3f})", f"{md['median']:+.3f} ({md['iqr']:.3f})",
+            f"{1000 * mj['median']:+.0f} ({1000 * mj['iqr']:.0f})" if mj else "-",
+            f"{1000 * step:.0f}" if step is not None else "-", f"{1000 * floor:.0f}" if floor is not None else "-",
+        ])
+    if rows:
+        lines.append(_table(["joint", "kp (N*m/rad)", "lever (m)", "extra deflection deg (IQR)", "motion term deg (IQR)",
+                             "mass g (IQR)", "g per encoder step", "noise floor g"], rows))
+    m = est.get("mass")
+    if m:
+        lines.append(f"combined over {m['n']} picks: median {1000 * m['median']:+.0f} g, IQR {1000 * m['iqr']:.0f} g "
+                     f"(q1 {1000 * m['q1']:+.0f}, q3 {1000 * m['q3']:+.0f})")
+    return lines
+
+
+def cmd_objects_fit(args: argparse.Namespace) -> int:
+    from antares import server
+
+    lock = args.lock or server._slug(args.repo_id)
+    try:
+        ds = server.get_dataset(args.repo_id)
+    except Exception as e:  # noqa: BLE001
+        print(f"error: {getattr(e, 'detail', e)}", file=sys.stderr)
+        return 1
+    eps = [int(x) for x in args.episodes.split(",")] if args.episodes else None
+
+    def on_progress(ev: dict) -> None:
+        if ev.get("stage") == "prior":
+            pr = ev["prior"]
+            print(f"  object colour from the first frames: rgb {pr['rgb']}, {pr['area_px']:.0f} px at rest ({pr['n_samples']} samples)")
+        elif ev.get("stage") == "track":
+            t = ev["track"]
+            d = t.get("vision_vs_fk_m")
+            print(f"  episode {t['episode']:3d}: seen in {t['n_visible']}/{t['n_frames']} frames, picks {t['picks']}, "
+                  f"vision vs FK {'-' if d is None else f'{100 * d:.1f} cm'} {t['note']}  [{ev['elapsed_s']:.0f}s]")
+        elif ev.get("stage") == "cross":
+            print("  cross-camera check done")
+        elif ev.get("stage") == "payload" and ev["i"] % 10 == 0:
+            print(f"  payload: {ev['i']}/{ev['n']} episodes replayed")
+
+    print(f"tracking the object in {ds.repo_id} for lock {lock}" + (f" (camera {args.camera})" if args.camera else ""))
+    try:
+        fit, tracks, path = server.run_objects_fit(ds, lock, args.camera or None, episodes=eps, payload=not args.no_payload, on_progress=on_progress)
+    except Exception as e:  # noqa: BLE001
+        print(f"error: {getattr(e, 'detail', e)}", file=sys.stderr)
+        return 1
+    print(f"objects for lock {lock} from {ds.repo_id} (camera {fit.camera}): {fit.n_tracked} of {fit.n_episodes} episodes tracked in {fit.elapsed_s:.0f}s")
+    print(f"  {fit.description}")
+    fp = fit.footprint_m
+    if fp and fp["long"] and fp["short"]:
+        print(f"  footprint {100 * fp['long']['median']:.1f} x {100 * fp['short']['median']:.1f} cm "
+              f"(IQR {100 * fp['long']['iqr']:.1f} / {100 * fp['short']['iqr']:.1f} cm over {fp['long']['n']} episodes; "
+              f"height {200 * fit.object_half_height:.1f} cm assumed)")
+    rows = []
+    for label, c in (("start (vision)", fit.start), ("end (vision)", fit.end)):
+        if c:
+            rows.append([label, str(c["n"]), _cm(c["mean"]), _cm(c["std"], "{:.1f}"), _cm(c["min"]), _cm(c["max"])])
+    if rows:
+        print("  object centre on the table plane, base frame, cm (x, y, z):")
+        print("  " + _table(["", "n", "mean", "std", "min", "max"], rows).replace("\n", "\n  "))
+    v = fit.vision_vs_fk_m
+    if v:
+        print(f"  vision start pose vs FK fingertip at the grasp: median {100 * v['median']:.1f} cm, "
+              f"IQR {100 * v['iqr']:.1f} cm, worst {100 * v['max']:.1f} cm over {v['n']} episodes")
+        if fit.vision_vs_fk_offset_m and fit.vision_vs_fk_centred_m:
+            print(f"    of which a fixed offset (vision - FK) of {_cm(fit.vision_vs_fk_offset_m)} cm; "
+                  f"{100 * fit.vision_vs_fk_centred_m['median']:.1f} cm median spread around it")
+    e = fit.end_vs_fk_m
+    if e:
+        print(f"  vision end pose vs FK fingertip at the release: median {100 * e['median']:.1f} cm (the object drops after the release)")
+    cc = fit.cross_camera
+    if cc:
+        if cc.get("n"):
+            t, h = cc["triangulated_vs_plane_m"], cc["triangulated_height_above_plane_m"]
+            print(f"  cross-camera ({cc['primary']} x {cc['other']}): triangulated point vs plane intersection median "
+                  f"{100 * t['median']:.1f} cm (IQR {100 * t['iqr']:.1f}) over {cc['n']} frames; "
+                  f"triangulated height above the plane median {100 * h['median']:+.1f} cm; ray gap median {100 * cc['ray_gap_m']['median']:.1f} cm")
+        else:
+            print(f"  cross-camera: {cc.get('note', 'not run')}")
+    if fit.payload:
+        for line in _payload_lines(fit.payload):
+            print("  " + line.replace("\n", "\n  "))
+    bad = [t["episode"] for t in fit.tracks if t.get("start_pose") is None]
+    if bad:
+        print(f"  episodes where the object was not found before the grasp: {_episode_list(bad)}")
+    print(f"saved {path}")
+    return 0
+
+
+def cmd_payload(args: argparse.Namespace) -> int:
+    from antares import server
+    from antares.payload import estimate_payload
+    from antares.sim import Arm
+
+    lock_name = args.lock or server._slug(args.repo_id)
+    try:
+        ds = server.get_dataset(args.repo_id)
+        lock = server.load_lock(lock_name)
+    except Exception as e:  # noqa: BLE001
+        print(f"error: {getattr(e, 'detail', e)}", file=sys.stderr)
+        return 1
+    arm = Arm(lock.params, robot=lock.robot)
+    eps = [int(x) for x in args.episodes.split(",")] if args.episodes else None
+    est = estimate_payload(ds, arm, lock_name, episodes=eps, window_s=args.window)
+    print(f"payload for lock {lock_name} on {ds.repo_id}: {est.n_ok} of {est.n_episodes} carried picks measured "
+          f"(windows of {est.window_s:g} s either side of each pick and release)")
+    rows = []
+    for e in est.episodes:
+        sl, el = e.joints.get("shoulder_lift"), e.joints.get("elbow_flex")
+        rows.append([
+            str(e.episode), f"{e.grasp}-{e.release}",
+            f"{sl.payload_deg:+.3f}" if sl else "-", f"{el.payload_deg:+.3f}" if el else "-",
+            f"{1000 * sl.mass_kg:+.0f}" if sl and sl.mass_kg == sl.mass_kg else "-",
+            f"{1000 * el.mass_kg:+.0f}" if el and el.mass_kg == el.mass_kg else "-",
+            f"{1000 * e.mass_kg:+.0f}" if e.ok else e.note,
+        ])
+    print(_table(["episode", "carry frames", "shoulder deg", "elbow deg", "shoulder g", "elbow g", "mass g"], rows))
+    for line in _payload_lines(est.to_dict()):
+        print(line)
+    print("assumptions: " + "; ".join(est.assumptions))
+    if args.out:
+        from pathlib import Path
+
+        Path(args.out).write_text(__import__("json").dumps(est.to_dict(), indent=2) + "\n")
+        print(f"saved {args.out}")
+    return 0
+
+
 def cmd_camera_list(args: argparse.Namespace) -> int:
     from antares import server
 
@@ -2533,6 +2872,47 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--lock", default=None, help="lock to attach the scene to (default: dataset slug)")
     p.add_argument("--camera", action="append", default=[], help="only these fitted cameras (repeatable; default all)")
     p.set_defaults(func=cmd_scene_fit)
+
+    p = sub.add_parser(
+        "policy",
+        help="a learned policy in the loop: train on a lock's split, judge it in the default and the calibrated sim",
+    )
+    psub = p.add_subparsers(dest="policy_cmd", required=True)
+    t = psub.add_parser("train", help="train the state-based chunked policy on the lock's training episodes (needs torch)")
+    t.add_argument("repo_id", help=dataset_help)
+    t.add_argument("--lock", required=True, help="lock whose train / held-out split to use")
+    t.add_argument("--epochs", type=int, default=200, help="maximum epochs (early-stopped on the held-out split)")
+    t.add_argument("--seed", type=int, default=0, help="initialization and batch order")
+    t.add_argument("--name", default=None, help="save as locks/<name>.policy.pt (default: the lock's name)")
+    t.set_defaults(func=cmd_policy_train)
+    e = psub.add_parser("evaluate", help="run a saved policy on the held-out episodes in each sim and print the tables")
+    e.add_argument("repo_id", help=dataset_help)
+    e.add_argument("--lock", required=True, help="the lock (its held-out split and its calibrated sim)")
+    e.add_argument("--policy", default=None, help="saved policy name (default: the lock's)")
+    e.add_argument("--mode", choices=["shadow", "closedloop", "both"], default="both")
+    e.add_argument(
+        "--robots", default=None,
+        help="comma-separated sims: default, lock, perjoint (= <lock>_perjoint) or lock names (default: all three)",
+    )
+    e.add_argument("--no-save", action="store_true", help="do not write locks/<lock>.policy.<mode>.json")
+    e.set_defaults(func=cmd_policy_evaluate)
+
+
+    p = sub.add_parser("objects-fit", help="find and track the manipulated object in a dataset's video; mass from the residual")
+    p.add_argument("repo_id", help="Hub dataset id or a LeRobot dataset directory on disk")
+    p.add_argument("--lock", default=None, help="lock with a camera fit and a scene fit (default: dataset slug)")
+    p.add_argument("--camera", default=None, help="camera to track in (default: the lock's best-fitted camera)")
+    p.add_argument("--episodes", default=None, help="comma-separated episode indices (default: all)")
+    p.add_argument("--no-payload", action="store_true", help="skip the residual-based mass estimate")
+    p.set_defaults(func=cmd_objects_fit)
+
+    p = sub.add_parser("payload", help="payload mass per episode from the residual while the object is carried")
+    p.add_argument("repo_id", help="Hub dataset id or a LeRobot dataset directory on disk")
+    p.add_argument("--lock", default=None, help="lock whose calibrated sim replays the episodes (default: dataset slug)")
+    p.add_argument("--episodes", default=None, help="comma-separated episode indices (default: all)")
+    p.add_argument("--window", type=float, default=0.6, help="seconds of residual either side of each pick/release")
+    p.add_argument("--out", default=None, help="also save the estimate as JSON here")
+    p.set_defaults(func=cmd_payload)
 
     return parser
 

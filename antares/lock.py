@@ -113,6 +113,10 @@ class RobotLock(JsonFile):
     # The static scene recovered from the logs (antares.scene.SceneFit.lock_entry():
     # table height, workspace box, backdrop paths); None until `scene-fit` runs.
     scene: dict[str, Any] | None = None
+    # The manipulated object recovered from the video and the residual
+    # (antares.objects.ObjectFit.lock_entry(): footprint, start/end pose
+    # distribution, mass estimate); None until `objects-fit` runs.
+    objects: dict[str, Any] | None = None
 
     @classmethod
     def create(
@@ -165,6 +169,8 @@ class RobotLock(JsonFile):
             d["calibration"] = self.calibration
         if self.scene is not None:
             d["scene"] = dict(self.scene)
+        if self.objects is not None:
+            d["objects"] = dict(self.objects)
         return d
 
     def replace(self, **changes: Any) -> "RobotLock":
@@ -192,6 +198,7 @@ class RobotLock(JsonFile):
             cameras=dict(d.get("cameras") or {}),
             calibration=d.get("calibration"),
             scene=dict(d["scene"]) if isinstance(d.get("scene"), dict) else None,
+            objects=dict(d["objects"]) if isinstance(d.get("objects"), dict) else None,
         )
 
 
