@@ -554,20 +554,40 @@ def command_map_from_lock(lock: dict):
     return CommandMap.from_dict(d)
 
 
+def unit_map_from_lock(lock: dict):
+    """The UnitMap a lock's ``calibration`` block (the follower's LeRobot
+    calibration, :mod:`antares.lerobot_calib`) was fitted with, or None for
+    a lock on the model-derived map."""
+    rec = lock.get("calibration")
+    if not rec:
+        return None
+    from antares.lerobot_calib import unit_map_from_record
+
+    model = getattr(get_arm(check_robot(lock.get("robot"))), "model", None)
+    return unit_map_from_record(rec, model)
+
+
 @contextmanager
-def _command_map(arm, cmap):
-    """Use ``cmap`` on the shared ``arm`` for the block, then restore identity
-    so callers that never set one keep the plain mapping."""
-    if cmap is None:
+def _command_map(arm, cmap, unit_map=None):
+    """Use ``cmap`` (and ``unit_map``, a lock's calibration-derived map) on
+    the shared ``arm`` for the block, then restore identity and the arm's
+    own map so callers that never set one keep the plain mapping."""
+    if cmap is None and unit_map is None:
         yield
         return
     from antares.sim import CommandMap
 
-    arm.command_map = cmap
+    prev_unit_map = getattr(arm, "unit_map", None)
+    if cmap is not None:
+        arm.command_map = cmap
+    if unit_map is not None:
+        arm.unit_map = unit_map
     try:
         yield
     finally:
         arm.command_map = CommandMap.identity()
+        if unit_map is not None:
+            arm.unit_map = prev_unit_map
 
 
 def lock_simulate(lock: dict):
@@ -576,12 +596,13 @@ def lock_simulate(lock: dict):
     has neither. For refits warm-started from a lock: the dynamics move, the
     sensor calibration and the model do not."""
     cmap = command_map_from_lock(lock)
+    unit_map = unit_map_from_lock(lock)
     robot = check_robot(lock.get("robot"))
-    if cmap is None and robot == DEFAULT_ROBOT:
+    if cmap is None and unit_map is None and robot == DEFAULT_ROBOT:
         return None
     from antares.calibrate import default_simulate
 
-    return default_simulate(cmap, robot=robot)
+    return default_simulate(cmap, robot=robot, **({"unit_map": unit_map} if unit_map is not None else {}))
 
 
 def mesh_dir(robot: str | None = None) -> Path:
@@ -594,11 +615,15 @@ def _rounded(a: np.ndarray) -> list:
     return np.round(np.asarray(a, dtype=np.float64), ROUND).tolist()
 
 
-def replay_episode(ds: Dataset, episode: int, params=None, command_map=None, robot: str | None = None) -> dict:
+def replay_episode(
+    ds: Dataset, episode: int, params=None, command_map=None, robot: str | None = None, unit_map=None
+) -> dict:
     """Real FK + sim replay for one episode. Angles in degrees, poses (T,nbody,7).
 
     ``command_map`` (a CommandMap, or None for identity) corrects the commands.
     ``robot`` overrides the model (default: the one for the dataset's family).
+    ``unit_map`` (a UnitMap, or None for the model's) is a lock's
+    calibration-derived map (``unit_map_from_lock``).
     """
     from antares.gap import tracking_error
     from antares.sim import JOINTS
@@ -608,7 +633,7 @@ def replay_episode(ds: Dataset, episode: int, params=None, command_map=None, rob
         params = default_params()
     robot = check_robot(robot or dataset_robot(ds))
     arm = get_arm(robot)
-    with arm_lock(robot), _command_map(arm, command_map):
+    with arm_lock(robot), _command_map(arm, command_map, unit_map):
         arm.apply(params)
         real_q = np.asarray(arm.real_q(ep))
         sim_q = np.asarray(arm.replay(ep))
@@ -625,6 +650,7 @@ def replay_episode(ds: Dataset, episode: int, params=None, command_map=None, rob
         "body_names": body_names,
         "params": params.to_dict(),
         "command_map": None if command_map is None else command_map.to_dict(),
+        "unit_map": None if unit_map is None else unit_map.to_dict(),
         "real_q": _rounded(np.degrees(real_q)),
         "sim_q": _rounded(np.degrees(sim_q)),
         "real_poses": _rounded(real_poses),
@@ -1165,6 +1191,9 @@ def run_calibration(
     fit_sensor: bool = False,
     sensor_mode: str = "sim",
     n_seeds: int = 1,
+    calibration_path: str | Path | None = None,
+    robot_id: str | None = None,
+    robot_type: str = "so101_follower",
 ) -> tuple[Any, dict, Path]:
     """Calibrate on ``ds``, save a lock, return (CalibrationResult, lock dict, path).
 
@@ -1180,6 +1209,13 @@ def run_calibration(
     with the dynamics-only fit for comparison. ``sensor_mode`` is ``"sim"``
     (fit through the sim, alternating) or ``"kinematic"`` (pre-fit from
     still frames, then frozen).
+
+    ``calibration_path`` (a LeRobot calibration file) or ``robot_id`` (the
+    ``--robot.id`` LeRobot saved it under, with ``robot_type``) replaces the
+    model-derived unit map with the follower's own tick-to-angle map for
+    the replay and records it in the lock's ``calibration`` block
+    (:mod:`antares.lerobot_calib`). With ``fit_sensor`` the map fit starts
+    from that calibration's prior.
     """
     from antares.calibrate import calibrate, split_episodes
 
@@ -1188,6 +1224,16 @@ def run_calibration(
     if name is not None:
         _lock_path(name)  # validate the name before spending minutes fitting
     robot = check_robot(robot or dataset_robot(ds))
+    unit_map = cal_record = cal_prior = None
+    calib = resolve_calibration(calibration_path, robot_id, robot_type)
+    if calib is not None:
+        from antares.lerobot_calib import calibration_record, command_map_prior, unit_map_from_calibration
+
+        calib_d, cal_path = calib
+        model = get_arm(robot).model
+        unit_map = unit_map_from_calibration(calib_d, model)
+        cal_prior = command_map_prior(calib_d, model)
+        cal_record = calibration_record(calib_d, model, path=cal_path, robot_id=robot_id, robot_type=robot_type)
     train, eval_ = split_episodes(ds.episodes, n_train, n_eval, seed=seed)
     extra: dict[str, Any] = {}
     if per_joint:
@@ -1199,12 +1245,14 @@ def run_calibration(
     if fit_sensor:
         from antares.sensor import calibrate_with_sensor
 
-        if robot != DEFAULT_ROBOT:
+        if robot != DEFAULT_ROBOT or unit_map is not None:
             # The sensor fitter builds its own SO-101 arm by default; give it
-            # one of this model instead.
+            # one of this model (and of this arm's unit map) instead.
             from antares.sensor import sensor_simulate
 
-            extra["simulate"] = sensor_simulate(robot)
+            extra["simulate"] = sensor_simulate(robot, unit_map=unit_map)
+        if cal_prior is not None:
+            extra["prior"] = cal_prior
         out = calibrate_with_sensor(
             train,
             eval_,
@@ -1221,9 +1269,14 @@ def run_calibration(
             robot=robot,
             command_map={**out.command_map.to_dict(), "mode": sensor_mode},
             dynamics_only=out.dynamics_only.to_dict(),
+            **({"calibration": cal_record} if cal_record is not None else {}),
         )
         return out.result, lock.to_dict(), save_lock(lock)
     sim = simulate_for(robot)
+    if unit_map is not None:
+        from antares.calibrate import default_simulate
+
+        sim = default_simulate(robot=robot, unit_map=unit_map)
     if sim is not None:
         extra["simulate"] = sim
     result = calibrate(
@@ -1236,9 +1289,38 @@ def run_calibration(
         should_stop=should_stop,
         **extra,
     )
-    lock = build_lock(ds, train, result, name, robot=robot)
+    lock = build_lock(ds, train, result, name, robot=robot,
+                      **({"calibration": cal_record} if cal_record is not None else {}))
     path = save_lock(lock)
     return result, lock.to_dict(), path
+
+
+def resolve_calibration(calibration_path, robot_id: str | None, robot_type: str = "so101_follower"):
+    """``(calibration, path)`` from an explicit LeRobot calibration file or from
+    the robot id LeRobot saved it under; None when neither is given. 404 when
+    the id has no file, 400 when the file does not parse."""
+    if calibration_path is None and not robot_id:
+        return None
+    from antares.lerobot_calib import calibration_dirs, find_calibration, load_calibration
+
+    path = Path(calibration_path) if calibration_path is not None else None
+    if path is None:
+        try:
+            path = find_calibration(robot_id, robot_type)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        if path is None:
+            looked = ", ".join(str(d) for d in calibration_dirs(robot_type))
+            raise HTTPException(
+                status_code=404,
+                detail=f"no LeRobot calibration named {robot_id!r} for {robot_type} (looked in {looked})",
+            )
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail=f"no calibration file {path}")
+    try:
+        return load_calibration(path), path
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"{path}: {e}")
 
 
 def _job_worker(job: Job, req: "CalibrateRequest") -> None:
@@ -1263,6 +1345,9 @@ def _job_worker(job: Job, req: "CalibrateRequest") -> None:
             fit_sensor=req.fit_sensor,
             sensor_mode=req.sensor_mode,
             n_seeds=req.n_seeds,
+            calibration_path=req.calibration_path,
+            robot_id=req.robot_id,
+            robot_type=req.robot_type,
         )
         result_d = result.to_dict()
         job.push({"type": "done", "lock": lock, "result": result_d})
@@ -1441,7 +1526,7 @@ def run_check(
         return np.asarray(arm.real_q(ep)), np.asarray(arm.replay(ep))
 
     try:
-        with arm_lock(robot), _command_map(arm, command_map_from_lock(lock_d)):
+        with arm_lock(robot), _command_map(arm, command_map_from_lock(lock_d), unit_map_from_lock(lock_d)):
             return check(
                 ds.episodes,
                 lock_d,
@@ -1661,6 +1746,31 @@ def datasets_validate(dataset: str = Query(...)) -> dict:
     }
 
 
+@app.get("/api/datasets/calibration-check")
+def datasets_calibration_check(
+    dataset: str = Query(...),
+    calibration_path: str | None = Query(None, description="a LeRobot calibration file"),
+    robot_id: str | None = Query(None, description="the --robot.id LeRobot saved the calibration under"),
+    robot_type: str = Query("so101_follower"),
+    robot: str | None = Query(None, description="override the sim model (default: the dataset's family)"),
+) -> dict:
+    """The model's assumed unit map against this arm's LeRobot calibration,
+    joint by joint (degrees at -100/0/+100, flagged over 2 deg). 400 when
+    neither ``calibration_path`` nor ``robot_id`` is given."""
+    from antares.lerobot_calib import calibration_check, file_sha256
+
+    calib = resolve_calibration(calibration_path, robot_id, robot_type)
+    if calib is None:
+        raise HTTPException(status_code=400, detail="give calibration_path or robot_id")
+    calib_d, path = calib
+    ds = get_dataset(dataset)
+    robot = check_robot(robot or dataset_robot(ds))
+    out = calibration_check(calib_d, get_arm(robot).model)
+    out.update(dataset=ds.repo_id, robot=robot, source=str(path), sha256=file_sha256(path),
+               robot_id=robot_id, robot_type=robot_type)
+    return out
+
+
 @app.post("/api/datasets/upload")
 def datasets_upload(
     file: UploadFile = File(..., description="a .zip of a LeRobot dataset directory, or one .parquet"),
@@ -1733,12 +1843,13 @@ def replay(
     robot: str | None = Query(None, description="override the sim model (default: the dataset's family)"),
 ) -> dict:
     ds = get_dataset(dataset)
-    params = cmap = None
+    params = cmap = unit_map = None
     if lock and not baseline:
         lock_d = load_lock_dict(lock)
         params = params_from_dict(lock_d["params"])
         cmap = command_map_from_lock(lock_d)
-    out = replay_episode(ds, episode, params, cmap, robot=robot)
+        unit_map = unit_map_from_lock(lock_d)
+    out = replay_episode(ds, episode, params, cmap, robot=robot, unit_map=unit_map)
     out["lock"] = lock if (lock and not baseline) else None
     return out
 
@@ -1834,6 +1945,11 @@ class CalibrateRequest(BaseModel):
     sensor_mode: Literal["sim", "kinematic"] = "sim"
     # Sim model override (registry name); default: the dataset's family.
     robot: str | None = None
+    # The follower's LeRobot calibration: a file, or the --robot.id it was
+    # saved under (looked up in LeRobot's calibration directory).
+    calibration_path: str | None = None
+    robot_id: str | None = None
+    robot_type: str = "so101_follower"
 
 
 @app.post("/api/calibrate")

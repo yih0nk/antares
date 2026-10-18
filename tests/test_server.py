@@ -1768,3 +1768,147 @@ def test_dashboard_reads_check_history_when_available(client, monkeypatch, tmp_p
     monkeypatch.setitem(sys.modules, "antares.history", _module("antares.history", history_index=broken))
     r = client.get("/api/dashboard")
     assert r.status_code == 200 and all(x["history"]["latest"] is None for x in r.json()["robots"])
+
+
+# ---------------------------------------------------------------------------
+# the follower's LeRobot calibration (real sim modules, no fakes)
+# ---------------------------------------------------------------------------
+
+
+def _real_dataset(repo_id="real/arm", n=3, T=12):
+    eps = []
+    for i in range(n):
+        a = np.zeros((T, 6))
+        a[:, 0] = np.linspace(0, 20, T)
+        a[:, 5] = 50.0
+        eps.append(Episode(index=i, fps=30.0, joint_names=JOINTS, state=a.copy(), action=a))
+    return Dataset(repo_id=repo_id, robot_type="so101_follower", fps=30.0, joint_names=JOINTS, episodes=tuple(eps))
+
+
+def _real_calibration(path, shift_joint=None, shift=0):
+    from antares import lerobot_calib as lc
+    from antares.sim import load_model
+
+    model = load_model()
+    out = {}
+    for i, j in enumerate(JOINTS):
+        span = int(round((model.jnt_range[i, 1] - model.jnt_range[i, 0]) / lc.RAD_PER_TICK))
+        lo = 1000 if j == "gripper" else lc.HALF_TURN - span // 2
+        if j == shift_joint:
+            lo += shift
+        out[j] = lc.MotorCalibration(i + 1, 0, 0, lo, lo + span)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(lc.calibration_to_dict(out)))
+    return out, model
+
+
+def test_calibration_check_route(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "_DATASETS", {"real/arm": _real_dataset()})
+    monkeypatch.setenv("HF_LEROBOT_CALIBRATION", str(tmp_path / "cal"))
+    _real_calibration(tmp_path / "cal" / "robots" / "so101_follower" / "arm.json", "elbow_flex", 80)
+    client = TestClient(server.app)
+    assert client.get("/api/datasets/calibration-check", params={"dataset": "real/arm"}).status_code == 400
+    r = client.get("/api/datasets/calibration-check", params={"dataset": "real/arm", "robot_id": "nope"})
+    assert r.status_code == 404 and "no LeRobot calibration named 'nope'" in r.json()["detail"]
+    r = client.get("/api/datasets/calibration-check", params={"dataset": "real/arm", "robot_id": "arm"})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["dataset"] == "real/arm" and out["robot"] == "so101" and out["robot_id"] == "arm"
+    assert out["source"].endswith("so101_follower/arm.json") and len(out["sha256"]) == 64
+    assert out["flagged"] == ["elbow_flex"] and "use --calibration" in out["message"]
+    rows = {j["joint"]: j for j in out["joints"]}
+    assert rows["elbow_flex"]["max_deg"] == pytest.approx(80 * 360 / 4096, abs=0.15)
+    assert set(rows["elbow_flex"]["at"]) == {"-100", "0", "100"} and rows["elbow_flex"]["range_min"] > 0
+    by_path = client.get("/api/datasets/calibration-check",
+                         params={"dataset": "real/arm", "calibration_path": str(tmp_path / "cal/robots/so101_follower/arm.json")})
+    assert by_path.status_code == 200 and by_path.json()["flagged"] == ["elbow_flex"]
+    bad = tmp_path / "bad.json"
+    bad.write_text("{}")
+    assert client.get("/api/datasets/calibration-check",
+                      params={"dataset": "real/arm", "calibration_path": str(bad)}).status_code == 400
+    assert client.get("/api/datasets/calibration-check",
+                      params={"dataset": "real/arm", "calibration_path": str(tmp_path / "missing.json")}).status_code == 404
+
+
+def test_replay_and_check_apply_the_lock_calibration_map(monkeypatch, tmp_path):
+    """A lock with a calibration block replays on that unit map, not the model's."""
+    from antares import lerobot_calib as lc
+    from antares.sim import SimParams, UnitMap
+
+    ds = _real_dataset()
+    monkeypatch.setattr(server, "_DATASETS", {"real/arm": ds})
+    monkeypatch.setattr(server, "LOCK_DIR", tmp_path / "locks")
+    calib, model = _real_calibration(tmp_path / "arm.json", "shoulder_pan", 200)  # 17.6 deg
+    rec = lc.calibration_record(calib, model, path=tmp_path / "arm.json", robot_id="arm")
+    lock = {"name": "cal-lock", "dataset": "real/arm", "robot_type": "so101_follower", "robot": "so101",
+            "data_sha256": "x", "params": SimParams().to_dict(), "created_at": "now", "antares_version": "0",
+            "result": {"params": SimParams().to_dict(), "baseline": SimParams().to_dict(), "train_score": 1.0,
+                       "eval_score": 1.0, "baseline_train_score": 2.0, "baseline_eval_score": 2.0,
+                       "n_evaluations": 1, "elapsed_s": 0.1, "per_joint_after": {j: 1.0 for j in JOINTS}},
+            "calibration": rec}
+    (tmp_path / "locks").mkdir()
+    (tmp_path / "locks" / "cal-lock.lock.json").write_text(json.dumps(lock))
+    um = server.unit_map_from_lock(lock)
+    np.testing.assert_allclose(um.offset, UnitMap.from_dict(rec["unit_map"]).offset)
+    assert server.unit_map_from_lock({"name": "plain"}) is None
+
+    client = TestClient(server.app)
+    with_lock = client.get("/api/replay", params={"dataset": "real/arm", "episode": 0, "lock": "cal-lock"}).json()
+    plain = client.get("/api/replay", params={"dataset": "real/arm", "episode": 0}).json()
+    assert with_lock["unit_map"] == rec["unit_map"] and plain["unit_map"] is None
+    # the real arm's pan angle is read 17.6 deg further along under its own calibration
+    shift = np.array(with_lock["real_q"])[:, 0] - np.array(plain["real_q"])[:, 0]
+    np.testing.assert_allclose(shift, 200 * 360 / 4096, atol=0.05)
+    # and the shared arm is back on the model's map afterwards
+    arm = server.get_arm("so101")
+    np.testing.assert_allclose(arm.unit_map.offset, UnitMap.from_model(arm.model).offset)
+
+    res = server.run_check(ds, "cal-lock", threshold_deg=5.0, min_episodes=1)
+    assert res.verdict in ("ok", "drifted") and res.n_episodes == 3
+    np.testing.assert_allclose(arm.unit_map.offset, UnitMap.from_model(arm.model).offset)
+    sim = server.lock_simulate(lock)
+    real_q, _ = sim(SimParams(), ds.episodes[0])
+    assert real_q[0, 0] == pytest.approx(um.to_rad(ds.episodes[0].state[0])[0])
+
+
+def test_calibrate_request_forwards_calibration(client, fakes, monkeypatch):
+    seen = {}
+
+    def spy(ds, **kw):
+        seen.update(kw)
+        raise HTTPException(status_code=400, detail="stop here")
+
+    monkeypatch.setattr(server, "run_calibration", spy)
+    job = client.post("/api/calibrate", json={"dataset": FAKE_DS, "calibration_path": "/x/arm.json",
+                                              "robot_type": "so100_follower"}).json()["job_id"]
+    for _ in range(100):
+        if client.get(f"/api/calibrate/{job}").json()["status"] != "running":
+            break
+        time.sleep(0.01)
+    assert seen["calibration_path"] == "/x/arm.json" and seen["robot_id"] is None
+    assert seen["robot_type"] == "so100_follower"
+
+
+def test_run_calibration_records_the_calibration_in_the_lock(monkeypatch, tmp_path):
+    """The real pipeline, two evaluations: the lock carries the calibration
+    block and the fit ran on the calibration-derived unit map."""
+    from antares import lerobot_calib as lc
+    from antares.sim import UnitMap
+
+    ds = _real_dataset(n=4, T=8)
+    monkeypatch.setattr(server, "_DATASETS", {"real/arm": ds})
+    monkeypatch.setattr(server, "LOCK_DIR", tmp_path / "locks")
+    calib, model = _real_calibration(tmp_path / "arm.json", "wrist_flex", 50)
+    result, lock, path = server.run_calibration(
+        ds, n_train=3, n_eval=1, max_evaluations=2, name="cal-fit", calibration_path=str(tmp_path / "arm.json"))
+    cal = lock["calibration"]
+    assert cal["source"] == str(tmp_path / "arm.json") and cal["sha256"] == lc.file_sha256(tmp_path / "arm.json")
+    assert cal["robot_type"] == "so101_follower" and cal["motors"]["wrist_flex"] == calib["wrist_flex"].to_dict()
+    assert cal["unit_map_disagreement_deg"]["wrist_flex"] == pytest.approx(50 * 360 / 4096, abs=0.05)
+    expected = lc.unit_map_from_calibration(calib, model)
+    np.testing.assert_allclose(UnitMap.from_dict(cal["unit_map"]).offset, expected.offset)
+    saved = json.loads(path.read_text())
+    assert saved["calibration"]["robot_id"] is None and saved["calibration"]["anchor"] == "homing"
+    with pytest.raises(HTTPException) as e:
+        server.run_calibration(ds, n_train=3, n_eval=1, max_evaluations=2, robot_id="ghost")
+    assert e.value.status_code == 404
