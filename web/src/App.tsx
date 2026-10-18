@@ -1121,7 +1121,8 @@ export default function App() {
                     <Arm geometry={geometry} poses={polPoses("lock")} clip={`${clip}#policy`} playhead={playhead} material={policyLockMaterial} />
                   </>
                 )}
-                <SceneGeometry scene={scene} />
+                {/* The fitted table plane is opaque and would hide the footage; the video shows the real table. */}
+                {!underlay && <SceneGeometry scene={scene} />}
                 <ObjectMarker track={track} playhead={playhead} />
               </Scene>
             </div>
@@ -1209,7 +1210,7 @@ export default function App() {
                     : `video from the ${underlay.camera.name} camera as a plain backdrop: no fitted camera for this lock yet, fit it under Camera to line the arm up`}
             </span>
           )}
-          {scene && (
+          {scene && !underlay && (
             <span className="muted small">
               table at {(scene.table.z * 1000).toFixed(0)} mm, workspace box from the logs
             </span>
