@@ -481,6 +481,109 @@ def cmd_check(args: argparse.Namespace) -> int:
     return EXIT_USAGE
 
 
+EXIT_RECORD = 3  # record-check: lerobot-record itself failed; nothing was checked
+
+
+def _add_check_options(p: argparse.ArgumentParser) -> None:
+    """The ``check`` options ``record-check`` forwards unchanged. Keep in step
+    with the ``check`` parser; ``_check_kwargs`` reads the same names."""
+    p.add_argument("--threshold", type=float, default=None, metavar="DEG",
+                   help="absolute error allowed in degrees (default: none)")
+    p.add_argument("--ratio", type=float, default=1.5,
+                   help="allowed multiple of the lock's held-out score (default 1.5)")
+    p.add_argument("--min-episodes", type=int, default=5,
+                   help="fewer episodes than this is insufficient data, exit 2 (default 5)")
+    p.add_argument("--json", action="store_true", help="print the CheckResult as JSON")
+
+
+def _check_kwargs(args: argparse.Namespace) -> dict:
+    """``server.run_check`` keywords from the options ``_add_check_options`` adds."""
+    return {"threshold_deg": args.threshold, "ratio": args.ratio, "min_episodes": args.min_episodes}
+
+
+def cmd_record_check(args: argparse.Namespace) -> int:
+    """Record fresh episodes with ``lerobot-record``, then run ``check`` on them."""
+    import json
+    import os
+    import shlex
+    from pathlib import Path
+
+    from antares import recordcheck as rc
+
+    episodes = args.episodes
+    if episodes < args.min_episodes:
+        print(f"warning: --episodes {episodes} is below --min-episodes {args.min_episodes}; "
+              f"recording {args.min_episodes}", file=sys.stderr)
+        episodes = args.min_episodes
+    opts = rc.RecordOptions(
+        robot_port=args.robot_port,
+        robot_id=args.robot_id,
+        robot_type=args.robot_type,
+        teleop_type=args.teleop_type,
+        teleop_port=args.teleop_port,
+        teleop_id=args.teleop_id,
+        num_episodes=episodes,
+        task=args.task,
+        root=Path(args.root) if args.root else None,
+        episode_time_s=args.episode_time,
+        reset_time_s=args.reset_time,
+        extra=list(args.extra or []),
+        recorder=args.recorder,
+    )
+    lock: str | dict = args.lock
+    if os.path.isfile(args.lock):
+        with open(args.lock) as f:
+            lock = json.load(f)
+    check_kwargs = _check_kwargs(args)
+
+    root = rc.resolve_root(opts)
+    if args.dry_run:
+        try:
+            cmd = rc.build_record_command(opts, root, recorder=rc.find_recorder(args.recorder) or args.recorder or rc.RECORDER)
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return EXIT_USAGE
+        check_cmd = ["antares", "check", str(root), "--lock", args.lock]
+        if args.threshold is not None:
+            check_cmd += ["--threshold", f"{args.threshold:g}"]
+        check_cmd += ["--ratio", f"{args.ratio:g}", "--min-episodes", str(args.min_episodes)]
+        if args.json:
+            check_cmd.append("--json")
+        if args.skip_record:
+            print(f"would skip recording and check the dataset already under {root}")
+        else:
+            print("would run:")
+            print("  " + shlex.join(cmd))
+        print("then:")
+        print("  " + shlex.join(check_cmd))
+        if not args.skip_record and rc.find_recorder(args.recorder) is None:
+            print(f"note: {args.recorder or rc.RECORDER} not found; {rc.INSTALL_HINT}", file=sys.stderr)
+        return EXIT_PASS
+
+    try:
+        res = rc.record_and_check(opts, lock, check_kwargs=check_kwargs, skip_record=args.skip_record)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return EXIT_USAGE
+    except rc.RecordError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return EXIT_RECORD
+    except Exception as e:  # noqa: BLE001 - HTTPException or loader error, as in cmd_check
+        print(f"error: {_detail(e)}", file=sys.stderr)
+        return EXIT_USAGE
+
+    if args.json:
+        print(json.dumps(res.to_dict(), indent=2))
+    else:
+        print(res.summary())
+        print(rc.banner(res, args.robot_id))
+    if res.verdict == "ok":
+        return EXIT_PASS
+    if res.verdict == "drifted":
+        return EXIT_DRIFT
+    return EXIT_USAGE
+
+
 def _frac(v) -> str:
     return "-" if v is None else f"{100 * v:.0f}%"
 
@@ -1233,6 +1336,40 @@ def build_parser() -> argparse.ArgumentParser:
                    help="refit budget for --explain (default 240, at least 10)")
     p.set_defaults(func=cmd_check)
 
+
+    p = sub.add_parser(
+        "record-check",
+        help="record fresh episodes with lerobot-record, then run check: PASS or FAIL",
+        description=(
+            "One command at the arm: drive lerobot-record to capture a few episodes into "
+            "--root (default recordings/<robot-id>/<timestamp>, never pushed to the Hub), "
+            "then run the same gate as `antares check <root> --lock <name>`. "
+            "Exit 0 pass, 1 drifted, 2 usage or too few episodes, 3 when recording failed. "
+            "Needs LeRobot (pip install 'lerobot[core_scripts,feetech]', Python >= 3.12); "
+            "pass --recorder when lerobot-record lives in another environment."
+        ),
+    )
+    p.add_argument("--lock", required=True, help="lock name in the lock dir, or a .lock.json path")
+    p.add_argument("--robot-port", required=True, metavar="PORT", help="follower arm serial port, e.g. /dev/tty.usbmodem...")
+    p.add_argument("--robot-id", required=True, metavar="ID", help="the LeRobot id the arm was calibrated under (names the recording and the banner)")
+    p.add_argument("--robot-type", default="so101_follower", help="LeRobot robot type (default so101_follower)")
+    p.add_argument("--teleop-port", default=None, metavar="PORT", help="leader arm serial port (required for a *_leader teleop)")
+    p.add_argument("--teleop-id", default=None, metavar="ID", help="leader arm LeRobot id (default <robot-id>_leader)")
+    p.add_argument("--teleop-type", default="so101_leader", help="LeRobot teleop type (default so101_leader)")
+    p.add_argument("--episodes", type=int, default=5, metavar="N",
+                   help="episodes to record (default 5; raised to --min-episodes when lower)")
+    p.add_argument("--root", default=None, metavar="DIR",
+                   help="where to write the dataset (default recordings/<robot-id>/<YYYYMMDD-HHMMSS>)")
+    p.add_argument("--task", default="antares check", help="--dataset.single_task text (default 'antares check')")
+    p.add_argument("--episode-time", type=float, default=None, metavar="S", help="--dataset.episode_time_s (LeRobot default 60)")
+    p.add_argument("--reset-time", type=float, default=None, metavar="S", help="--dataset.reset_time_s (LeRobot default 60)")
+    p.add_argument("--extra", action="append", default=None, metavar="FLAG",
+                   help="extra lerobot-record flag, verbatim; repeatable (e.g. --extra=--robot.cameras=...)")
+    p.add_argument("--recorder", default=None, metavar="PATH", help="lerobot-record executable (default: on PATH)")
+    p.add_argument("--dry-run", action="store_true", help="print the lerobot-record and check commands, exit 0")
+    p.add_argument("--skip-record", action="store_true", help="check the dataset already under --root")
+    _add_check_options(p)
+    p.set_defaults(func=cmd_record_check)
 
     p = sub.add_parser("events", help="detect contact events from the real-sim residual")
     p.add_argument("repo_id", help=dataset_help)
