@@ -117,6 +117,89 @@ function Driver({
   return null;
 }
 
+// One 3D view: the real arm, the sim ghost and (optionally) the
+// lag-compensated sim for one episode, with its own playhead and camera.
+function Scene({
+  geometry,
+  realPoses,
+  simPoses,
+  compPoses,
+  hotSpans,
+  clip,
+  show,
+  playhead,
+  playing,
+  fps,
+  frames,
+  speed,
+  onFrame,
+}: {
+  geometry: Geometry | null;
+  realPoses: number[][][] | null;
+  simPoses: number[][][] | null;
+  compPoses: number[][][] | null;
+  hotSpans: number[][] | null;
+  clip: string;
+  show: Show;
+  playhead: Playhead;
+  playing: boolean;
+  fps: number;
+  frames: number;
+  speed: number;
+  onFrame: (f: number) => void;
+}) {
+  return (
+    <Canvas shadows camera={{ position: [0.62, 0.48, 0.72], fov: 38, near: 0.01, far: 20 }}>
+      <color attach="background" args={["#0b0d12"]} />
+      <ambientLight intensity={0.55} />
+      <directionalLight position={[0.8, 1.6, 0.6]} intensity={1.3} castShadow shadow-mapSize={[1024, 1024]} />
+      <directionalLight position={[-1, 0.6, -0.8]} intensity={0.35} />
+      <Grid
+        infiniteGrid
+        cellSize={0.05}
+        sectionSize={0.25}
+        cellColor="#1c2230"
+        sectionColor="#2a3346"
+        fadeDistance={3}
+      />
+      {geometry && (
+        <Suspense fallback={null}>
+          {/* MuJoCo is z-up; three.js is y-up. Keyed by model so a robot switch swaps the meshes cleanly. */}
+          <group key={geometry.robot} rotation={[-Math.PI / 2, 0, 0]}>
+            <Arm
+              geometry={geometry}
+              poses={realPoses}
+              clip={clip}
+              playhead={playhead}
+              material={realMaterial}
+              hidden={show === "sim"}
+            />
+            <Arm
+              geometry={geometry}
+              poses={simPoses}
+              clip={clip}
+              playhead={playhead}
+              material={ghostMaterial}
+              hotSpans={hotSpans}
+              hidden={show === "real"}
+            />
+            <Arm
+              geometry={geometry}
+              poses={compPoses}
+              clip={clip}
+              playhead={playhead}
+              material={compMaterial}
+              hidden={show === "real"}
+            />
+          </group>
+        </Suspense>
+      )}
+      <Driver playhead={playhead} playing={playing} fps={fps} frames={frames} speed={speed} onFrame={onFrame} />
+      <OrbitControls makeDefault target={[0, 0.16, 0]} />
+    </Canvas>
+  );
+}
+
 export default function App() {
   // Top-level screen: the single-arm viewer, or the fleet dashboard. The
   // hash deep-links to the fleet (`#fleet`, or `#fleet/<lock>` with a row open).
@@ -543,54 +626,21 @@ export default function App() {
       ) : (
       <>
       <main className="viewer">
-        <Canvas shadows camera={{ position: [0.62, 0.48, 0.72], fov: 38, near: 0.01, far: 20 }}>
-          <color attach="background" args={["#0b0d12"]} />
-          <ambientLight intensity={0.55} />
-          <directionalLight position={[0.8, 1.6, 0.6]} intensity={1.3} castShadow shadow-mapSize={[1024, 1024]} />
-          <directionalLight position={[-1, 0.6, -0.8]} intensity={0.35} />
-          <Grid
-            infiniteGrid
-            cellSize={0.05}
-            sectionSize={0.25}
-            cellColor="#1c2230"
-            sectionColor="#2a3346"
-            fadeDistance={3}
-          />
-          {geometry && (
-            <Suspense fallback={null}>
-              {/* MuJoCo is z-up; three.js is y-up. Keyed by model so a robot switch swaps the meshes cleanly. */}
-              <group key={geometry.robot} rotation={[-Math.PI / 2, 0, 0]}>
-                <Arm
-                  geometry={geometry}
-                  poses={baseline?.real_poses ?? null}
-                  clip={clip}
-                  playhead={playhead}
-                  material={realMaterial}
-                  hidden={show === "sim"}
-                />
-                <Arm
-                  geometry={geometry}
-                  poses={replay?.sim_poses ?? null}
-                  clip={clip}
-                  playhead={playhead}
-                  material={ghostMaterial}
-                  hotSpans={hotSpans}
-                  hidden={show === "real"}
-                />
-                <Arm
-                  geometry={geometry}
-                  poses={compPoses}
-                  clip={clip}
-                  playhead={playhead}
-                  material={compMaterial}
-                  hidden={show === "real"}
-                />
-              </group>
-            </Suspense>
-          )}
-          <Driver playhead={playhead} playing={playing} fps={fps} frames={frames} speed={speed} onFrame={setFrame} />
-          <OrbitControls makeDefault target={[0, 0.16, 0]} />
-        </Canvas>
+        <Scene
+          geometry={geometry}
+          realPoses={baseline?.real_poses ?? null}
+          simPoses={replay?.sim_poses ?? null}
+          compPoses={compPoses}
+          hotSpans={hotSpans}
+          clip={clip}
+          show={show}
+          playhead={playhead}
+          playing={playing}
+          fps={fps}
+          frames={frames}
+          speed={speed}
+          onFrame={setFrame}
+        />
 
         <div className="legend">
           {show !== "sim" && (
