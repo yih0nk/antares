@@ -113,6 +113,32 @@ def continuous_names(params) -> tuple[str, ...]:
     b = bounds_for(params)
     return tuple(n for n in b if b[n][2] != "int")
 
+
+def _check_names(params, names: Sequence[str]) -> tuple[str, ...]:
+    """``names`` as a tuple, each a continuous dimension of the space
+    ``params`` was fitted in; anything else is a ValueError that names that
+    space (a servo-model lock's kp/kv are derived, so :data:`CONTINUOUS`
+    does not fit it)."""
+    names = tuple(names)
+    space = bounds_for(params)
+    label = "servo-model" if getattr(params, "uses_servo_model", False) else "position-actuator"
+    allowed = continuous_names(params)
+    bad = [n for n in names if n not in space]
+    if bad:
+        raise ValueError(
+            f"{', '.join(map(repr, bad))}: not in the lock's {label} search space; "
+            f"its continuous dimensions are {', '.join(allowed)}"
+        )
+    ints = [n for n in names if space[n][2] == "int"]
+    if ints:
+        raise ValueError(
+            f"{', '.join(map(repr, ints))}: an integer dimension has no derivative "
+            f"(see latency_profile); choose from {', '.join(allowed)}"
+        )
+    if len(set(names)) != len(names):
+        raise ValueError(f"duplicate names in {names}")
+    return names
+
 def _unscored(simulate: SimulateFn) -> tuple[int, ...]:
     """Gripper columns of the robot ``simulate`` runs (index 5 on the SO
     arms), from the same names the calibrator scores with."""
@@ -160,7 +186,7 @@ def jacobian(
     ``(len(r0), len(names))``.
     """
     _require_shared(params)
-    names = continuous_names(params) if names is None else tuple(names)
+    names = continuous_names(params) if names is None else _check_names(params, names)
     space = SearchSpace(bounds_for(params), per_joint=False)
     x0 = space.encode(params)
     r0 = residuals(params, episodes, simulate)
@@ -272,7 +298,7 @@ def identifiability(
     tolerances. This assumes ``params`` is at (or near) a minimum and is
     only as good as the linearization over that range.
     """
-    names = continuous_names(params) if names is None else tuple(names)
+    names = continuous_names(params) if names is None else _check_names(params, names)
     bounds = bounds_for(params)
     r0, J = jacobian(params, episodes, simulate, step=step, names=names)
     n = r0.size

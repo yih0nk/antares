@@ -362,6 +362,26 @@ def test_render_markdown_has_every_section():
         assert needle in md, needle
 
 
+def test_names_outside_the_locks_space_are_refused_up_front():
+    """A servo-model lock's kp/kv are derived, so the position-actuator
+    CONTINUOUS names do not fit it: a ValueError naming the space, not a
+    KeyError from inside the search space."""
+    from antares.calibrate import default_simulate
+    from antares.sim import SimParams
+    from antares.synthetic import make_dataset
+
+    p = SimParams.sts3215(latency_frames=2)
+    eps = list(make_dataset("x/y", p, n_episodes=1, T=30).episodes)
+    with pytest.raises(ValueError, match="'kp', 'kv': not in the lock's servo-model search space"):
+        identifiability(p, eps, default_simulate(), names=CONTINUOUS)
+    with pytest.raises(ValueError, match="servo-model search space"):
+        jacobian(p, eps, default_simulate(), names=["kp"])
+    with pytest.raises(ValueError, match="integer dimension"):
+        jacobian(p, eps, default_simulate(), names=["latency_frames"])
+    with pytest.raises(ValueError, match="position-actuator search space"):
+        jacobian(SimParams(), eps, default_simulate(), names=["servo_gain"])
+
+
 def test_identifiability_of_a_servo_lock_uses_the_servo_space():
     """kp/kv are derived from the servo gain on a servo-model lock, so the
     check perturbs the fields that lock was actually fitted on."""

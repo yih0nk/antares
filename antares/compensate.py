@@ -51,14 +51,24 @@ def shift_compensate(q_des: np.ndarray, latency_frames: int | Sequence[int]) -> 
     """Send ``q_des[t + L]`` at frame ``t``; the last frame is held at the end.
 
     ``latency_frames`` is one value for the arm or one per joint (a per-joint
-    lock), in which case each column is shifted by its own joint's latency.
-    With exactly ``L`` frames of pure delay and a stiff servo this cancels
-    the lag. It does nothing about a soft gain.
+    lock, one entry per column of ``q_des``), in which case each column is
+    shifted by its own joint's latency. A fractional latency is truncated
+    to whole frames, as ``int()`` does. With exactly ``L`` frames of pure
+    delay and a stiff servo this cancels the lag. It does nothing about a
+    soft gain.
     """
     q_des = np.asarray(q_des, dtype=np.float64)
     if q_des.ndim != 2:
         raise ValueError(f"q_des must be (T, J), got {q_des.shape}")
-    L = np.rint(np.broadcast_to(np.asarray(latency_frames, dtype=np.float64), (q_des.shape[1],))).astype(int)
+    J = q_des.shape[1]
+    lat = np.asarray(latency_frames, dtype=np.float64)
+    if lat.ndim == 0:
+        lat = np.full(J, float(lat))
+    elif lat.shape != (J,):
+        raise ValueError(
+            f"latency_frames must be one value or one per joint ({J} for these commands), got {lat.shape}"
+        )
+    L = lat.astype(int)  # truncation toward zero, like int()
     if (L < 0).any():
         raise ValueError("latency_frames must be >= 0")
     T = q_des.shape[0]

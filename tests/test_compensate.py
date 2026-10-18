@@ -95,6 +95,17 @@ def test_compensate_episode_with_committed_per_joint_lock(arm):
     arm.apply(SimParams())
 
 
+def test_shift_compensate_checks_the_per_joint_length_and_truncates():
+    q = np.arange(60, dtype=float).reshape(10, 6)
+    with pytest.raises(ValueError, match=r"one value or one per joint \(6 for these commands\), got \(4,\)"):
+        shift_compensate(q, (1, 2, 3, 4))
+    with pytest.raises(ValueError, match="one value or one per joint"):
+        shift_compensate(q, [[1, 2, 3, 4, 5, 6]])
+    # a fractional latency is truncated like int(), not rounded
+    np.testing.assert_array_equal(shift_compensate(q, 2.9), shift_compensate(q, 2))
+    np.testing.assert_array_equal(shift_compensate(q, (0.4, 1.9, 2.5, 3.0, 4.6, 5.99)), shift_compensate(q, (0, 1, 2, 3, 4, 5)))
+
+
 def test_shift_compensate_rejects_bad_input():
     with pytest.raises(ValueError):
         shift_compensate(np.zeros(6), 1)
