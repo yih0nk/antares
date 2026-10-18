@@ -83,3 +83,48 @@ def test_config_errors():
         factors.factor_from_config({"name": "x", "bounds": [0, 1], "target": "dof_damping", "colour": 1})
     with pytest.raises(ValueError):
         factors.register(factors.get("kp"), lambda a, v: None)
+
+
+def test_selection_rejects_what_the_stage_cannot_fit():
+    # sensor-only built-ins have no SimParams field and no apply hook
+    with pytest.raises(ValueError, match="sensor"):
+        factors.names("shared", include=["sensor_gain"])
+    with pytest.raises(ValueError, match="sensor"):
+        factors.parse_selection("kp,sensor_bias")
+    with pytest.raises(ValueError, match="sensor"):
+        factors.space("shared", factors=("kp", "sensor_gain"))
+    # gravity is one value for the whole arm
+    with pytest.raises(ValueError, match="per joint"):
+        factors.names("per_joint", include=["gravity_scale"])
+    assert "gravity_scale" in factors.names("shared", include=["gravity_scale"])
+    assert factors.names(include=["sensor_gain"])  # no stage: just the registry
+
+
+def test_empty_selection_is_an_error():
+    from antares.calibrate import calibrate
+    from test_calibrate import fake_simulate, make_episodes
+
+    everything = ",".join("-" + n for n in factors.names("shared"))
+    with pytest.raises(ValueError, match="nothing to fit"):
+        factors.parse_selection(everything)
+    with pytest.raises(ValueError, match="nothing to fit"):
+        factors.space("shared", factors=())
+    eps = make_episodes(2)
+    with pytest.raises(ValueError, match="empty"):
+        calibrate(eps[:1], eps[1:], simulate=fake_simulate, max_evaluations=4, fit_factors=())
+    with pytest.raises(ValueError, match="empty"):
+        calibrate(eps[:1], eps[1:], simulate=fake_simulate, max_evaluations=4, per_joint_factors=[])
+
+
+def test_lock_extras_need_their_factor_file():
+    from antares.sim import SimParams
+
+    f, fn = factors.factor_from_config({"name": "link_mass", "target": "body_mass", "bounds": [0.5, 1.5]})
+    factors.register(f, fn)
+    try:
+        d = SimParams(extra={"link_mass": 1.2}).to_dict()
+        assert d["link_mass"] == 1.2 and SimParams.from_dict(d).link_mass == 1.2
+    finally:
+        factors.unregister("link_mass")
+    with pytest.raises(ValueError, match="link_mass.*--factors-file"):
+        SimParams.from_dict(d)

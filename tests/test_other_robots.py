@@ -155,6 +155,11 @@ def test_cli_rejects_unknown_factor(capsys):
 
     assert main(["calibrate", "x/y", "--factors", "+nope"]) == 2
     assert "nope" in capsys.readouterr().err
+    assert main(["calibrate", "x/y", "--factors", "+sensor_gain"]) == 2
+    assert "sensor" in capsys.readouterr().err
+    everything = ",".join("-" + n for n in factors.names("shared"))
+    assert main(["calibrate", "x/y", f"--factors={everything}"]) == 2
+    assert "nothing to fit" in capsys.readouterr().err
 
 
 def test_robot_profile_from_toml(tmp_path):
@@ -209,3 +214,134 @@ def test_factors_endpoint():
     d = TestClient(server.app).get("/api/factors").json()
     assert {"kp", "latency_frames", "forcerange", "sensor_bias"} <= {f["name"] for f in d["factors"]}
     assert TestClient(server.app).get("/api/datasets/catalog").json()
+
+
+# --------------------------------------------------------------------------
+# a small synthetic arm: two hinges and a parallel gripper whose second
+# finger follows the first through a joint equality
+# --------------------------------------------------------------------------
+
+_MINI_XML = """<mujoco model="mini">
+  <option timestep="0.002"/>
+  <worldbody>
+    <body name="link1">
+      <joint name="j1" type="hinge" axis="0 0 1" range="-1.5 1.5"/>
+      <geom type="capsule" size="0.02" fromto="0 0 0 0 0 0.2" mass="0.2"/>
+      <body name="link2" pos="0 0 0.2">
+        <joint name="j2" type="hinge" axis="0 1 0" range="-1.5 1.5"/>
+        <geom type="capsule" size="0.02" fromto="0 0 0 0 0 0.2" mass="0.2"/>
+        <body name="fl" pos="0 0 0.2">
+          <joint name="left_finger" type="slide" axis="0 1 0" range="0 0.04" ref="0.01"/>
+          <geom type="box" size="0.01 0.01 0.02" mass="0.02"/>
+        </body>
+        <body name="fr" pos="0 0 0.2">
+          <joint name="right_finger" type="slide" axis="0 -1 0" range="0 0.04" ref="0.005"/>
+          <geom type="box" size="0.01 0.01 0.02" mass="0.02"/>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+  <equality>
+    <joint joint1="{j1}" joint2="{j2}" polycoef="0.002 1.5 0 0 0"/>
+  </equality>
+  <actuator>
+    <position name="a1" joint="j1" kp="50" kv="2" forcerange="-10 10"/>
+    <position name="a2" joint="j2" kp="50" kv="2"/>
+    <position name="af" joint="left_finger" kp="20" kv="1" forcerange="-5 5"/>
+  </actuator>
+</mujoco>
+"""
+
+
+@pytest.fixture
+def mini_robot(tmp_path, request):
+    """Register ``mini`` from a TOML next to its MJCF; the equality's
+    orientation (which side the mapped finger is on) comes from the param."""
+    from antares.robots import load_robot_file
+
+    mapped_first = getattr(request, "param", True)
+    j1, j2 = ("left_finger", "right_finger") if mapped_first else ("right_finger", "left_finger")
+    (tmp_path / "mini.xml").write_text(_MINI_XML.format(j1=j1, j2=j2))
+    (tmp_path / "scene.xml").write_text('<mujoco><include file="mini.xml"/></mujoco>')
+    toml = tmp_path / "robots.toml"
+    toml.write_text(
+        """
+[[robot]]
+name = "mini"
+model = "mini.xml"
+scene = "scene.xml"
+joints = ["j1", "j2", "gripper"]
+mjcf_joints = ["j1", "j2", "left_finger"]
+grippers = ["gripper"]
+units = ["radians", "radians", "native"]
+"""
+    )
+    try:
+        (r,) = load_robot_file(toml)
+        yield r
+    finally:
+        REGISTRY.pop("mini", None)
+
+
+def test_robot_toml_resolves_scene_next_to_the_file(mini_robot, tmp_path):
+    assert mini_robot.model_path == (tmp_path / "mini.xml").resolve()
+    assert mini_robot.scene_path == (tmp_path / "scene.xml").resolve()
+    assert mini_robot.mesh_dir == (tmp_path / "assets").resolve()
+
+
+@pytest.mark.parametrize("mini_robot", [True, False], indirect=True, ids=["mapped=joint1", "mapped=joint2"])
+def test_follower_joint_obeys_the_equality_in_either_orientation(mini_robot):
+    import mujoco
+
+    arm = Arm(robot="mini")
+    m = arm.model
+    assert len(arm._followers) == 1
+    f_adr, drv_adr, _, _ = arm._followers[0]
+    assert drv_adr == m.jnt_qposadr[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, "left_finger")]
+    assert f_adr == m.jnt_qposadr[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, "right_finger")]
+    # MuJoCo's constraint: q1 - q1_0 = c0 + c1 * (q2 - q2_0)
+    a1, a2 = int(m.jnt_qposadr[m.eq_obj1id[0]]), int(m.jnt_qposadr[m.eq_obj2id[0]])
+    c0, c1 = m.eq_data[0, 0], m.eq_data[0, 1]
+    d = mujoco.MjData(m)
+    for g in (0.0, 0.01, 0.03):
+        arm._set_q(d, np.array([0.3, -0.2, g]))
+        assert d.qpos[drv_adr] == pytest.approx(g)
+        assert d.qpos[a1] - m.qpos0[a1] == pytest.approx(c0 + c1 * (d.qpos[a2] - m.qpos0[a2]), abs=1e-12)
+    # the follower moves with the finger, in fk too
+    poses = arm.fk(np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 0.03]]))
+    fr = arm.body_names.index("fr")
+    left = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, "left_finger")
+    gain = c1 if m.eq_obj2id[0] == left else 1.0 / c1  # follower travel per unit of finger travel
+    assert np.linalg.norm(poses[1, fr, :3] - poses[0, fr, :3]) == pytest.approx(0.03 * gain, abs=1e-9)
+
+
+def test_default_params_survive_a_lock_being_applied(mini_robot):
+    arm = Arm(robot="mini")
+    d0 = arm.default_params(from_model=True)
+    assert d0.per_joint("kp", 3).tolist() == [50.0, 50.0, 20.0]
+    arm.apply(d0.replace(kp=999.0, damping=0.7, forcerange=3.0))
+    assert arm.default_params(from_model=True) == d0
+    assert arm.default_params() == d0  # "model" robots: the MJCF either way
+    # the SO arm likewise keeps its compiled values after a replay with a lock
+    so = Arm()
+    so_d0 = so.default_params(from_model=True)
+    so.apply(SimParams(kp=5.0, kv=0.1))
+    assert so.default_params(from_model=True) == so_d0 and so.default_params() == SimParams()
+
+
+def test_unlimited_actuator_starts_inside_the_forcerange_bounds(mini_robot):
+    from antares.calibrate import spaces_for
+
+    arm = Arm(robot="mini")
+    d0 = arm.default_params(from_model=True)
+    top = arm.forcerange_limit()
+    assert top == factors.get("forcerange").space_entry(per_joint=True)[1]
+    assert d0.per_joint("forcerange", 3).tolist() == [10.0, top, 5.0]  # a2 has no forcerange
+    # the per-joint stage can start exactly at the model's values
+    _, per_joint = spaces_for(mini_robot)
+    back = per_joint.decode(per_joint.encode(d0), d0)
+    np.testing.assert_allclose(back.per_joint("forcerange"), d0.per_joint("forcerange"))
+    # a robot's own bound override moves the limit
+    wide = dataclasses.replace(mini_robot, bounds={"forcerange": (0.5, 500.0, "log")})
+    REGISTRY["mini"] = wide
+    assert Arm(robot="mini").forcerange_limit() == 500.0

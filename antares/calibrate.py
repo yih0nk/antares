@@ -881,6 +881,10 @@ def calibrate(
     if simulate is None:
         simulate = default_simulate()
     fit_factors, per_joint_factors = optional_factors(fit_factors, per_joint_factors, fit_gravity, fit_deadband)
+    if fit_factors is not None and not fit_factors:
+        raise ValueError("fit_factors is empty: the shared stage has nothing to fit (None keeps the defaults)")
+    if per_joint_factors is not None and not per_joint_factors:
+        raise ValueError("per_joint_factors is empty: the per-joint stage has nothing to fit (None keeps the defaults)")
     robot = robot_of(simulate)
     so_arm = robot is None or robot.default_params == "sts3215"
     if start is None:

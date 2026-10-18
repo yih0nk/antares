@@ -412,8 +412,9 @@ def robot_from_config(d: Mapping[str, Any], base_dir: str | Path = ".") -> Robot
     Required: ``name``, ``joints`` (dataset columns), ``mjcf_joints``, and
     either ``model`` (an MJCF path, relative to the file) or ``menagerie =
     {directory, xml}``. Optional: ``grippers``, ``units``, ``action_units``, ``unit_scale``,
-    ``aliases``, ``robot_types``, ``bounds``, ``mesh_dir``, ``description``,
-    ``license``, ``fps``, ``bimanual``, ``label``. Defaults for an added
+    ``aliases``, ``robot_types``, ``bounds``, ``mesh_dir``, ``scene`` (paths
+    relative to the file), ``description``, ``license``, ``fps``,
+    ``bimanual``, ``label``. Defaults for an added
     robot: parameters read from its MJCF, per-joint export, any fps.
     """
     d = dict(d)
@@ -433,6 +434,11 @@ def robot_from_config(d: Mapping[str, Any], base_dir: str | Path = ".") -> Robot
     mesh_dir = Path(d.pop("mesh_dir")) if "mesh_dir" in d else default_mesh
     if not mesh_dir.is_absolute() and m is None:
         mesh_dir = (base_dir / mesh_dir).resolve()
+    scene_path = model_path
+    if "scene" in d:  # relative to the file, like model and mesh_dir
+        scene_path = Path(d.pop("scene"))
+        if not scene_path.is_absolute():
+            scene_path = (base_dir / scene_path).resolve()
     kw: dict[str, Any] = {}
     if "unit_scale" in d:
         kw["unit_scale"] = tuple(float(v) for v in d.pop("unit_scale"))
@@ -450,7 +456,7 @@ def robot_from_config(d: Mapping[str, Any], base_dir: str | Path = ".") -> Robot
         name=name,
         model_path=model_path,
         mesh_dir=mesh_dir,
-        scene_path=Path(d.pop("scene")) if "scene" in d else model_path,
+        scene_path=scene_path,
         joint_names=mjcf_joints,
         description=str(d.pop("description", "")),
         license=str(d.pop("license", "see the model's own licence")),

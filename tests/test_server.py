@@ -712,6 +712,12 @@ def test_calibrate_rejects_bad_input(client, fakes):
     assert client.post("/api/calibrate", json={"dataset": FAKE_DS, "n_train": 0}).status_code == 422
     assert client.post("/api/calibrate", json={"dataset": FAKE_DS, "name": "../evil"}).status_code == 400
     assert client.post("/api/calibrate", json={}).status_code == 422
+    # a factor selection the stage cannot fit, or that fits nothing, is a usage error
+    r = client.post("/api/calibrate", json={"dataset": FAKE_DS, "factors": []})
+    assert r.status_code == 400 and "nothing to fit" in r.json()["detail"]
+    r = client.post("/api/calibrate", json={"dataset": FAKE_DS, "factors": ["+sensor_gain"]})
+    assert r.status_code == 400 and "sensor" in r.json()["detail"]
+    assert client.post("/api/calibrate", json={"dataset": FAKE_DS, "factors": ["+nope"]}).status_code == 400
 
 
 def test_calibrate_error_event(client, fakes):

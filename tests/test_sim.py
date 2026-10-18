@@ -56,9 +56,12 @@ def test_simparams_dict_roundtrip():
     d = p.to_dict()
     assert d["latency_frames"] == 3
     assert SimParams.from_dict(d) == p
-    # unknown keys ignored, missing keys default, floats coerced
-    q = SimParams.from_dict({"kp": "600", "latency_frames": 2.0, "bogus": 1})
+    # missing keys default, floats coerced; an unknown key is an error (a
+    # lock's added factor whose file is not loaded must not replay silently)
+    q = SimParams.from_dict({"kp": "600", "latency_frames": 2.0})
     assert q.kp == 600.0 and q.latency_frames == 2 and q.kv == SimParams().kv
+    with pytest.raises(ValueError, match="bogus.*--factors-file"):
+        SimParams.from_dict({"kp": "600", "bogus": 1})
 
 
 def test_simparams_negative_latency_rejected():

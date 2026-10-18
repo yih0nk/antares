@@ -243,14 +243,24 @@ class SimParams:
 
         Scalars (possibly as strings) and per-joint sequences are accepted for
         every field, so old locks (all scalars, no ``forcerange``) still load.
-        A key that names a factor registered in :mod:`antares.factors` becomes
-        an extra; any other unknown key is ignored.
+        A key that names an added factor registered in :mod:`antares.factors`
+        becomes an extra. Any other key is a :class:`ValueError`: a lock
+        fitted with a factor file replays different physics without it, so
+        the file has to be loaded first (``--factors-file`` or
+        ``ANTARES_FACTORS``) rather than the value silently dropped.
         """
         from antares import factors
 
         known = set(cls.field_names())
         core = {k: v for k, v in d.items() if k in known}
-        extra = {k: v for k, v in d.items() if k not in known and k in factors.REGISTRY}
+        extra = {k: v for k, v in d.items() if k not in known and factors.is_extra(k)}
+        unknown = [k for k in d if k not in known and k not in extra]
+        if unknown:
+            raise ValueError(
+                f"unknown parameters {unknown}: not built-in and no such added factor is registered; "
+                "if the lock was fitted with a factor file, load it first (--factors-file FILE or "
+                "ANTARES_FACTORS=FILE)"
+            )
         return cls(**core, extra=extra)
 
     def replace(self, **changes: Any) -> SimParams:
@@ -492,6 +502,9 @@ class Arm:
         norm = float(np.linalg.norm(g))
         self._base_gravity = g / norm * STANDARD_GRAVITY if norm > 0 else np.array([0.0, 0.0, -STANDARD_GRAVITY])
         self._limit_forces()
+        #: The compiled model's own values, read once before any apply() so
+        #: default_params() keeps meaning the MJCF after a lock was replayed.
+        self._model_defaults = self._read_model_params()
         if params is None:
             params = self.default_params(from_model=True)
         self.params = params
@@ -520,15 +533,28 @@ class Arm:
                 raise RuntimeError(f"{self.robot.name}: joint {name!r} needs exactly one actuator, has {len(hits)}")
             acts.append(hits[0])
         self.actuator_ids = np.array(acts, dtype=np.int64)
-        # Joints the MJCF slaves to a mapped joint: qpos[follower] = c0 + c1 * qpos[driver].
+        # Joints the MJCF slaves to a mapped joint with a joint equality:
+        # qpos[follower] = a + b * qpos[driver], as MuJoCo defines it
+        # (q1 - q1_0 = c0 + c1 * (q2 - q2_0), linear part) whichever side
+        # the mapped joint is on.
         self._followers: list[tuple[int, int, float, float]] = []
+        mapped = set(self.joint_ids.tolist())
         for e in range(m.neq):
-            if m.eq_type[e] != mujoco.mjtEq.mjEQ_JOINT:
+            if m.eq_type[e] != mujoco.mjtEq.mjEQ_JOINT or not m.eq_active0[e]:
                 continue
             j1, j2 = int(m.eq_obj1id[e]), int(m.eq_obj2id[e])
-            if j2 in set(self.joint_ids.tolist()) and j1 not in set(self.joint_ids.tolist()):
-                c0, c1 = float(m.eq_data[e, 0]), float(m.eq_data[e, 1])
-                self._followers.append((int(m.jnt_qposadr[j1]), int(m.jnt_qposadr[j2]), c0, c1))
+            if j2 < 0 or (j1 in mapped) == (j2 in mapped):
+                continue
+            c0, c1 = float(m.eq_data[e, 0]), float(m.eq_data[e, 1])
+            q1_0, q2_0 = float(m.qpos0[m.jnt_qposadr[j1]]), float(m.qpos0[m.jnt_qposadr[j2]])
+            if j2 in mapped:  # obj1 follows the mapped obj2
+                a, b, f, drv = q1_0 + c0 - c1 * q2_0, c1, j1, j2
+            else:  # the mapped obj1 is written in terms of obj2: invert the line
+                if c1 == 0.0:
+                    raise RuntimeError(f"{self.robot.name}: joint equality {e} pins the mapped joint "
+                                       f"{mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_JOINT, j1)!r} to a constant")
+                a, b, f, drv = q2_0 - (q1_0 + c0) / c1, 1.0 / c1, j2, j1
+            self._followers.append((int(m.jnt_qposadr[f]), int(m.jnt_qposadr[drv]), a, b))
         self._identity_map = (
             self.n_joints == m.nq == m.nu
             and np.array_equal(self.qpos_ids, np.arange(m.nq))
@@ -542,32 +568,40 @@ class Arm:
         rng = self.model.jnt_range[self.joint_ids]
         return UnitMap.from_kinds(rng[:, 0], rng[:, 1], self.robot.unit_kinds(), self.robot.unit_scale)
 
+    def forcerange_limit(self) -> float:
+        """Top of the ``forcerange`` search range for this robot (its own
+        bound override, else the registry's per-joint bound)."""
+        from antares import factors
+
+        b = self.robot.bounds.get("forcerange")
+        return float(b[1]) if b is not None else float(factors.get("forcerange").space_entry(per_joint=True)[1])
+
     def _limit_forces(self) -> None:
         """Make every mapped actuator force-limited so ``forcerange`` acts.
 
         An actuator without a force range gets the joint's actuator force
-        range when it has one, else an effectively unlimited one; the SO
-        models already limit theirs and are left alone.
+        range when it has one, else the top of the search range
+        (:meth:`forcerange_limit`), so the model's own values stay inside the
+        bounds and a fit can start from and return to them; the SO models
+        already limit theirs and are left alone.
         """
         m = self.model
+        limit = None
         for a, j in zip(self.actuator_ids, self.joint_ids):
             if m.actuator_forcelimited[a]:
                 continue
-            hi = float(m.jnt_actfrcrange[j, 1]) if m.jnt_actfrclimited[j] else 1e6
+            if m.jnt_actfrclimited[j]:
+                hi = float(m.jnt_actfrcrange[j, 1])
+            else:
+                limit = self.forcerange_limit() if limit is None else limit
+                hi = limit
             m.actuator_forcelimited[a] = 1
             m.actuator_forcerange[a] = (-hi, hi)
 
-    def default_params(self, from_model: bool = False) -> SimParams:
-        """The robot's uncalibrated parameters.
-
-        SO arms (``default_params="sts3215"``) start from :class:`SimParams`
-        defaults, or with ``from_model`` the first actuator's compiled values
-        (the old ``Arm(params=None)`` behaviour). Other robots read every
-        mapped joint and actuator of their own MJCF, so the starting point is
-        the model as its authors tuned it.
-        """
+    def _read_model_params(self) -> SimParams:
+        """The parameters compiled into the model as it is now."""
         if self.robot.default_params == "sts3215":
-            return SimParams.from_model(self.model) if from_model else SimParams()
+            return SimParams.from_model(self.model)
         m = self.model
         a, d = self.actuator_ids, self.dof_ids
 
@@ -583,6 +617,21 @@ class Arm:
             latency_frames=0,
             forcerange=per(m.actuator_forcerange[a, 1]),
         )
+
+    def default_params(self, from_model: bool = False) -> SimParams:
+        """The robot's uncalibrated parameters.
+
+        SO arms (``default_params="sts3215"``) start from :class:`SimParams`
+        defaults, or with ``from_model`` the first actuator's compiled values
+        (the old ``Arm(params=None)`` behaviour). Other robots read every
+        mapped joint and actuator of their own MJCF, so the starting point is
+        the model as its authors tuned it. The model values are the ones
+        compiled, snapshotted before the first :meth:`apply`, so they do not
+        change when a lock is replayed on this arm.
+        """
+        if self.robot.default_params == "sts3215" and not from_model:
+            return SimParams()
+        return self._model_defaults
 
     # -- parameters ---------------------------------------------------------
 

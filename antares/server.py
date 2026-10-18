@@ -1445,6 +1445,8 @@ def _factor_names(selection: list[str], stage: str) -> list[str] | None:
     stage's defaults) into the list calibrate takes (``None``: defaults)."""
     from antares import factors
 
+    if not selection:
+        raise ValueError(f"{stage} factors: an empty list leaves nothing to fit; omit it for the defaults")
     out = factors.parse_selection(",".join(selection), stage)
     return None if out is None else list(out)
 def resolve_calibration(
@@ -2187,6 +2189,13 @@ def calibrate_start(req: CalibrateRequest) -> dict:
         except RegistryError as e:
             raise HTTPException(status_code=400, detail=str(e))
     check_robot(req.robot)
+    try:  # a bad or empty factor selection is a usage error, not a failed job
+        if req.factors is not None:
+            _factor_names(req.factors, "shared")
+        if req.per_joint_factors is not None:
+            _factor_names(req.per_joint_factors, "per_joint")
+    except (KeyError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e).strip("'\""))
     job = start_job("calibrate", req.dataset, _job_worker, req)
     return {"job_id": job.id}
 

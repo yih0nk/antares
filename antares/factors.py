@@ -354,15 +354,46 @@ def get(name: str) -> Factor:
         raise KeyError(f"unknown factor {name!r}; known: {', '.join(REGISTRY)}") from None
 
 
+def check_stage(name: str, stage: str) -> Factor:
+    """The factor, after checking that ``stage`` can fit it.
+
+    The shared and per-joint stages move :class:`antares.sim.SimParams`
+    fields and added factors (those with an apply hook); the sensor-only
+    built-ins (``sensor_gain``, ``sensor_bias``) belong to the command-map
+    fit. A factor that is one value for the whole arm cannot go per joint.
+    """
+    f = get(name)
+    if stage in ("shared", "per_joint"):
+        # Built-ins other than the sensor pair are SimParams fields; added
+        # factors always carry an apply hook.
+        if name not in _APPLY and f.origin == "builtin" and f.stages == ("sensor",):
+            raise ValueError(f"{name} is fitted by the sensor calibration (calibrate --fit-sensor), not the {stage} stage")
+        if stage == "per_joint" and not f.per_joint_ok:
+            raise ValueError(f"{name} is one value for the whole arm; it cannot be fitted per joint")
+    elif stage == "sensor" and "sensor" not in f.stages:
+        raise ValueError(f"{name} is not part of the sensor calibration")
+    return f
+
+
 def names(stage: str | None = None, include: Iterable[str] = (), exclude: Iterable[str] = ()) -> tuple[str, ...]:
     """Registered factor names in order, optionally only those a ``stage``
-    searches by default, plus ``include`` and minus ``exclude``."""
+    searches by default, plus ``include`` and minus ``exclude``.
+
+    With a ``stage``, an ``include`` the stage cannot fit is a
+    :class:`ValueError` up front (see :func:`check_stage`), and so is a
+    selection that leaves nothing to fit.
+    """
     inc, exc = set(include), set(exclude)
-    for n in inc | exc:
+    for n in exc:
         get(n)
-    return tuple(
+    for n in inc:
+        get(n) if stage is None else check_stage(n, stage)
+    out = tuple(
         n for n, f in REGISTRY.items() if n not in exc and (stage is None or stage in f.stages or n in inc)
     )
+    if stage is not None and not out:
+        raise ValueError(f"the selection leaves the {stage} stage nothing to fit")
+    return out
 
 
 def is_extra(name: str) -> bool:
@@ -387,9 +418,11 @@ def space(stage: str, per_joint: bool = False, factors: Sequence[str] | None = N
     servos are stiffer than the SO-101's.
     """
     picked = names(stage) if factors is None else tuple(factors)
+    if not picked:
+        raise ValueError(f"the selection leaves the {stage} stage nothing to fit")
     out = {}
     for n in picked:
-        f = get(n)
+        f = check_stage(n, stage)
         out[n] = tuple(overrides[n]) if overrides and n in overrides else f.space_entry(per_joint)
     return out
 
@@ -592,7 +625,9 @@ def parse_selection(spec: str | None, stage: str = "shared") -> tuple[str, ...] 
     """``"+gravity,-forcerange"`` / ``"kp,kv,latency_frames"`` -> factor names.
 
     Entries with ``+``/``-`` add to or drop from ``stage``'s defaults; a
-    plain list replaces them. ``None`` or empty means the defaults.
+    plain list replaces them. ``None`` or empty means the defaults. A
+    selection the stage cannot fit, or that leaves it nothing to fit, is a
+    :class:`ValueError`.
     """
     if not spec or not spec.strip():
         return None
@@ -604,7 +639,7 @@ def parse_selection(spec: str | None, stage: str = "shared") -> tuple[str, ...] 
     if any(s[0] in "+-" for s in items):
         raise ValueError("mix of +/- and plain factor names; use one form")
     for s in items:
-        get(s)
+        check_stage(s, stage)
     return tuple(items)
 
 
@@ -632,6 +667,7 @@ __all__ = [
     "REGISTRY_VERSION",
     "Unmodelled",
     "apply_hook",
+    "check_stage",
     "describe",
     "drift_factors",
     "drift_shifts",
