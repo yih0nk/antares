@@ -626,6 +626,48 @@ def test_deadband_leaves_the_arm_parked_inside_the_band():
     assert np.radians(0.1) < off <= 1.05 * band
 
 
+def test_deadband_replay_takes_the_multistep_path_unless_a_band_is_set(monkeypatch):
+    import antares.sim as sim_mod
+
+    T = 20
+    ep = constant_episode([0.0] * 6, [0.0, 0.0, 30.0, 0.0, 0.0, 0.0], T)
+    base = SimParams(kp=20.0, kv=0.3, gravity_scale=0.0)
+    arm = Arm(base)
+    plain = arm.replay(ep)  # the pre-deadband replay: deadband at its scalar default
+    n_sub = max(1, int(round((1.0 / ep.fps) / arm.model.opt.timestep)))
+    assert n_sub > 1
+    calls: list[int] = []
+    real_step = sim_mod.mujoco.mj_step
+
+    def counting_step(m, d, nstep=1):
+        calls.append(nstep)
+        real_step(m, d, nstep)
+
+    monkeypatch.setattr(sim_mod.mujoco, "mj_step", counting_step)
+    # no band on any joint: one C-side multi-step call per frame, bit-identical
+    arm.apply(base.replace(deadband=(0.0,) * 6))
+    np.testing.assert_array_equal(arm.replay(ep), plain)
+    assert calls == [n_sub] * (T - 1)
+    # a band on one joint: the shrink runs every substep and the replay changes
+    calls.clear()
+    arm.apply(base.replace(deadband=(0.0, 0.0, np.radians(1.0), 0.0, 0.0, 0.0)))
+    banded = arm.replay(ep)
+    assert calls == [1] * ((T - 1) * n_sub)
+    assert abs(banded[-1, 2] - plain[-1, 2]) > np.radians(0.1)
+
+
+def test_broadcast_round_trips_through_to_dict():
+    import json
+
+    b = SimParams().broadcast()
+    d = b.to_dict()
+    assert d["gravity_scale"] == [1.0] * 6 and d["deadband"] == [0.0] * 6
+    assert SimParams.from_dict(d) == b
+    assert SimParams.from_dict(json.loads(json.dumps(d))) == b
+    # the scalar defaults still serialize as the old lock format
+    assert "gravity_scale" not in SimParams().to_dict() and "deadband" not in SimParams().to_dict()
+
+
 # -- CommandMap ---------------------------------------------------------------
 
 

@@ -166,17 +166,20 @@ class SimParams:
     def to_dict(self) -> dict[str, Any]:
         """Scalars stay scalars; per-joint values become 6-element lists.
 
-        ``gravity_scale`` and ``deadband`` are left out at their defaults (1.0
-        and 0), so locks fitted without them serialize exactly as before.
+        ``gravity_scale`` and ``deadband`` are left out at their scalar
+        defaults (1.0 and 0), so locks fitted without them serialize exactly
+        as before; in per-joint form they are always written, so
+        :meth:`broadcast` round-trips through :meth:`from_dict`.
         """
         out: dict[str, Any] = {}
         for n in self.field_names():
             v = getattr(self, n)
-            if n == "gravity_scale" and self.per_joint(n)[0] == 1.0:
+            if isinstance(v, tuple):
+                out[n] = list(v)
+            elif (n == "gravity_scale" and v == 1.0) or (n == "deadband" and v == 0.0):
                 continue
-            if n == "deadband" and not np.any(self.per_joint(n)):
-                continue
-            out[n] = list(v) if isinstance(v, tuple) else v
+            else:
+                out[n] = v
         return out
 
     @classmethod
@@ -538,12 +541,20 @@ class Arm:
                 # The position actuator pushes kp * (ctrl - q); feeding it
                 # q + shrink(target - q) makes that kp * shrink(error). Updated
                 # every physics substep, so the band is exact, not per frame.
-                lo, hi = self._ctrl_lo, self._ctrl_hi
+                # Only the joints with a band are touched: the others keep
+                # their exact command, as on the plain path above. This is
+                # the slow path (a Python loop per substep); a zero band
+                # everywhere, the default, takes the C-side multi-step above.
+                idx = np.flatnonzero(band > 0)
+                lo, hi, band = self._ctrl_lo[idx], self._ctrl_hi[idx], band[idx]
                 for t in range(1, T):
                     target = ctrl[t]
+                    dctrl[:] = target
+                    want = target[idx]
                     for _ in range(n_sub):
-                        e = target - qpos
-                        dctrl[:] = np.clip(qpos + np.sign(e) * np.maximum(np.abs(e) - band, 0.0), lo, hi)
+                        q = qpos[idx]
+                        e = want - q
+                        dctrl[idx] = np.clip(q + np.sign(e) * np.maximum(np.abs(e) - band, 0.0), lo, hi)
                         step(m, d)
                     sim_q[t] = qpos
         finally:
