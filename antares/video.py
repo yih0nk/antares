@@ -393,13 +393,17 @@ def episode_clip(repo_id: str, camera: str, episode: int, dataset: Dataset | Non
             inp.seek(int(max(0.0, seg.from_ts - half) / stream.time_base), stream=stream, backward=True)
             last = None
             for frame in inp.decode(stream):
-                if frame.time is None:
+                t = frame.time  # read before encoding, which restamps the frame
+                if t is None:
                     continue
-                last = frame
-                # Every wanted frame this decoded frame reaches (a dropped
-                # source frame repeats the one before it).
-                while written < seg.length and frame.time >= seg.from_ts + written / cam.fps - half:
+                # Wanted frames this one has skipped past (dropped in the
+                # source) repeat the frame before it ...
+                while last is not None and written < seg.length and seg.from_ts + written / cam.fps < t - half:
+                    written = _encode(enc, dst, last, written, 1 / rate)
+                # ... and this frame stands for every wanted frame it reaches.
+                while written < seg.length and t >= seg.from_ts + written / cam.fps - half:
                     written = _encode(enc, dst, frame, written, 1 / rate)
+                last = frame
                 if written >= seg.length:
                     break
             while last is not None and written < seg.length:  # past the end of the file

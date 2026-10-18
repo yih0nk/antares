@@ -69,6 +69,16 @@ def test_clip_is_cached(stubbed):
     assert not list(a.parent.glob("*.tmp.mp4"))
 
 
+def test_dropped_source_frames_repeat_the_frame_before(stubbed, monkeypatch):
+    src = stubbed / "gappy.mp4"
+    first = LENGTHS[0]
+    _source(src, dropped={first + 4, first + 5, first + 6})
+    monkeypatch.setattr(video, "video_file", lambda repo, cam, chunk=0, file=0: src)
+    levels = _grey_levels(video.episode_clip("fake/ds", "up", 1))
+    want = [8 * (first + (3 if 4 <= i <= 6 else i)) for i in range(LENGTHS[1])]
+    assert len(levels) == LENGTHS[1] and np.allclose(levels, want, atol=3)
+
+
 def test_datasets_with_the_same_name_get_their_own_clips(stubbed):
     a = video.episode_clip("alice/so100_test", "up", 0)
     b = video.episode_clip("bob/so100_test", "up", 0)
