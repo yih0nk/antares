@@ -769,12 +769,25 @@ class Arm:
         return sim_q
 
 
-def model_geometry(model: mujoco.MjModel | None = None) -> dict[str, Any]:
+def mesh_files(model_path: str | Path) -> dict[str, tuple[str, list[float]]]:
+    """Mesh name -> (file relative to the MJCF's directory, scale), read with
+    :class:`mujoco.MjSpec` so includes and ``meshdir`` are resolved."""
+    spec = mujoco.MjSpec.from_file(str(model_path))
+    base = Path(spec.meshdir or "")
+    return {m.name: ((base / m.file).as_posix(), [float(v) for v in m.scale]) for m in spec.meshes if m.file}
+
+
+def model_geometry(
+    model: mujoco.MjModel | None = None, meshes: dict[str, tuple[str, list[float]]] | None = None
+) -> dict[str, Any]:
     """Compile-time geometry of the visual mesh geoms, for the web viewer.
 
     Returns bodies (all, in id order, with parent ids), visual mesh geoms
     (group 2) with the body-frame pose of the raw STL file and colour, and
-    the joints.
+    the joints. With ``meshes`` (see :func:`mesh_files`; robots other than
+    the SO arms) each geom names its file relative to the MJCF and its scale,
+    visual geoms are the ones that collide with nothing, and a geom's
+    material colour is used when it has one.
     """
     if model is None:
         model = load_model()
@@ -788,7 +801,11 @@ def model_geometry(model: mujoco.MjModel | None = None) -> dict[str, Any]:
     ]
     geoms = []
     for g in range(model.ngeom):
-        if model.geom_type[g] != mujoco.mjtGeom.mjGEOM_MESH or model.geom_group[g] != 2:
+        if model.geom_type[g] != mujoco.mjtGeom.mjGEOM_MESH:
+            continue
+        if meshes is None and model.geom_group[g] != 2:
+            continue
+        if meshes is not None and (model.geom_contype[g] or model.geom_conaffinity[g]):
             continue
         mesh_id = int(model.geom_dataid[g])
         mesh_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_MESH, mesh_id)
@@ -798,13 +815,27 @@ def model_geometry(model: mujoco.MjModel | None = None) -> dict[str, Any]:
         mujoco.mju_negPose(inv_pos, inv_quat, model.mesh_pos[mesh_id], model.mesh_quat[mesh_id])
         pos, quat = np.zeros(3), np.zeros(4)
         mujoco.mju_mulPose(pos, quat, model.geom_pos[g], model.geom_quat[g], inv_pos, inv_quat)
+        if meshes is None:
+            geoms.append(
+                {
+                    "body": int(model.geom_bodyid[g]),
+                    "mesh": f"{mesh_name}.stl",
+                    "pos": pos.tolist(),
+                    "quat": quat.tolist(),
+                    "rgba": model.geom_rgba[g].tolist(),
+                }
+            )
+            continue
+        file, scale = meshes[mesh_name]
+        mat = int(model.geom_matid[g])
         geoms.append(
             {
                 "body": int(model.geom_bodyid[g]),
-                "mesh": f"{mesh_name}.stl",
+                "mesh": file,
+                "scale": scale,
                 "pos": pos.tolist(),
                 "quat": quat.tolist(),
-                "rgba": model.geom_rgba[g].tolist(),
+                "rgba": (model.mat_rgba[mat] if mat >= 0 else model.geom_rgba[g]).tolist(),
             }
         )
     joints = [

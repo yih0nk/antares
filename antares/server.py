@@ -1774,22 +1774,42 @@ def model(robot: str | None = Query(None, description="registry name, default so
     from antares.sim import model_geometry
 
     name = check_robot(robot)
-    out = model_geometry(getattr(get_arm(name), "model", None))
+    r = get_robot(name)
+    arm = get_arm(name)
+    if r.menagerie is None:
+        out = model_geometry(getattr(arm, "model", None))
+    else:
+        from antares.sim import mesh_files
+
+        out = model_geometry(arm.model, mesh_files(arm.model_path))
     out["robot"] = name
     return out
 
 
 _STL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.stl$", re.IGNORECASE)
+_MESH_PATH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*\.(stl|obj)$", re.IGNORECASE)
+_MESH_TYPES = {".stl": "model/stl", ".obj": "model/obj"}
 
 
-@app.get("/api/model/mesh/{file}")
+@app.get("/api/model/mesh/{file:path}")
 def model_mesh(file: str, robot: str | None = Query(None)):
-    if "/" in file or "\\" in file or ".." in file or not _STL_RE.match(file):
-        raise HTTPException(status_code=400, detail="mesh must be a plain *.stl basename")
-    path = mesh_dir(robot) / file
+    """A mesh of the robot's model: a plain ``*.stl`` name in the SO arms'
+    assets, or a path under a fetched model's directory (``*.stl``/``*.obj``)."""
+    fetched = robot is not None and get_robot(check_robot(robot)).menagerie is not None
+    if not fetched:
+        if "/" in file or "\\" in file or ".." in file or not _STL_RE.match(file):
+            raise HTTPException(status_code=400, detail="mesh must be a plain *.stl basename")
+        path = mesh_dir(robot) / file
+    else:
+        if ".." in file.split("/") or "\\" in file or not _MESH_PATH_RE.match(file):
+            raise HTTPException(status_code=400, detail="mesh must be a relative *.stl or *.obj path")
+        root = get_robot(check_robot(robot)).model_path.parent.resolve()
+        path = (root / file).resolve()
+        if not path.is_relative_to(root):
+            raise HTTPException(status_code=400, detail="mesh must stay inside the model directory")
     if not path.is_file():
         raise HTTPException(status_code=404, detail=f"no mesh {file}")
-    return FileResponse(path, media_type="model/stl", filename=file)
+    return FileResponse(path, media_type=_MESH_TYPES[path.suffix.lower()], filename=path.name)
 
 
 @app.get("/api/replay")
