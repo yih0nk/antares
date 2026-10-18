@@ -103,7 +103,7 @@ robot. Three ways in:
 
   ```sh
   .venv/bin/antares inspect ./recordings/2026-10-17      # verdict + summary, no sim
-  .venv/bin/antares calibrate ./recordings/2026-10-17 --name my_arm
+  .venv/bin/antares calibrate ./recordings/2026-10-17 --name my_arm --seeds 3
   .venv/bin/antares replay upload/bench_arm --episode 0 --lock my_arm
   ```
 
@@ -417,6 +417,49 @@ optimizer spread above is a property of the fit, not of the real data.
 The fleet scan's cross matrix over many arms is the larger version of
 this test.
 
+### Repeatable locks: best of N seeds
+
+One CMA-ES run is deterministic for its seed but not representative. On
+the same SO-101 episodes, seeds 0/1/2 land at kp 10.5 / 27 / 260 with
+held-out errors of 0.74° / 0.91° / 1.06°; on SO-100 they land at kp
+1427 / 14 / 13 at 0.79° / 0.57° / 0.66°
+([`results/robot_specificity.md`](results/robot_specificity.md)). The
+tracking error is repeatable to within about 1.4×; the parameter values
+are not, because several parameter sets reproduce the arm equally well.
+A parameter value read off a single lock is therefore a fit, not a
+measurement.
+
+`--seeds N` runs the shared stage from N seeds (`seed`, `seed+100`, ...),
+each from the same start with the full budget, keeps the candidate with
+the best held-out score, and records every candidate in the lock under
+`result.seeds`. From the candidates it computes each parameter's spread
+and marks a parameter **pinned** when the seeds agree on it: a log-scaled
+parameter (`kp`, `kv`, `damping`, `armature`, `frictionloss`) when its
+max/min across seeds is at most 2, `latency_frames` when it moves by at
+most one frame. The per-joint stage, if asked for, runs once from the
+winner.
+
+```sh
+.venv/bin/antares calibrate lerobot/svla_so101_pickplace --seeds 3
+```
+
+Three seeds cost three times the shared budget (about a minute on the
+demo datasets) and are what a lock worth keeping should use; the default
+stays at 1 so the live demo stays fast. `antares.lock.pinned_params(lock)`
+returns the pinned list, and for a lock without seed spread the
+conservative default `["latency_frames"]`: one frame either way costs
+0.3-0.9° with everything else held fixed, so latency is the one parameter
+a single fit does pin down.
+
+Drift, diagnose and the fleet statistics now read only pinned parameters
+as physical. A drift scan still reports every trend, but its verdict only
+announces a parameter as drifting when the lock pins it (scores always
+count), and says when an unpinned parameter trends. `--explain` only
+names a cause the lock pins; fleet statistics take `pinned_only`, and
+`antares fleet list` prints which parameters are pinned across the
+fleet's locks. The committed locks were fitted with one seed, so for them
+that is latency only.
+
 ## Gate deploys on your robot's drift
 
 A lock is a snapshot of how one arm behaved on the day it was calibrated.
@@ -447,7 +490,7 @@ OK: lerobot/svla_so101_pickplace vs lock svla_so101_pickplace: 0.752 deg RMSE on
 Exit codes: `0` pass, `1` drifted, `2` usage error or too few episodes
 (`--min-episodes`, default 5). `--json` prints the full `CheckResult`. The
 same check is `POST /api/check` with
-`{"dataset", "lock", "threshold_deg"?, "ratio"?, "last"?}`.
+`{"dataset", "lock", "threshold_deg"?, "ratio"?, "last"?, "record"?}`.
 
 In CI, the repo is a composite GitHub Action. Point it at your dataset and
 lock and the job fails when the robot drifts:
@@ -467,6 +510,89 @@ weekly) against the public SO-101 dataset and the lock under `locks/`. The
 tests in `tests/test_check.py` prove the gate bites: real episodes pass,
 the same episodes with 3 frames of extra lag or excursions scaled to 0.9
 (a weak servo) fail.
+
+### Record then check, one command
+
+A technician at the arm should not have to assemble a `lerobot-record`
+command and then a `check` command. `antares record-check` does both:
+
+```sh
+.venv/bin/antares record-check --lock so101_arm_a \
+    --robot-port /dev/tty.usbmodem585A0076841 --robot-id arm_a \
+    --teleop-port /dev/tty.usbmodem58760431551
+```
+
+```
+recording 5 episode(s) -> recordings/arm_a/20261017-093005
+  lerobot-record --robot.type=so101_follower --robot.port=/dev/tty.usbmodem585A0076841 --robot.id=arm_a ... --dataset.push_to_hub=false
+... LeRobot's own prompts and keyboard controls (n: next, r: re-record, q: quit) ...
+OK: recordings/arm_a/20261017-093005 vs lock so101_arm_a: 1.067 deg RMSE on 5 episodes (reference 1.054, limit 1.582)
+PASS arm_a: 1.067 deg (limit 1.582)
+```
+
+It runs `lerobot-record` with the technician's terminal attached (follower
+`--robot-type so101_follower`, leader `--teleop-type so101_leader`,
+`--teleop-id <robot-id>_leader` by default; `--robot-id` must be the id the
+arm was calibrated under in LeRobot), writes the episodes to `--root`
+(default `recordings/<robot-id>/<YYYYMMDD-HHMMSS>`, so runs never overwrite
+each other) and never pushes to the Hub. It then runs exactly what `antares
+check <root> --lock <name>` runs, so `--threshold`, `--ratio`,
+`--min-episodes` and `--json` mean the same thing, and ends with one banner
+line, `PASS <robot-id>: ...` or `FAIL <robot-id>: ...`. Exit codes are the
+check's (`0` pass, `1` drifted, `2` usage or too few episodes) plus `3`
+when recording itself failed. `--episodes` defaults to 5 to satisfy the
+check's `--min-episodes 5` and is raised with a warning when set lower.
+
+Other knobs: `--episode-time S` / `--reset-time S` (LeRobot's
+`episode_time_s` / `reset_time_s`, 60 s each by default), `--task "..."`,
+`--extra=--robot.cameras=...` to pass any other `lerobot-record` flag
+through verbatim, `--dry-run` to print the two commands and exit 0, and
+`--skip-record` to check a directory a previous run already recorded.
+
+Prerequisite: LeRobot with its recording scripts and Feetech motor support,
+`pip install 'lerobot[core_scripts,feetech]'`. LeRobot needs Python >= 3.12
+and Antares runs on 3.11, so they usually sit in separate environments;
+point `--recorder /path/to/env/bin/lerobot-record` at LeRobot's when it is
+not on `PATH`. The recorded directory is an ordinary LeRobot dataset
+(`meta/info.json`, `data/*.parquet`): keep it as the record of that day's
+check, run `antares check` or `--explain` on it again later, or upload it
+with `hf upload <user>/<name> recordings/arm_a/20261017-093005 --repo-type dataset`.
+
+### Check history
+
+One check says whether the arm matches its sim today. A shop running arms
+for weeks wants that answer per robot over time, so every `antares check`
+(and `POST /api/check`) appends one JSON line to
+`locks/<lock>.history.jsonl` next to the lock: when it ran, the dataset,
+the verdict, the score, the limit, the worst joint and the per-joint
+errors. Insufficient-data checks are recorded too, with a null score; a
+check that could not run is itself a signal. `--no-record` skips it and
+`--history-dir` moves the file. The check's last line is the trend so far:
+
+```
+history: 7 checks since 2026-09-30, +0.021 deg/day (r² 0.41), last drifted 2026-10-10
+```
+
+`antares history <lock>` tabulates the entries (`--last N` for the newest
+N) and `antares history <lock> --json` prints what the API serves:
+`GET /api/history/{lock}` is `{"lock", "entries": [...oldest first],
+"trend": {"n", "first", "last", "slope_deg_per_day", "r2",
+"latest_verdict", "n_drifted"}}` (404 when the lock does not exist, empty
+entries and an `n` of 0 when it has no checks yet), and `GET /api/history`
+lists every lock with its trend and latest entry. The slope is a
+least-squares fit of the score in degrees against days since the first
+check, so it measures how fast the tracking error is growing *if the
+checks are comparable*; a handful of checks on different tasks or episode
+counts will scatter (low r²) and the slope then says nothing about wear.
+Compare like with like: the same task, the same `--last`, the same lock.
+
+In the Action the history is a workspace file (`record-history: "false"`
+turns it off), so commit it from the job or keep it as an artifact:
+
+```yaml
+- uses: actions/upload-artifact@v4
+  with: { name: robot-check-history, path: locks/*.history.jsonl }
+```
 
 ### What changed? `--explain`
 
@@ -530,6 +656,63 @@ verdict standing either way); `POST /api/diagnose` runs the same refit
 as a cancellable job with progress events, on its own MuJoCo arm so the
 other endpoints keep answering. The GitHub Action takes `explain: "true"`
 and sets a `cause` output.
+
+### Alerts
+
+A gate that fails only in a CI log is easy to miss. `--notify` posts the
+verdict to a webhook, so the team hears about a drifted arm where it talks:
+
+```sh
+.venv/bin/antares check ./recordings/2026-10-17 --lock my_arm --notify "$ANTARES_WEBHOOK_URL"
+.venv/bin/antares check ./recordings/2026-10-17 --lock my_arm --notify-when failure  # URL read from $ANTARES_WEBHOOK_URL
+.venv/bin/antares notify-test --url "$ANTARES_WEBHOOK_URL"                            # posts a synthetic OK to confirm the hook
+```
+
+```
+DRIFTED my_arm on ./recordings/2026-10-17: 2.10 deg RMSE (limit 1.58)
+worst joint elbow_flex: 3.21 deg (limit 3.05)
+failed joints (2): elbow_flex 3.21/3.05, shoulder_lift 1.60/1.45
+10 episodes, 3000 frames, 2026-10-17T06:04:12+00:00
+```
+
+`--notify-when` is `drifted` (default), `failure` (drifted, too few
+episodes, or a check that could not run at all) or `always`;
+`--notify-dry-run` prints the payload instead of posting it. A webhook
+that is down only prints `warning: alert not sent: ...` on stderr; the
+exit code is the check's, never the alert's.
+
+For Slack, create an app with Incoming Webhooks switched on, add a webhook
+to the channel you want and copy its `https://hooks.slack.com/services/...`
+URL. Antares recognises that host and posts Block Kit (a header, the
+summary, one field per joint); `--notify-format slack|json` overrides the
+detection. Any other URL gets a generic JSON POST:
+
+```json
+{
+  "event": "antares.check",
+  "verdict": "drifted",
+  "text": "DRIFTED my_arm on ./recordings/2026-10-17: 2.10 deg RMSE (limit 1.58)\nworst joint ...",
+  "result": {"passed": false, "verdict": "drifted", "score": 2.1, "limit": 1.58, "per_joint": {"...": {}}, "...": "..."}
+}
+```
+
+`result` is the full `CheckResult`, as `--json` prints it. A check that
+could not run (missing lock, unreadable dataset) posts `"verdict": "error"`
+with `"result": null` and an `"error"` string, for `failure` and `always`
+only. `POST /api/check` takes the same options as `notify_url`,
+`notify_when` and `notify_format`, posts server-side after the check, and
+adds `notified` (`true`, `false`, or `null` when no URL was given) and
+`notify_error` to the response. In the Action, pass the URL from a
+repository secret so it never appears in the workflow file or the logs:
+
+```yaml
+- uses: your-org/antares@main
+  with:
+    dataset: your-org/so101_arm_a_daily
+    lock: so101_arm_a
+    webhook: ${{ secrets.ANTARES_WEBHOOK_URL }}   # Slack incoming webhook or any JSON endpoint
+    notify-when: failure                          # optional: drifted (default), failure, always
+```
 
 ## Contact detection from the residual
 
@@ -810,6 +993,66 @@ Locks fitted this way carry a `command_map`. Replay, the viewer, `cross`,
 back in raw units), `export` (in the sidecar) and the drift and DR refits
 (which hold the map fixed) all use it. Locks without one behave as before.
 
+## Cameras from the logs
+
+Every LeRobot dataset ships video from fixed cameras, and the joint angles
+are known at every frame. `antares camera-fit` solves for the camera pose
+that makes the sim arm overlap the real one, so the UI can draw the sim
+arm's outline over the real video and an exported MJCF carries a
+`<camera>` per fitted camera.
+
+```sh
+.venv/bin/pip install -e ".[video]"      # PyAV (AV1 via dav1d), OpenCV, SciPy
+.venv/bin/antares camera-fit lerobot/svla_so101_pickplace --camera up --lock svla_so101_pickplace
+.venv/bin/antares camera-list svla_so101_pickplace
+```
+
+How it works, with no OpenGL and no learned segmenter:
+
+1. **Frames.** Only the one video file an episode lives in is downloaded;
+   `meta/episodes` maps episode frames to timestamps in it. Decoded frames
+   are cached under `.cache/antares/frames/`.
+2. **Real silhouette.** The camera is static and the arm moves, so the
+   per-pixel median over frames spread across episodes is the background.
+   A Lab colour histogram of moving pixels against the background then
+   recovers what subtraction cannot see (the static base, the rest pose
+   that leaks into the median), restricted to regions the moving arm
+   touches in most frames so same-coloured clutter is dropped. The contrast
+   sign (black arm on a white table for the SO-101, orange on a dark table
+   for the SO-100) is learned from the frames.
+3. **Sim silhouette.** Each visual mesh is reduced to its convex hull once;
+   `Arm.fk` poses the hulls, a pinhole camera (MuJoCo convention) projects
+   them, and `cv2.fillConvexPoly` fills each one.
+4. **Fit.** CMA-ES maximises the mean IoU of the two silhouettes over 40
+   frames from 4 episodes, searched in look-at coordinates (target point,
+   distance, azimuth, elevation, roll, fov). 3000 random cameras on a
+   hemisphere over the arm are scored at 80x60 first, the 8 best distinct
+   ones get a short CMA-ES run at 160x120, and the best is refined at full
+   resolution. 12 frames from other episodes are scored as a held-out
+   check. About a minute per camera.
+
+The demo datasets, 40 fit frames / 12 held-out frames each:
+
+| dataset | camera | fit IoU | held-out IoU | notes |
+|---|---|---|---|---|
+| svla_so101_pickplace | `up` | 0.82 | 0.83 | clean; residual is hull slack and the real gripper reaching lower than the sim's |
+| svla_so101_pickplace | `side` | 0.58 | 0.72 | the arm leaves the top of the frame in many fit frames (per-frame IoU down to 0.08) |
+| svla_so100_pickplace | `top` | 0.63 | 0.60 | black servo and gripper parts vanish against the black table, so the real mask is the orange and white parts only |
+
+Fits are saved as `locks/<lock>.camera.json` (frames used, per-frame IoUs)
+and a compact copy in the lock's `cameras` field, which `antares export`
+writes into `<worldbody>` as `<camera name="up" pos=... quat=... fovy=.../>`.
+The API: `POST /api/camera/fit` (a job, kind `camera`), `GET /api/camera?lock=`,
+`GET /api/camera/cameras?dataset=`, and `GET /api/camera/overlay?dataset=&camera=&episode=&frame=&lock=`
+returns the real frame (JPEG data URL), the sim outline polygons, the
+segmented arm's polygon and their IoU. The UI's Camera section shows that
+overlay at the playhead whenever playback is paused.
+
+Caveats: silhouettes pin the viewing direction well but trade distance
+against field of view (a farther camera with a narrower fov looks nearly
+the same), so expect the position to be loose along the optical axis;
+wrist cameras are skipped; the sim is the SO-101 model for both datasets.
+
 ## Layout
 
 | Path | What |
@@ -827,6 +1070,7 @@ back in raw units), `export` (in the sidecar) and the drift and DR refits
 | `antares/drift.py` | Sliding-window refits and trend statistics over a session |
 | `antares/dr.py` | Domain-randomization ranges derived from refits (`locks/*.dr.json`) |
 | `antares/check.py` | Pre-deploy drift gate (`antares check`, `/api/check`) |
+| `antares/history.py` | Check history per lock across sessions (`locks/*.history.jsonl`, `antares history`, `/api/history`) |
 | `antares/diagnose.py` | Names the parameter change behind a drift (`check --explain`) |
 | `antares/synth.py` | Synthetic recordings of an arm with known wear (`antares synth`) |
 | `action.yml` | Composite GitHub Action running the gate in CI |
@@ -841,6 +1085,10 @@ back in raw units), `export` (in the sidecar) and the drift and DR refits
 | `examples/` | `randomize_env.py`: DR ranges in a training loop |
 | `scripts/` | `sensor_synthetic.py` (synthetic sensor-fit check), `dr_compare.py` (derived vs hand-picked DR ranges) |
 | `antares/fleet.py` | Hub discovery, fleet scan, fleet statistics |
+| `antares/video.py` | Dataset video frames (episode -> file/timestamp, AV1 decode, frame cache) |
+| `antares/silhouette.py` | Real arm mask: median background, colour model, static-arm region |
+| `antares/project.py` | Sim arm silhouette: mesh hulls, pinhole camera, polygon fill |
+| `antares/camera.py` | Fixed-camera fit (CMA-ES over look-at coordinates), `locks/*.camera.json` |
 | `locks/` | Committed locks for the demo arms; `locks/fleet/` for the fleet scan |
 | `web/` | React + three.js viewer |
 

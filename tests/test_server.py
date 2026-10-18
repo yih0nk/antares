@@ -331,7 +331,9 @@ def fakes(monkeypatch, tmp_path):
                   default_simulate=lambda command_map=None, robot=None: (lambda params, ep: (ep.state, ep.action)))
     lock = _module("antares.lock", RobotLock=FakeLock, dataset_digest=lambda eps: "deadbeef",
                    slug=lambda r: r.replace("/", "__"), LOCK_DIR=tmp_path / "locks",
-                   LOCK_SUFFIX=LOCK_SUFFIX)
+                   LOCK_SUFFIX=LOCK_SUFFIX,
+                   # no seed spread in the fakes: only latency is pinned, as for a real old lock
+                   pinned_params=lambda lock: ["latency_frames"], seed_info=lambda lock: None)
     comp = _module("antares.compensate", compensate_episode=fake_compensate_episode,
                    compensate_episodes=fake_compensate_episodes, held_out_episodes=fake_held_out,
                    max_joint_velocity=lambda episodes, arm: np.full(6, 100.0))
@@ -771,6 +773,14 @@ def test_calibrate_per_joint_option(client, fakes, monkeypatch):
     assert calls[-1]["per_joint"] is True and calls[-1]["per_joint_max_evaluations"] == 42
     run({"dataset": FAKE_DS, "per_joint": True})
     assert calls[-1]["per_joint_max_evaluations"] == 600  # default budget
+
+    # best of N seeds: forwarded only when asked for, bounded at 10
+    run({"dataset": FAKE_DS, "name": "seeds-a"})
+    assert "n_seeds" not in calls[-1]
+    run({"dataset": FAKE_DS, "name": "seeds-b", "n_seeds": 3})
+    assert calls[-1]["n_seeds"] == 3
+    assert client.post("/api/calibrate", json={"dataset": FAKE_DS, "n_seeds": 0}).status_code == 422
+    assert client.post("/api/calibrate", json={"dataset": FAKE_DS, "n_seeds": 11}).status_code == 422
 
     assert client.post("/api/calibrate", json={"dataset": FAKE_DS, "per_joint_max_evaluations": 0}).status_code == 422
 
@@ -1231,6 +1241,61 @@ def test_check_rejects_bad_input(client, fakes):
                                            "threshold_deg": -1}).status_code == 422
 
 
+def test_check_notifies_a_webhook_server_side(client, fakes, monkeypatch):
+    import antares.notify as notify
+
+    write_lock(fakes, "unit-a", kp=50.0)
+    sent = []
+    monkeypatch.setattr(notify, "send", lambda url, payload, timeout=10.0: sent.append((url, payload)) or 200)
+    slack_url = "https://hooks.slack.com/services/T0/B0/xyz"
+
+    out = client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a"}).json()
+    assert out["notified"] is None and out["notify_error"] is None
+
+    # ok is quiet by default
+    out = client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a", "notify_url": slack_url}).json()
+    assert out["verdict"] == "ok" and out["notified"] is False and out["notify_error"] is None
+    assert sent == []
+
+    # drifted posts, as Slack blocks for a hooks.slack.com URL
+    out = client.post("/api/check", json={"dataset": FAKE_DS2, "lock": "unit-a", "notify_url": slack_url}).json()
+    assert out["verdict"] == "drifted" and out["notified"] is True and out["notify_error"] is None
+    ((url, payload),) = sent
+    assert url == slack_url
+    assert payload["blocks"][0]["type"] == "header"
+    assert payload["text"].startswith(f"DRIFTED unit-a on {FAKE_DS2}: ")
+
+    # any other host gets the generic envelope; notify_when widens the policy
+    out = client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a",
+                                          "notify_url": "https://example.com/hook",
+                                          "notify_when": "always"}).json()
+    assert out["notified"] is True
+    payload = sent[1][1]
+    assert payload["event"] == "antares.check" and payload["verdict"] == "ok"
+    assert payload["result"]["lock"] == "unit-a" and payload["result"]["verdict"] == "ok"
+    out = client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a", "last": 2,
+                                          "notify_url": "https://example.com/hook",
+                                          "notify_when": "failure", "notify_format": "slack"}).json()
+    assert out["verdict"] == "insufficient_data" and out["notified"] is True
+    assert "blocks" in sent[2][1] and sent[2][1]["text"].startswith("NO DATA unit-a")
+
+    # a dead webhook never changes the verdict or the status code
+    def boom(url, payload, timeout=10.0):
+        raise notify.NotifyError("webhook returned HTTP 500: invalid_payload")
+
+    monkeypatch.setattr(notify, "send", boom)
+    r = client.post("/api/check", json={"dataset": FAKE_DS2, "lock": "unit-a", "notify_url": "https://example.com/hook"})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["verdict"] == "drifted" and out["passed"] is False
+    assert out["notified"] is False and out["notify_error"] == "webhook returned HTTP 500: invalid_payload"
+
+    assert client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a", "notify_url": slack_url,
+                                           "notify_when": "sometimes"}).status_code == 422
+    assert client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a", "notify_url": slack_url,
+                                           "notify_format": "xml"}).status_code == 422
+
+
 def test_check_holds_arm_lock(client, fakes):
     write_lock(fakes, "unit-a", kp=50.0)
     arm = server._ARMS["so101"]
@@ -1498,3 +1563,95 @@ def test_lock_simulate_holds_the_lock_command_map():
     _, mapped = sim(SimParams(), ep)
     plain = server.lock_simulate({"command_map": {"gain": [1.0] * 6, "bias": [0.0] * 6}})(SimParams(), ep)[1]
     assert mapped[-1, 1] > plain[-1, 1]
+
+
+# --------------------------------------------------------------------------
+# check history across sessions (``LOCK_DIR/<lock>.history.jsonl``)
+# --------------------------------------------------------------------------
+
+TREND_KEYS = {"n", "first", "last", "slope_deg_per_day", "r2", "latest_verdict", "n_drifted"}
+ENTRY_KEYS = {"at", "lock", "dataset", "verdict", "passed", "score", "reference", "limit",
+              "n_episodes", "episodes", "worst_joint", "per_joint", "antares_version"}
+
+
+def _history_lines(fakes, name="unit-a"):
+    p = fakes / "locks" / f"{name}.history.jsonl"
+    return [json.loads(l) for l in p.read_text().splitlines()] if p.is_file() else None
+
+
+def test_check_records_history_unless_told_not_to(client, fakes):
+    write_lock(fakes, "unit-a", kp=50.0)
+    ok = client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a"}).json()
+    assert "history_error" not in ok
+    (rec,) = _history_lines(fakes)
+    assert set(rec) == ENTRY_KEYS
+    assert rec["lock"] == "unit-a" and rec["dataset"] == FAKE_DS and rec["verdict"] == "ok"
+    assert rec["score"] == pytest.approx(ok["score"]) and rec["limit"] == pytest.approx(1.8)
+    assert rec["episodes"] == [0, 1, 2, 3, 4, 5] and rec["worst_joint"] == ok["worst_joint"]
+    assert rec["per_joint"] == {j: pytest.approx(v["score"]) for j, v in ok["per_joint"].items()}
+    assert rec["at"].endswith("Z")
+
+    client.post("/api/check", json={"dataset": FAKE_DS2, "lock": "unit-a", "record": False})
+    assert len(_history_lines(fakes)) == 1
+
+    # insufficient data is recorded too, with a null score
+    out = client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a", "last": 2}).json()
+    assert out["verdict"] == "insufficient_data"
+    recs = _history_lines(fakes)
+    assert [r["verdict"] for r in recs] == ["ok", "insufficient_data"]
+    assert recs[1]["score"] is None and recs[1]["per_joint"] == {} and recs[1]["n_episodes"] == 2
+
+
+def test_history_get_entries_oldest_first_with_trend(client, fakes):
+    write_lock(fakes, "unit-a", kp=50.0)
+    client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a"})
+    client.post("/api/check", json={"dataset": FAKE_DS2, "lock": "unit-a"})
+    r = client.get("/api/history/unit-a")
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert set(d) == {"lock", "entries", "trend"} and d["lock"] == "unit-a"
+    assert [e["verdict"] for e in d["entries"]] == ["ok", "drifted"]
+    assert [e["dataset"] for e in d["entries"]] == [FAKE_DS, FAKE_DS2]
+    assert d["entries"][0]["at"] <= d["entries"][1]["at"]
+    t = d["trend"]
+    assert set(t) == TREND_KEYS
+    assert t["n"] == 2 and t["n_drifted"] == 1 and t["latest_verdict"] == "drifted"
+    assert t["first"] == d["entries"][0]["at"] and t["last"] == d["entries"][1]["at"]
+    json.dumps(d)
+
+
+def test_history_get_missing_lock_and_empty_history(client, fakes):
+    assert client.get("/api/history/ghost").status_code == 404
+    assert client.get("/api/history/..").status_code in (400, 404)
+    assert client.get("/api/history/a%2Fb").status_code in (400, 404)
+    write_lock(fakes, "unit-a", kp=50.0)
+    d = client.get("/api/history/unit-a").json()
+    assert d == {
+        "lock": "unit-a",
+        "entries": [],
+        "trend": {"n": 0, "first": None, "last": None, "slope_deg_per_day": None, "r2": None,
+                  "latest_verdict": None, "n_drifted": 0},
+    }
+
+
+def test_history_list_covers_every_lock(client, fakes):
+    assert client.get("/api/history").json() == {"locks": []}
+    write_lock(fakes, "unit-a", kp=50.0)
+    write_lock(fakes, "unit-b", kp=50.0)
+    client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a"})
+    d = client.get("/api/history").json()
+    assert [x["lock"] for x in d["locks"]] == ["unit-a", "unit-b"]
+    a, b = d["locks"]
+    assert set(a) == {"lock", "trend", "latest"} and set(a["trend"]) == TREND_KEYS
+    assert a["trend"]["n"] == 1 and a["latest"]["verdict"] == "ok" and set(a["latest"]) == ENTRY_KEYS
+    assert b["trend"]["n"] == 0 and b["latest"] is None
+
+
+def test_history_get_skips_a_corrupt_line(client, fakes):
+    write_lock(fakes, "unit-a", kp=50.0)
+    client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a"})
+    p = fakes / "locks" / "unit-a.history.jsonl"
+    p.write_text(p.read_text() + "garbage\n")
+    with pytest.warns(UserWarning, match="corrupt history line"):
+        d = client.get("/api/history/unit-a").json()
+    assert d["trend"]["n"] == 1 and len(d["entries"]) == 1

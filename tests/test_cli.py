@@ -12,6 +12,14 @@ from antares.data import Dataset, Episode
 JOINTS = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper")
 
 
+@pytest.fixture(autouse=True)
+def _locks_in_tmp(monkeypatch, tmp_path):
+    """`antares check` records into the lock dir; no test may write the repo's locks/."""
+    from antares import server
+
+    monkeypatch.setattr(server, "LOCK_DIR", tmp_path / "locks")
+
+
 def _dataset(repo_id="fake/robot", n=3, T=10):
     eps = []
     for i in range(n):
@@ -223,7 +231,8 @@ def test_calibrate_cli_per_joint_flag(monkeypatch, capsys, tmp_path, per_joint):
     assert calls[0]["per_joint"] is per_joint
     assert calls[0]["per_joint_max_evaluations"] == (7 if per_joint else 600)
     assert calls[0]["per_joint_sigma0"] == (0.1 if per_joint else None)
-    assert "-- shared stage --" in out
+    assert calls[0]["n_seeds"] == 1
+    assert "-- shared stage --" in out and "seeds:" not in out
     assert "shared: 5 evaluations" in out
     assert "saved lock x" in out
     if per_joint:
@@ -233,6 +242,42 @@ def test_calibrate_cli_per_joint_flag(monkeypatch, capsys, tmp_path, per_joint):
     else:
         assert "per-joint evaluations" not in out and "-- per_joint stage --" not in out
         assert "params: kp=100" in out
+
+
+def test_calibrate_cli_seeds_flag(monkeypatch, capsys, tmp_path):
+    from antares import server
+
+    calls = []
+    scalar = {"kp": 100.0, "kv": 1.0, "damping": 0.1, "armature": 0.01, "frictionloss": 0.01,
+              "latency_frames": 2, "forcerange": 2.94}
+    stages = [{"name": "shared", "n_evaluations": 5, "train_score": 1.2, "params": scalar, "seed": s}
+              for s in (0, 100, 200)]
+    seeds = {"n": 3, "seeds": [0, 100, 200], "chosen": 1, "eval_scores": [1.3, 1.1, None],
+             "train_scores": [1.2, 1.0, 1.4], "params": [scalar] * 3,
+             "spread": {"kp": {"min": 100.0, "max": 2500.0, "ratio": 25.0},
+                        "latency_frames": {"min": 2.0, "max": 3.0, "range": 1.0}},
+             "pinned": ["latency_frames"]}
+
+    def fake_run(ds, **kw):
+        calls.append(kw)
+        for i, seed in enumerate((0, 0, 1, 2)):
+            kw["on_progress"](type("Ev", (), {"evaluation": i, "generation": 1, "candidate_score": 2.0,
+                                                "best_score": 2.0, "elapsed_s": 0.1, "stage": "shared",
+                                                "seed": seed})())
+        return _Result({**_result_dict(scalar, stages), "seeds": seeds}), {"name": "x"}, tmp_path / "x.lock.json"
+
+    monkeypatch.setattr(server, "_DATASETS", {"fake/robot": _dataset()})
+    monkeypatch.setattr(server, "run_calibration", fake_run)
+    assert cli.main(["calibrate", "fake/robot", "--seeds", "3"]) == 0
+    out = capsys.readouterr().out
+    assert calls[0]["n_seeds"] == 3
+    assert "best of 3 seeds x up to 150 shared evaluations" in out
+    assert "-- shared stage, seed 1/3 --" in out and "-- shared stage, seed 3/3 --" in out
+    assert "shared (seed 100): 5 evaluations" in out
+    assert "seeds: kept seed 100 (2 of 3); held-out 1.300 / 1.100 / - deg" in out
+    assert "pinned (agree across seeds): latency_frames" in out
+    assert "kp x25" in out and "latency_frames +-1 frames" in out
+    assert "not a measurement" in out
 
 
 def _exact_simulate(params, ep):
@@ -281,7 +326,9 @@ def test_check_pass_exits_zero_and_prints_table(monkeypatch, capsys):
     assert "shoulder_pan" in out and "overall" in out and "1.200" in out
     assert "PASS" in out and "FAIL" not in out
     assert "(not scored)" in out  # the gripper row
-    assert out.rstrip().splitlines()[-1].startswith("OK:")
+    lines = out.rstrip().splitlines()
+    assert lines[-2].startswith("OK:")
+    assert lines[-1].startswith("history: 1 check since ")
     (ds, lock, kw), = calls
     assert ds.repo_id == "fake/robot" and lock == "unit-a"
     assert kw == {"threshold_deg": 2.0, "ratio": 1.5, "last": 8, "min_episodes": 5}
@@ -292,7 +339,7 @@ def test_check_drift_exits_one(monkeypatch, capsys):
     assert cli.main(["check", "fake/robot", "--lock", "unit-a"]) == 1
     out = capsys.readouterr().out
     assert "FAIL" in out and "<- worst" in out
-    assert out.rstrip().splitlines()[-1].startswith("DRIFTED:")
+    assert out.rstrip().splitlines()[-2].startswith("DRIFTED:")
 
 
 def test_check_insufficient_data_exits_two(monkeypatch, capsys):
@@ -305,10 +352,149 @@ def test_check_insufficient_data_exits_two(monkeypatch, capsys):
 def test_check_json_output(monkeypatch, capsys):
     _patch_check(monkeypatch, _check_result(1.2))
     assert cli.main(["check", "fake/robot", "--lock", "unit-a", "--json"]) == 0
-    out = json.loads(capsys.readouterr().out)
+    captured = capsys.readouterr()
+    out = json.loads(captured.out)  # the history line goes to stderr so stdout stays JSON
     assert out["verdict"] == "ok" and out["passed"] is True
     assert out["score"] == pytest.approx(1.2) and out["limit"] == pytest.approx(1.5)
     assert set(out["per_joint"]) == set(JOINTS)
+    assert captured.err.rstrip().splitlines()[-1].startswith("history: 1 check since ")
+
+
+def _history_lines(path):
+    return [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
+
+
+def test_check_records_one_history_line_per_run(monkeypatch, tmp_path, capsys):
+    from antares import server
+
+    hist = tmp_path / "locks" / "unit-a.history.jsonl"
+    _patch_check(monkeypatch, _check_result(1.2))
+    assert cli.main(["check", "fake/robot", "--lock", "unit-a"]) == 0
+    assert server.LOCK_DIR == tmp_path / "locks" and hist.is_file()
+    (rec,) = _history_lines(hist)
+    assert rec["lock"] == "unit-a" and rec["dataset"] == "fake/robot"
+    assert rec["verdict"] == "ok" and rec["passed"] is True
+    assert rec["score"] == pytest.approx(1.2) and rec["limit"] == pytest.approx(1.5)
+    assert rec["n_episodes"] == 6 and rec["episodes"] == [0, 1, 2, 3, 4, 5]
+    assert set(rec["per_joint"]) == set(JOINTS) and rec["worst_joint"] in JOINTS
+    assert rec["at"].endswith("Z") and rec["antares_version"]
+    capsys.readouterr()
+
+    _patch_check(monkeypatch, _check_result(3.0))
+    assert cli.main(["check", "fake/robot", "--lock", "unit-a"]) == 1
+    recs = _history_lines(hist)
+    assert [r["verdict"] for r in recs] == ["ok", "drifted"]
+    last = capsys.readouterr().out.rstrip().splitlines()[-1]
+    assert last.startswith("history: 2 checks since ") and ", last drifted " in last
+
+
+def test_check_no_record_writes_nothing(monkeypatch, tmp_path, capsys):
+    _patch_check(monkeypatch, _check_result(1.2))
+    assert cli.main(["check", "fake/robot", "--lock", "unit-a", "--no-record"]) == 0
+    assert not (tmp_path / "locks").exists()
+    assert "history:" not in capsys.readouterr().out
+
+
+def test_check_history_dir_override_and_lock_file_path(monkeypatch, tmp_path, capsys):
+    _patch_check(monkeypatch, _check_result(1.2))
+    assert cli.main(["check", "fake/robot", "--lock", "unit-a", "--history-dir", str(tmp_path / "h")]) == 0
+    assert (tmp_path / "h" / "unit-a.history.jsonl").is_file()
+    assert not (tmp_path / "locks").exists()
+
+    # a .lock.json path keeps its history next to it, under the file's name
+    lock_file = tmp_path / "arms" / "my_arm.lock.json"
+    lock_file.parent.mkdir()
+    lock_file.write_text(json.dumps({"name": "unit-a", "params": {}, "result": {}}))
+    assert cli.main(["check", "fake/robot", "--lock", str(lock_file)]) == 0
+    assert (tmp_path / "arms" / "my_arm.history.jsonl").is_file()
+
+
+def test_check_records_insufficient_data_with_null_score(monkeypatch, tmp_path, capsys):
+    _patch_check(monkeypatch, _check_result(0.5, n=2))
+    assert cli.main(["check", "fake/robot", "--lock", "unit-a"]) == 2
+    (rec,) = _history_lines(tmp_path / "locks" / "unit-a.history.jsonl")
+    assert rec["verdict"] == "insufficient_data" and rec["passed"] is False
+    assert rec["score"] is None and rec["per_joint"] == {} and rec["n_episodes"] == 2
+
+
+def test_check_record_failure_keeps_the_verdict(monkeypatch, tmp_path, capsys):
+    from antares import history
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(history, "append", boom)
+    _patch_check(monkeypatch, _check_result(1.2))
+    assert cli.main(["check", "fake/robot", "--lock", "unit-a"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out.rstrip().splitlines()[-1].startswith("OK:")
+    assert "could not record the check" in captured.err and "disk full" in captured.err
+
+
+def _seed_history(tmp_path, name="unit-a", lock_file=True):
+    from antares import history
+
+    d = tmp_path / "locks"
+    d.mkdir(exist_ok=True)
+    if lock_file:
+        (d / f"{name}.lock.json").write_text("{}")
+    history.append(_check_result(1.0), d, at="2026-09-30T08:00:00Z", name=name)
+    history.append(_check_result(3.0), d, at="2026-10-10T08:00:00Z", name=name)
+    history.append(_check_result(1.4), d, at="2026-10-20T08:00:00Z", name=name)
+    return d
+
+
+def test_history_prints_table_and_trend(tmp_path, capsys):
+    _seed_history(tmp_path)
+    assert cli.main(["history", "unit-a"]) == 0
+    out = capsys.readouterr().out
+    lines = out.rstrip().splitlines()
+    assert lines[0].split()[:2] == ["date", "(utc)"] and "worst joint" in lines[0]
+    body = lines[2:-1]
+    assert len(body) == 3
+    assert body[0].startswith("2026-09-30 08:00") and "fake/robot" in body[0] and " ok " in body[0]
+    assert "drifted" in body[1] and "3.000" in body[1] and "1.500" in body[1]
+    assert lines[-1].startswith("history: 3 checks since 2026-09-30, +0.020 deg/day (r")
+    assert lines[-1].endswith(", last drifted 2026-10-10")
+
+
+def test_history_last_and_json(tmp_path, capsys):
+    _seed_history(tmp_path)
+    assert cli.main(["history", "unit-a", "--last", "1"]) == 0
+    out = capsys.readouterr().out
+    assert out.count("fake/robot") == 1 and "2026-10-20" in out
+    assert "history: 3 checks" in out  # the trend is over everything
+
+    assert cli.main(["history", "unit-a", "--json"]) == 0
+    d = json.loads(capsys.readouterr().out)
+    assert set(d) == {"lock", "entries", "trend"} and d["lock"] == "unit-a"
+    assert [e["verdict"] for e in d["entries"]] == ["ok", "drifted", "ok"]
+    assert set(d["trend"]) == {"n", "first", "last", "slope_deg_per_day", "r2", "latest_verdict", "n_drifted"}
+    assert d["trend"]["n"] == 3 and d["trend"]["n_drifted"] == 1 and d["trend"]["latest_verdict"] == "ok"
+    assert d["trend"]["slope_deg_per_day"] == pytest.approx(0.02)
+
+    assert cli.main(["history", "unit-a", "--last", "0"]) == 2
+
+
+def test_history_missing_lock_and_empty_history(tmp_path, capsys):
+    assert cli.main(["history", "ghost"]) == 2
+    assert "no lock named 'ghost'" in capsys.readouterr().err
+    (tmp_path / "locks").mkdir()
+    (tmp_path / "locks" / "fresh.lock.json").write_text("{}")
+    assert cli.main(["history", "fresh"]) == 0
+    assert "no checks recorded for lock fresh" in capsys.readouterr().out
+    # the lock is looked up in the lock dir even when the history lives elsewhere
+    assert cli.main(["history", "fresh", "--history-dir", str(tmp_path / "elsewhere")]) == 0
+    assert str(tmp_path / "elsewhere" / "fresh.history.jsonl") in capsys.readouterr().out
+    assert cli.main(["history", "fresh", "--json"]) == 0
+    d = json.loads(capsys.readouterr().out)
+    assert d["entries"] == [] and d["trend"]["n"] == 0 and d["trend"]["slope_deg_per_day"] is None
+
+
+def test_history_in_help(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["--help"])
+    assert "history" in capsys.readouterr().out
 
 
 def _diagnosis():
@@ -343,7 +529,7 @@ def test_check_explain_names_the_cause_on_drift(monkeypatch, capsys):
     assert code == 1  # explaining never changes the verdict
     out = capsys.readouterr().out
     assert "what changed" in out and "latency_frames  +1 frame" in out and "<- cause" in out
-    assert out.rstrip().splitlines()[-1].endswith("likely cause: latency_frames +1 frame (alone recovers 2.60 deg)")
+    assert out.rstrip().splitlines()[-2].endswith("likely cause: latency_frames +1 frame (alone recovers 2.60 deg)")
     assert calls == [("unit-a", {"last": 6, "max_evaluations": 50})]
 
 
@@ -848,6 +1034,8 @@ def test_fleet_list(tmp_path, capsys):
     assert "alice/so101_a" in out and "4.000" in out and "1.500" in out and "62%" in out
     assert "3 (100 ms)" in out and "1200" in out
     assert "fitted parameters" in out and "kp" in out
+    # single-seed locks: only latency is pinned across the fleet
+    assert "pinned across the fleet's locks: latency_frames (0/2 locks carry seed spread)" in out
     assert "outliers" in out and "+2.7" in out
     assert "cross matrix" in out and "1.67x" in out and "own lock best for 2/2" in out
     assert "carol/broken" in out
@@ -932,6 +1120,161 @@ def test_check_explain_evaluations_has_a_floor(monkeypatch, capsys):
     assert cli.main(["check", "fake/robot", "--lock", "unit-a", "--explain", "--explain-evaluations", "0"]) == 2
     assert "--explain-evaluations must be >= 10" in capsys.readouterr().err
     assert calls == []
+
+
+# -- alerts (--notify) ----------------------------------------------------------
+
+
+class _WebhookServer:
+    """A localhost webhook that records POST bodies and answers ``status``."""
+
+    def __init__(self, status=200):
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        received = self.received = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                received.append({"content_type": self.headers.get("Content-Type"), "body": json.loads(body)})
+                self.send_response(status)
+                self.end_headers()
+                self.wfile.write(b"ok" if status < 400 else b"nope")
+
+            def log_message(self, *a):
+                pass
+
+        self._srv = HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self._srv.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self._srv.server_port}/hook"
+
+    def close(self):
+        self._srv.shutdown()
+        self._srv.server_close()
+
+
+@pytest.fixture
+def webhook():
+    srv = _WebhookServer()
+    try:
+        yield srv
+    finally:
+        srv.close()
+
+
+def _closed_port_url():
+    import socket
+
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return f"http://127.0.0.1:{port}/hook"
+
+
+def test_check_notify_failed_post_keeps_the_exit_code(monkeypatch, capsys):
+    monkeypatch.delenv("ANTARES_WEBHOOK_URL", raising=False)
+    dead = _closed_port_url()
+    _patch_check(monkeypatch, _check_result(3.0))
+    assert cli.main(["check", "fake/robot", "--lock", "unit-a", "--notify", dead]) == 1
+    out, err = capsys.readouterr()
+    assert out.rstrip().splitlines()[-2].startswith("DRIFTED:")
+    assert "warning: alert not sent: could not reach webhook" in err
+
+    _patch_check(monkeypatch, _check_result(1.2))
+    assert cli.main(["check", "fake/robot", "--lock", "unit-a", "--notify", dead, "--notify-when", "always"]) == 0
+    assert "warning: alert not sent" in capsys.readouterr().err
+
+    def boom(url, payload, timeout=10.0):
+        raise RuntimeError("kaboom")
+
+    import antares.notify
+    monkeypatch.setattr(antares.notify, "send", boom)
+    _patch_check(monkeypatch, _check_result(0.5, n=2))
+    assert cli.main(["check", "fake/robot", "--lock", "unit-a", "--notify", "https://example.com/x",
+                     "--notify-when", "failure", "--json"]) == 2
+    out, err = capsys.readouterr()
+    assert json.loads(out)["verdict"] == "insufficient_data"
+    assert "warning: alert not sent: kaboom" in err
+
+
+def test_check_notify_posts_only_the_verdicts_asked_for(monkeypatch, capsys, webhook):
+    monkeypatch.delenv("ANTARES_WEBHOOK_URL", raising=False)
+    _patch_check(monkeypatch, _check_result(1.2))
+    assert cli.main(["check", "fake/robot", "--lock", "unit-a", "--notify", webhook.url]) == 0
+    assert webhook.received == []  # ok is quiet by default
+    assert "alert" not in capsys.readouterr().err
+
+    _patch_check(monkeypatch, _check_result(3.0))
+    assert cli.main(["check", "fake/robot", "--lock", "unit-a", "--notify", webhook.url]) == 1
+    (req,) = webhook.received
+    assert req["content_type"] == "application/json"
+    body = req["body"]
+    assert body["event"] == "antares.check" and body["verdict"] == "drifted"
+    assert body["text"].startswith("DRIFTED unit-a on fake/robot: 3.00 deg RMSE (limit 1.50)")
+    assert body["result"]["lock"] == "unit-a" and body["result"]["n_episodes"] == 6
+    assert "alert sent (json webhook)" in capsys.readouterr().err
+
+    # the URL can come from the environment; slack format can be forced
+    monkeypatch.setenv("ANTARES_WEBHOOK_URL", webhook.url)
+    _patch_check(monkeypatch, _check_result(1.2))
+    assert cli.main(["check", "fake/robot", "--lock", "unit-a", "--notify-when", "always",
+                     "--notify-format", "slack"]) == 0
+    assert len(webhook.received) == 2
+    slack = webhook.received[1]["body"]
+    assert slack["blocks"][0]["type"] == "header" and slack["text"].startswith("OK unit-a")
+    assert "alert sent (slack webhook)" in capsys.readouterr().err
+
+
+def test_check_notify_dry_run_keeps_json_stdout_pure(monkeypatch, capsys, webhook):
+    _patch_check(monkeypatch, _check_result(3.0))
+    assert cli.main(["check", "fake/robot", "--lock", "unit-a", "--notify", webhook.url,
+                     "--notify-dry-run", "--json"]) == 1
+    out, err = capsys.readouterr()
+    assert json.loads(out)["verdict"] == "drifted"
+    assert webhook.received == []
+    assert '"event": "antares.check"' in err and "alert rendered" in err
+
+    assert cli.main(["check", "fake/robot", "--lock", "unit-a", "--notify", webhook.url, "--notify-dry-run"]) == 1
+    out, err = capsys.readouterr()
+    assert '"event": "antares.check"' in out and out.rstrip().splitlines()[0].startswith("fake/robot vs lock")
+
+
+def test_check_notify_reports_a_check_that_could_not_run(monkeypatch, capsys, webhook):
+    from antares import server
+
+    monkeypatch.setattr(server, "_DATASETS", {"fake/robot": _dataset()})
+    monkeypatch.setattr(server, "LOCK_DIR", __import__("pathlib").Path("/nonexistent/locks"))
+    assert cli.main(["check", "fake/robot", "--lock", "ghost", "--notify", webhook.url]) == 2
+    assert webhook.received == []  # drifted-only stays quiet with no verdict
+    assert cli.main(["check", "fake/robot", "--lock", "ghost", "--notify", webhook.url,
+                     "--notify-when", "failure"]) == 2
+    (req,) = webhook.received
+    assert req["body"]["verdict"] == "error" and req["body"]["result"] is None
+    assert req["body"]["text"].startswith("ERROR ghost on fake/robot:")
+    assert "error:" in capsys.readouterr().err
+
+
+def test_notify_test_sends_a_synthetic_ok(monkeypatch, capsys, webhook):
+    monkeypatch.delenv("ANTARES_WEBHOOK_URL", raising=False)
+    assert cli.main(["notify-test", "--url", webhook.url]) == 0
+    (req,) = webhook.received
+    assert req["body"]["verdict"] == "ok" and req["body"]["text"].startswith("Antares webhook test\nOK example on")
+    out = capsys.readouterr().out
+    assert out.startswith("sent a synthetic OK alert as json to 127.0.0.1")
+    assert "/hook" not in out  # the URL is a secret
+
+    assert cli.main(["notify-test", "--url", webhook.url, "--format", "slack", "--title", "Arm A"]) == 0
+    assert webhook.received[1]["body"]["blocks"][0]["text"]["text"] == "Arm A"
+
+    assert cli.main(["notify-test", "--url", webhook.url, "--dry-run"]) == 0
+    assert len(webhook.received) == 2 and '"event": "antares.check"' in capsys.readouterr().out
+
+    assert cli.main(["notify-test"]) == 2
+    assert "pass --url or set ANTARES_WEBHOOK_URL" in capsys.readouterr().err
+    assert cli.main(["notify-test", "--url", _closed_port_url()]) == 1
+    assert "error: alert not sent: could not reach webhook" in capsys.readouterr().err
 
 
 @pytest.mark.slow

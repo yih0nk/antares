@@ -452,6 +452,41 @@ def test_fleet_stats_and_outliers():
     assert fleet.fleet_stats([]) == {}
 
 
+def test_pinned_across_and_pinned_only_stats():
+    from dataclasses import replace
+
+    robots = [entry(f"u{i}/arm", kp=1000.0 * (1 + 0.05 * i), latency_frames=2) for i in range(8)]
+    robots.append(entry("odd/arm", kp=20000.0, latency_frames=5, fps=50.0))
+    # no seed spread anywhere: only latency is pinned
+    assert all(r.pinned is None for r in robots)
+    assert fleet.pinned_across(r.pinned for r in robots) == ["latency_frames"]
+    assert fleet.pinned_across([]) == ["latency_frames"]
+    assert fleet.pinned_across([["kp", "kv", "latency_frames"], None]) == ["latency_frames"]
+    assert fleet.pinned_across([["kp", "latency_frames"], ["latency_frames", "kp", "kv"]]) == ["kp", "latency_frames"]
+    assert fleet.pinned_across([["kp"], ["kv"]]) == []
+
+    # the default is unchanged, so the committed fleet.json stays reproducible
+    assert set(fleet.fleet_stats(robots)) == set(fleet.STAT_PARAMS)
+    stats = fleet.fleet_stats(robots, pinned_only=True)
+    assert set(stats) == {"latency_frames", "latency_ms", *fleet.SCORE_FIELDS}
+    outliers = fleet.find_outliers(robots, fleet.fleet_stats(robots), pinned_only=True)
+    assert {(o["dataset"], o["param"]) for o in outliers} == {("odd/arm", "latency_frames")}
+
+    # a seeded fleet pins what every lock pins
+    seeded = [replace(r, pinned=["kp", "latency_frames"]) for r in robots]
+    assert set(fleet.fleet_stats(seeded, pinned_only=True)) == {"kp", "latency_frames", "latency_ms", *fleet.SCORE_FIELDS}
+    assert {o["param"] for o in fleet.find_outliers(seeded, fleet.fleet_stats(seeded), pinned_only=True)} == {"kp", "latency_frames"}
+    mixed = seeded[:-1] + [replace(seeded[-1], pinned=["kv"])]
+    assert set(fleet.fleet_stats(mixed, pinned_only=True)) == set(fleet.SCORE_FIELDS)
+
+    # the entry round-trips its pinned list and omits it when unknown
+    d = seeded[0].to_dict()
+    assert d["pinned"] == ["kp", "latency_frames"]
+    assert RobotEntry.from_dict(d).pinned == ["kp", "latency_frames"]
+    assert "pinned" not in robots[0].to_dict()
+    assert RobotEntry.from_dict(robots[0].to_dict()).pinned is None
+
+
 def test_score_outliers_are_flagged_and_kept_out_of_the_cross_matrix(tmp_path):
     robots = [entry(f"u{i}/arm", baseline=3.0 + 0.3 * i, calibrated=1.0 + 0.15 * i) for i in range(8)]
     weird = RobotEntry("odd/arm", "so101", 50, 30.0, 20, 10, 60.0, 40.0, 0.33, robots[0].params, "odd__arm")

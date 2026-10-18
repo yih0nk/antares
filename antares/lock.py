@@ -14,7 +14,7 @@ import json
 import re
 import warnings
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import Any
 from datetime import datetime, timezone
 from pathlib import Path
@@ -71,6 +71,9 @@ class RobotLock:
     #: Which simulator model (``antares.robots.REGISTRY`` key) the fit ran on.
     #: Locks written before the registry existed were all SO-101.
     robot: str = DEFAULT_ROBOT
+    # Fitted fixed cameras by short name (antares.camera.CameraFit.to_dict());
+    # locks saved before camera fits existed load with none.
+    cameras: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def create(
@@ -115,7 +118,12 @@ class RobotLock:
             d["command_map"] = self.command_map
         if self.dynamics_only is not None:
             d["dynamics_only"] = self.dynamics_only
+        if self.cameras:
+            d["cameras"] = dict(self.cameras)
         return d
+
+    def replace(self, **changes: Any) -> "RobotLock":
+        return replace(self, **changes)
 
     @classmethod
     def from_dict(cls, d: dict) -> "RobotLock":
@@ -136,6 +144,7 @@ class RobotLock:
             command_map=d.get("command_map"),
             dynamics_only=d.get("dynamics_only"),
             robot=str(d.get("robot") or DEFAULT_ROBOT),
+            cameras=dict(d.get("cameras") or {}),
         )
 
     def default_path(self, lock_dir: Path = LOCK_DIR) -> Path:
@@ -150,6 +159,49 @@ class RobotLock:
     @classmethod
     def load(cls, path: Path | str) -> "RobotLock":
         return cls.from_dict(json.loads(Path(path).read_text()))
+
+
+#: Parameters taken as physical when a lock carries no seed spread. One frame
+#: of latency either way costs 0.3-0.9 deg on the demo arms with everything
+#: else held fixed, so it is the one parameter a single fit does pin down;
+#: kp/kv/damping/armature/frictionloss spread 2-125x across seeds at equal error.
+DEFAULT_PINNED: tuple[str, ...] = ("latency_frames",)
+
+
+def seed_info(lock: Any) -> dict | None:
+    """The ``result.seeds`` block of a lock (:class:`RobotLock`, a lock dict,
+    or a :class:`~antares.calibrate.CalibrationResult`), or None when the
+    lock was fitted with a single seed or before seeds were recorded."""
+    if isinstance(lock, dict):
+        result = lock.get("result")
+        seeds = (result if isinstance(result, dict) else lock).get("seeds")
+    else:
+        result = getattr(lock, "result", lock)
+        seeds = getattr(result, "seeds", None)
+    return seeds if isinstance(seeds, dict) else None
+
+
+def pinned_params(lock: Any) -> list[str]:
+    """Parameters whose fitted value can be read as a measurement of the arm.
+
+    With seed spread recorded (``calibrate --seeds 3``) these are the
+    parameters that agreed across the seeds (``seeds.pinned``); otherwise
+    the conservative :data:`DEFAULT_PINNED`. Drift, diagnose and fleet read
+    only these as physical; the others trade off against each other at the
+    same tracking error.
+    """
+    seeds = seed_info(lock)
+    pinned = seeds.get("pinned") if seeds is not None else None
+    return [str(p) for p in pinned] if pinned is not None else list(DEFAULT_PINNED)
+
+
+def param_spread(lock: Any) -> dict | None:
+    """``seeds.spread`` of a lock: per shared parameter ``{"min", "max",
+    "ratio"}`` (log-scaled) or ``{"min", "max", "range"}`` (latency) across
+    the seeds, or None when the lock carries no seed spread."""
+    seeds = seed_info(lock)
+    spread = seeds.get("spread") if seeds is not None else None
+    return dict(spread) if isinstance(spread, dict) else None
 
 
 def list_locks(lock_dir: Path = LOCK_DIR) -> list[RobotLock]:
@@ -167,4 +219,14 @@ def list_locks(lock_dir: Path = LOCK_DIR) -> list[RobotLock]:
     return sorted(locks, key=lambda lk: lk.name)
 
 
-__all__ = ["LOCK_DIR", "RobotLock", "dataset_digest", "list_locks", "slug"]
+__all__ = [
+    "DEFAULT_PINNED",
+    "LOCK_DIR",
+    "RobotLock",
+    "dataset_digest",
+    "list_locks",
+    "param_spread",
+    "pinned_params",
+    "seed_info",
+    "slug",
+]
