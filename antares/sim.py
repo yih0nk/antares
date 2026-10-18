@@ -368,10 +368,11 @@ class CommandMap:
         return {"gain": self.gain.tolist(), "bias": self.bias.tolist()}
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any] | None) -> CommandMap:
-        """``None`` (e.g. a lock saved before command maps existed) is identity."""
+    def from_dict(cls, d: dict[str, Any] | None, n: int = len(JOINTS)) -> CommandMap:
+        """``None`` (e.g. a lock saved before command maps existed) is the
+        identity over ``n`` columns."""
         if d is None:
-            return cls.identity()
+            return cls.identity(n)
         return cls(gain=np.asarray(d["gain"], dtype=np.float64), bias=np.asarray(d["bias"], dtype=np.float64))
 
 

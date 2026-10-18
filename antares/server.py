@@ -593,7 +593,8 @@ def _command_map(arm, cmap):
     try:
         yield
     finally:
-        arm.command_map = CommandMap.identity()
+        n = getattr(arm, "n_joints", None)
+        arm.command_map = CommandMap.identity() if n in (None, 6) else CommandMap.identity(n)
 
 
 def lock_simulate(lock: dict):
