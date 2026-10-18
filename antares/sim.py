@@ -13,7 +13,7 @@ at the dataset's frame rate.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Any
@@ -50,12 +50,17 @@ INT_FIELDS = frozenset({"latency_frames"})
 
 
 def _coerce(name: str, value: Any) -> ParamValue:
-    """Normalize a field value to ``float``/``int`` or a 6-tuple of them."""
+    """Normalize a field value to ``float``/``int`` or a tuple of them (one per joint).
+
+    The tuple's length is checked against the robot when the parameters are
+    applied (:meth:`Arm.apply`), not here: a ``SimParams`` does not know
+    which arm it is for.
+    """
     as_int = name in INT_FIELDS
     if isinstance(value, (list, tuple, np.ndarray)) and np.ndim(value) > 0:
         arr = np.asarray(value, dtype=np.float64).reshape(-1)
-        if arr.shape[0] != N_JOINTS:
-            raise ValueError(f"{name}: per-joint value needs {N_JOINTS} entries, got {arr.shape[0]}")
+        if arr.shape[0] < 1:
+            raise ValueError(f"{name}: per-joint value needs at least one entry")
         if as_int:
             return tuple(int(round(float(v))) for v in arr)
         return tuple(float(v) for v in arr)
@@ -64,14 +69,28 @@ def _coerce(name: str, value: Any) -> ParamValue:
     return int(round(float(value))) if as_int else float(value)
 
 
+def _extra_items(extra: Any) -> tuple[tuple[str, ParamValue], ...]:
+    items = extra.items() if isinstance(extra, Mapping) else extra
+    out = []
+    for k, v in items:
+        out.append((str(k), _coerce(str(k), v)))
+    return tuple(sorted(out))
+
+
 @dataclass(frozen=True)
 class SimParams:
-    """Calibratable simulator parameters. Defaults are the MJCF values.
+    """Calibratable simulator parameters. Defaults are the SO-101 MJCF values.
 
-    Every field is either a scalar shared by all six joints or a tuple of six
-    per-joint values (one per entry of :data:`JOINTS`). Scalars are how the
-    original locks were written and stay the default; :meth:`per_joint`
-    broadcasts either form to a ``(6,)`` array when writing into the model.
+    Every field is either a scalar shared by all joints or a tuple of
+    per-joint values (one per joint of the robot, in its canonical order).
+    Scalars are how the original locks were written and stay the default;
+    :meth:`per_joint` broadcasts either form to an ``(n,)`` array when
+    writing into the model.
+
+    ``extra`` holds values of factors added to :mod:`antares.factors` (a
+    config or plugin factor such as a gravity scale); they read like fields
+    (``params.gravity_scale``), serialize next to them and are applied by
+    the factor's own hook. Built-in parameters never go there.
     """
 
     kp: ParamValue = 998.22
@@ -81,12 +100,30 @@ class SimParams:
     frictionloss: ParamValue = 0.052
     latency_frames: ParamValue = 0  # command delay in dataset frames (>= 0)
     forcerange: ParamValue = 2.94  # actuator force limit, symmetric (N*m)
+    extra: tuple[tuple[str, ParamValue], ...] = ()
 
     def __post_init__(self) -> None:
-        for f in fields(self):
-            object.__setattr__(self, f.name, _coerce(f.name, getattr(self, f.name)))
+        for n in self.field_names():
+            object.__setattr__(self, n, _coerce(n, getattr(self, n)))
+        object.__setattr__(self, "extra", _extra_items(self.extra))
+        for k, _ in self.extra:
+            if k in self.field_names() or k == "extra":
+                raise ValueError(f"{k!r} is a built-in parameter, not an extra factor")
         if np.any(self.per_joint("latency_frames") < 0):
             raise ValueError("latency_frames must be >= 0")
+
+    def __getattr__(self, name: str) -> Any:
+        # Only reached when normal lookup fails: extra factor values read like fields.
+        if name.startswith("__"):
+            raise AttributeError(name)
+        try:
+            extra = object.__getattribute__(self, "extra")
+        except AttributeError:
+            raise AttributeError(name) from None
+        for k, v in extra:
+            if k == name:
+                return v
+        raise AttributeError(f"SimParams has no parameter {name!r}")
 
     @classmethod
     def default(cls) -> SimParams:
@@ -111,7 +148,16 @@ class SimParams:
 
     @classmethod
     def field_names(cls) -> tuple[str, ...]:
-        return tuple(f.name for f in fields(cls))
+        """The built-in parameters (not ``extra``)."""
+        return tuple(f.name for f in fields(cls) if f.name != "extra")
+
+    def names(self) -> tuple[str, ...]:
+        """Built-in parameters, then this instance's extra factors."""
+        return self.field_names() + tuple(k for k, _ in self.extra)
+
+    @property
+    def extras(self) -> dict[str, ParamValue]:
+        return dict(self.extra)
 
     # -- shape helpers ------------------------------------------------------
 
@@ -121,42 +167,65 @@ class SimParams:
     @property
     def has_per_joint(self) -> bool:
         """True if any field carries per-joint values."""
-        return any(self.is_per_joint(n) for n in self.field_names())
+        return any(self.is_per_joint(n) for n in self.names())
 
-    def per_joint(self, name: str) -> np.ndarray:
-        """Value of ``name`` broadcast to a ``(6,)`` array (int for frame counts)."""
+    def per_joint(self, name: str, n: int | None = None) -> np.ndarray:
+        """Value of ``name`` broadcast to an ``(n,)`` array (int for frame counts).
+
+        ``n`` defaults to the tuple's own length, or :data:`N_JOINTS` for a
+        scalar; a tuple of another length than ``n`` is an error.
+        """
         v = getattr(self, name)
         dtype = np.int64 if name in INT_FIELDS else np.float64
         if isinstance(v, tuple):
+            if n is not None and len(v) != n:
+                raise ValueError(f"{name}: per-joint value has {len(v)} entries, the robot has {n} joints")
             return np.asarray(v, dtype=dtype)
-        return np.full(N_JOINTS, v, dtype=dtype)
+        return np.full(N_JOINTS if n is None else n, v, dtype=dtype)
 
-    def broadcast(self) -> SimParams:
-        """Copy with every field in per-joint (6-tuple) form; replays identically."""
-        return SimParams(**{n: tuple(self.per_joint(n).tolist()) for n in self.field_names()})
+    def broadcast(self, n: int | None = None) -> SimParams:
+        """Copy with every field in per-joint form; replays identically."""
+        core = {k: tuple(self.per_joint(k, n).tolist()) for k in self.field_names()}
+        extra = {k: tuple(self.per_joint(k, n).tolist()) for k, _ in self.extra}
+        return SimParams(**core, extra=extra)
 
     # -- serialization ------------------------------------------------------
 
     def to_dict(self) -> dict[str, Any]:
-        """Scalars stay scalars; per-joint values become 6-element lists."""
+        """Scalars stay scalars; per-joint values become lists. Extras follow
+        the built-ins under their own names."""
         out: dict[str, Any] = {}
-        for n in self.field_names():
-            v = getattr(self, n)
-            out[n] = list(v) if isinstance(v, tuple) else v
+        for k in self.names():
+            v = getattr(self, k)
+            out[k] = list(v) if isinstance(v, tuple) else v
         return out
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> SimParams:
-        """Build from a dict; unknown keys are ignored, missing keys default.
+        """Build from a dict; missing keys default.
 
-        Scalars (possibly as strings) and 6-element sequences are accepted for
+        Scalars (possibly as strings) and per-joint sequences are accepted for
         every field, so old locks (all scalars, no ``forcerange``) still load.
+        A key that names a factor registered in :mod:`antares.factors` becomes
+        an extra; any other unknown key is ignored.
         """
+        from antares import factors
+
         known = set(cls.field_names())
-        return cls(**{k: v for k, v in d.items() if k in known})
+        core = {k: v for k, v in d.items() if k in known}
+        extra = {k: v for k, v in d.items() if k not in known and k in factors.REGISTRY}
+        return cls(**core, extra=extra)
 
     def replace(self, **changes: Any) -> SimParams:
-        return replace(self, **changes)
+        known = set(self.field_names())
+        core = {k: v for k, v in changes.items() if k in known}
+        rest = {k: v for k, v in changes.items() if k not in known}
+        if "extra" in rest:
+            raise ValueError("pass extra factors by name, not as extra=")
+        if rest:
+            merged = {**dict(self.extra), **rest}
+            core["extra"] = merged
+        return replace(self, **core)
 
 
 @dataclass(frozen=True, eq=False)
@@ -351,16 +420,17 @@ class Arm:
         to a model compiled with these values.
         """
         m = self.model
-        kp = params.per_joint("kp")
-        fr = params.per_joint("forcerange")
+        n = m.nu
+        kp = params.per_joint("kp", n)
+        fr = params.per_joint("forcerange", n)
         m.actuator_gainprm[:, 0] = kp
         m.actuator_biasprm[:, 1] = -kp
-        m.actuator_biasprm[:, 2] = -params.per_joint("kv")
+        m.actuator_biasprm[:, 2] = -params.per_joint("kv", n)
         m.actuator_forcerange[:, 0] = -fr
         m.actuator_forcerange[:, 1] = fr
-        m.dof_damping[:] = params.per_joint("damping")
-        m.dof_armature[:] = params.per_joint("armature")
-        m.dof_frictionloss[:] = params.per_joint("frictionloss")
+        m.dof_damping[:] = params.per_joint("damping", n)
+        m.dof_armature[:] = params.per_joint("armature", n)
+        m.dof_frictionloss[:] = params.per_joint("frictionloss", n)
         mujoco.mj_setConst(m, self.data)  # ~20 us; uses self.data as scratch
         self.params = params
 

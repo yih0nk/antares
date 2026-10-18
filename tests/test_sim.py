@@ -101,10 +101,13 @@ def test_simparams_per_joint_round_trip():
 
 
 def test_simparams_per_joint_wrong_length_rejected():
+    # SimParams does not know its robot; the length is checked against the arm.
     with pytest.raises(ValueError):
-        SimParams(kp=(1.0, 2.0))
+        SimParams(kp=(1.0, 2.0)).per_joint("kp", 6)
     with pytest.raises(ValueError):
-        SimParams.from_dict({"damping": [0.1] * 7})
+        Arm().apply(SimParams.from_dict({"damping": [0.1] * 7}))
+    with pytest.raises(ValueError):
+        SimParams(kp=())
 
 
 def test_simparams_per_joint_and_broadcast():
