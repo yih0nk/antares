@@ -180,3 +180,32 @@ units = ["range_m100_100", "range_m100_100", "range_m100_100", "range_m100_100",
         assert arm.n_joints == 6
     finally:
         REGISTRY.pop("my_so101", None)
+
+
+def test_viewer_geometry_and_meshes_for_a_fetched_robot():
+    from fastapi.testclient import TestClient
+
+    from antares import server
+
+    _arm("trossen_ai")
+    client = TestClient(server.app)
+    geo = client.get("/api/model", params={"robot": "trossen_ai"}).json()
+    assert geo["robot"] == "trossen_ai" and geo["geoms"]
+    g = geo["geoms"][0]
+    assert g["mesh"].endswith(".obj") and len(g["scale"]) == 3
+    r = client.get(f"/api/model/mesh/{g['mesh']}", params={"robot": "trossen_ai"})
+    assert r.status_code == 200 and r.content
+    assert client.get("/api/model/mesh/../robots.py", params={"robot": "trossen_ai"}).status_code in (400, 404)
+    # the SO arms keep their flat STL names
+    so = client.get("/api/model").json()
+    assert all("/" not in x["mesh"] and "scale" not in x for x in so["geoms"])
+
+
+def test_factors_endpoint():
+    from fastapi.testclient import TestClient
+
+    from antares import server
+
+    d = TestClient(server.app).get("/api/factors").json()
+    assert {"kp", "latency_frames", "forcerange", "sensor_bias"} <= {f["name"] for f in d["factors"]}
+    assert TestClient(server.app).get("/api/datasets/catalog").json()
