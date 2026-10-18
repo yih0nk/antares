@@ -602,7 +602,8 @@ def calibrate(
     )
     fit.record(start, start_report, start_score, SHARED.name)
 
-    finished = fit.run_stage(SHARED, start, max_evaluations, sigma0, popsize, seed)
+    # No shared budget: skip the stage (a per-joint refit starts in its own space).
+    finished = fit.run_stage(SHARED, start, max_evaluations, sigma0, popsize, seed) if max_evaluations > 0 else True
     if per_joint and finished:
         # Refine from the shared optimum; a fresh seed so the two stages do
         # not share a random stream.

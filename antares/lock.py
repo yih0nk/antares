@@ -14,7 +14,7 @@ import json
 import re
 import warnings
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 from datetime import datetime, timezone
 from pathlib import Path
@@ -66,7 +66,7 @@ class RobotLock:
     created_at: str
     antares_version: str
     command_map: dict[str, Any] | None = None  # CommandMap.to_dict(); None = identity
-    dynamics_only: dict[str, Any] | None = field(default=None)  # CalibrationResult.to_dict()
+    dynamics_only: dict[str, Any] | None = None  # CalibrationResult.to_dict()
 
     @classmethod
     def create(

@@ -1351,6 +1351,12 @@ def test_post_replay_accepts_command_map(client, fakes):
     assert mapped["gap"]["overall_deg"] < plain["gap"]["overall_deg"]
     bad = client.post("/api/replay", json={**body, "command_map": {"gain": [1.0] * 6}})
     assert bad.status_code == 400
+    # the map exactly as a sensor-fitted lock stores it, "mode" and all
+    as_saved = client.post("/api/replay", json={**body, "command_map": {**SHIFT_MAP, "mode": "sim"}})
+    assert as_saved.status_code == 200 and as_saved.json()["command_map"] == SHIFT_MAP
+    # a wrong-length map is a 400, not a 500 from inside the sim
+    short = client.post("/api/replay", json={**body, "command_map": {"gain": [1.0] * 3, "bias": [0.0] * 3}})
+    assert short.status_code == 400 and "command_map" in short.json()["detail"]
 
 
 def test_cross_matrix_uses_command_map(client, fakes):

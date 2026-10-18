@@ -96,14 +96,24 @@ def test_calibrate_with_sensor_beats_dynamics_only():
     assert out.result.eval_score < 0.5 * out.dynamics_only.eval_score
     # baseline of the combined result is still the default sim
     assert out.result.baseline_eval_score == out.dynamics_only.baseline_eval_score
-    # fair baseline: the dynamics-only side gets the same CMA-ES budget
+    # fair baseline: the dynamics-only side gets the same budget, map fits included
+    assert out.n_map_simulations > 0
     assert out.result.n_evaluations == out.dynamics_only.n_evaluations
+    assert sum(s["n_evaluations"] for s in out.result.stages) == out.result.n_evaluations
+    assert sum(s["n_evaluations"] for s in out.dynamics_only.stages) == out.dynamics_only.n_evaluations
+    names = [s["name"] for s in out.result.stages]
+    assert names == ["shared", "command_map", "shared", "command_map"]
+    assert sum(s["n_evaluations"] for s in out.result.stages if s["name"] == "command_map") == out.n_map_simulations
+    assert [s["name"] for s in out.dynamics_only.stages] == ["shared", "shared", "shared"]
+    assert out.dynamics_only.stages[-1]["n_evaluations"] == out.n_map_simulations
+    assert out.dynamics_only.elapsed_s > out.dynamics_only.stages[0].get("elapsed_s", 0)
     unfair = calibrate_with_sensor(train, eval_, simulate=toy_simulate, max_evaluations=60, fair_baseline=False)
     assert unfair.dynamics_only.n_evaluations < unfair.result.n_evaluations
     evals = [e.evaluation for e in events]
     assert evals == sorted(evals) and evals[-1] == out.result.n_evaluations
+    assert {e.stage for e in events} == {"shared", "command_map"}
     d = out.to_dict()
-    assert set(d) == {"result", "command_map", "dynamics_only"}
+    assert set(d) == {"result", "command_map", "dynamics_only", "n_map_simulations"}
     for j in FIT_JOINTS:
         assert out.command_map.bias[j] == pytest.approx(TRUE_MAP.bias[j], abs=1.0)
 
@@ -112,6 +122,52 @@ def test_calibrate_with_sensor_stops_early():
     eps = make_episodes(3)
     out = calibrate_with_sensor(eps[:2], eps[2:], simulate=toy_simulate, max_evaluations=30, should_stop=lambda: True)
     assert out.result.n_evaluations == 0
+
+
+def test_calibrate_with_sensor_stops_inside_the_map_fit():
+    eps = make_episodes(3)
+    calls = {"n": 0}
+
+    def counting(params, cmap, ep):
+        calls["n"] += 1
+        return toy_simulate(params, cmap, ep)
+
+    # let round 0 finish (30 evaluations + the start), then stop during the first map fit
+    out = calibrate_with_sensor(eps[:2], eps[2:], simulate=counting, max_evaluations=30,
+                                should_stop=lambda: calls["n"] >= 2 * 33)
+    assert out.result.n_evaluations < 40  # 30 + the start, a few map-fit passes, no refit
+    assert calls["n"] < 2 * 50  # nothing like the 71 passes an unstopped map fit could take
+    assert [s["name"] for s in out.result.stages][:2] == ["shared", "command_map"]
+    assert out.command_map.is_identity() or out.result.n_evaluations > 31
+
+
+def test_fit_command_map_stop_returns_best_so_far():
+    eps = make_episodes(2)
+    n = {"sims": 0}
+
+    def counting(params, cmap, ep):
+        n["sims"] += 1
+        return toy_simulate(params, cmap, ep)
+
+    fit = fit_command_map(TRUE_PARAMS, eps, counting, should_stop=lambda: n["sims"] >= 3 * len(eps))
+    assert fit.n_simulations <= 3
+    assert fit.rms_after <= fit.rms_before
+
+
+def test_fit_command_map_coupled_jacobian_matches_block_diagonal():
+    eps = make_episodes(3)
+    fast = fit_command_map(TRUE_PARAMS, eps, toy_simulate)
+    slow = fit_command_map(TRUE_PARAMS, eps, toy_simulate, coupled=True)
+    assert fast.n_simulations < slow.n_simulations
+    for j in FIT_JOINTS:
+        assert fast.command_map.bias[j] == pytest.approx(slow.command_map.bias[j], abs=0.05)
+        assert fast.command_map.gain[j] == pytest.approx(slow.command_map.gain[j], abs=0.005)
+
+
+def test_calibrate_with_sensor_accepts_sigma0_for_round_zero():
+    eps = make_episodes(3)
+    out = calibrate_with_sensor(eps[:2], eps[2:], simulate=toy_simulate, max_evaluations=10, sigma0=0.2)
+    assert out.result.n_evaluations > 10
 
 
 @pytest.mark.slow
@@ -183,7 +239,50 @@ def test_calibrate_with_sensor_per_joint():
     eps = make_episodes(4, seed=3)
     out = calibrate_with_sensor(eps[:3], eps[3:], simulate=toy_simulate, max_evaluations=30,
                                 per_joint=True, per_joint_max_evaluations=30)
-    # the per-joint stage ran in every dynamics fit
-    assert [st["name"] for st in out.result.stages] == ["shared", "per_joint"]
-    assert [st["name"] for st in out.dynamics_only.stages] == ["shared", "per_joint"]
+    # the per-joint stage ran in every dynamics fit (here it never beat the shared
+    # optimum, so each refit starts shared); the equal-budget extra refit is shared too
+    assert [st["name"] for st in out.result.stages] == \
+        ["shared", "per_joint", "command_map", "shared", "per_joint", "command_map"]
+    assert [st["name"] for st in out.dynamics_only.stages] == \
+        ["shared", "per_joint", "shared", "per_joint", "shared"]
+    assert out.result.n_evaluations == out.dynamics_only.n_evaluations
     assert out.result.eval_score < out.dynamics_only.baseline_eval_score
+
+
+def test_per_joint_fit_is_refit_in_its_own_space(monkeypatch):
+    """When a round ends on per-joint parameters, the next dynamics refit must
+    not go back through the shared stage (which would average them)."""
+    import antares.sensor as sensor
+    from antares.calibrate import CalibrationResult
+
+    pj = TRUE_PARAMS.replace(kp=(400.0, 410.0, 390.0, 400.0, 400.0, 400.0))
+    calls = []
+
+    def fake_calibrate(train, eval, simulate=None, start=None, max_evaluations=150, **kw):
+        calls.append({"start": start, "max_evaluations": max_evaluations, **kw})
+        n = max_evaluations + (kw.get("per_joint_max_evaluations", 50) if kw.get("per_joint") else 0)
+        stages = ([{"name": "shared", "n_evaluations": max_evaluations, "train_score": 1.0, "params": {}}]
+                  if max_evaluations else [])
+        if kw.get("per_joint"):
+            stages.append({"name": "per_joint", "n_evaluations": n - max_evaluations, "train_score": 1.0, "params": {}})
+        return CalibrationResult(params=pj, baseline=start or TRUE_PARAMS, train_score=1.0, eval_score=1.0,
+                                 baseline_train_score=2.0, baseline_eval_score=2.0, per_joint_before={},
+                                 per_joint_after={}, history=[(0, 2.0)], n_evaluations=n, elapsed_s=0.1,
+                                 space="per_joint", stages=stages)
+
+    monkeypatch.setattr(sensor, "calibrate", fake_calibrate)
+    eps = make_episodes(3)
+    out = calibrate_with_sensor(eps[:2], eps[2:], simulate=toy_simulate, max_evaluations=30,
+                                per_joint=True, per_joint_max_evaluations=20, sigma0=0.4)
+    # round 0: the caller's sigma0 and both stages; refits: per-joint only, refit sigma
+    assert calls[0]["max_evaluations"] == 30 and calls[0]["sigma0"] == 0.4 and calls[0]["per_joint"]
+    refits = calls[1:]
+    assert all(c["max_evaluations"] == 0 and c["per_joint"] and c["sigma0"] == 0.15 for c in refits)
+    assert all(c["start"].has_per_joint for c in refits)
+    # the equal-budget extra refit for the dynamics-only side spends the map simulations
+    assert refits[-1]["per_joint_max_evaluations"] == out.n_map_simulations > 0
+    assert out.result.n_evaluations == out.dynamics_only.n_evaluations
+    assert out.result.space == "per_joint"
+    assert [s["name"] for s in out.result.stages] == \
+        ["shared", "per_joint", "command_map", "per_joint", "command_map"]
+    assert [s["name"] for s in out.dynamics_only.stages] == ["shared", "per_joint", "per_joint", "per_joint"]

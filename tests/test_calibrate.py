@@ -329,6 +329,18 @@ def test_calibrate_default_is_shared_only():
     assert back.space == "shared" and back.stages == []
 
 
+def test_zero_shared_budget_skips_the_shared_stage():
+    eps = make_episodes(2, T=60)
+    start = TRUE.replace(kp=(300.0,) * 6)
+    res = calibrate(eps[:1], eps[1:], simulate=fake_simulate, start=start, max_evaluations=0,
+                    per_joint=True, per_joint_max_evaluations=8, per_joint_popsize=4)
+    assert [s["name"] for s in res.stages] == ["per_joint"]
+    assert res.n_evaluations == 8 and res.space == "per_joint"
+    # and with no per-joint stage either, the start is returned untouched
+    res = calibrate(eps[:1], eps[1:], simulate=fake_simulate, start=TRUE, max_evaluations=0)
+    assert res.stages == [] and res.n_evaluations == 0 and res.params == TRUE
+
+
 def test_calibrate_per_joint_refines_shared_fit():
     eps = make_episodes(6, T=90, seed=3, true=TRUE_PER_JOINT)
     train, eval = split_episodes(eps, n_train=4, n_eval=2, seed=0)

@@ -514,9 +514,14 @@ Two ways to fit it (`--sensor-mode`, or `sensor_mode` in
   under gravity sags below its command by an amount the sim models through
   `kp`, and this fit puts that sag into the bias.
 
-The table compares against a dynamics-only fit given the **same** CMA-ES
-budget, refit round for round under the identity map, so a gain is not
-just extra evaluations. It also works with `--per-joint`.
+The table compares against a dynamics-only fit given the **same** budget,
+counting every pass over the training episodes, the map fits' included:
+it is refit round for round under the identity map, plus one more refit
+with the simulations the map fits spent, so a gain is not just extra
+evaluations. The lock's `n_evaluations` and stages count the map fits
+the same way. It also works with `--per-joint` (later rounds refit in
+the per-joint space directly, since the shared stage would only average
+the per-joint values back together).
 
 Synthetic check (`scripts/sensor_synthetic.py`): a hidden MuJoCo arm with
 the SO-101 lock's dynamics, 0.2-unit state noise and teleop-style pauses,

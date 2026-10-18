@@ -305,11 +305,12 @@ def get_baseline(ds: Dataset, lock_name: str | None):
     g = ds.joint_names.index("gripper") if "gripper" in ds.joint_names else -1
     thr = gripper_thresholds(np.concatenate([ep.action[:, g] for ep in ds.episodes]))
     eps = baseline_episodes(ds, lock)
+    cmap = command_map_from_lock(lock) if lock else None
     arm = get_arm()
-    with _ARM_LOCK, _command_map(arm, command_map_from_lock(lock) if lock else None):
+    with _ARM_LOCK, _command_map(arm, cmap):
         arm.apply(params)
         bl = residual_baseline(eps, arm, thr)
-    out = (bl, thr, params)
+    out = (bl, thr, params, cmap)
     with _BASELINES_LOCK:
         _BASELINES.setdefault(key, out)
         return _BASELINES[key]
@@ -318,8 +319,7 @@ def get_baseline(ds: Dataset, lock_name: str | None):
 def _episode_residual(ds: Dataset, ep: Episode, lock_name: str | None, z: float, min_frames: int):
     from antares.events import detect_events, residuals, validate_episode
 
-    bl, thr, params = get_baseline(ds, lock_name)
-    cmap = command_map_from_lock(load_lock_dict(lock_name)) if lock_name else None
+    bl, thr, params, cmap = get_baseline(ds, lock_name)
     arm = get_arm()
     with _ARM_LOCK, _command_map(arm, cmap):
         arm.apply(params)
@@ -371,7 +371,7 @@ def events_summary(ds: Dataset, lock_name: str | None = None, z: float = 4.0, mi
     """Detect events in every episode and score them against the gripper proxy label."""
     from antares.events import summarize_validation
 
-    bl, thr, params = get_baseline(ds, lock_name)
+    bl, thr, params, _ = get_baseline(ds, lock_name)
     held = set(bl.episodes)
     rows, vals = [], []
     for ep in ds.episodes:
@@ -573,7 +573,7 @@ def run_drift(
         scan = drift_scan(
             ds.episodes,
             lock,
-            simulate=lock_simulate(load_lock_dict(lock_name)),
+            simulate=lock_simulate(lock.to_dict()),
             window=window,
             step=step,
             max_evaluations=max_evaluations,
@@ -1208,8 +1208,9 @@ class ReplayRequest(BaseModel):
     episode: int
     # A value is a scalar or a per-joint list of 6, as SimParams.from_dict accepts.
     params: dict[str, float | list[float]]
-    # Optional {"gain": [6], "bias": [6]}; omitted means identity.
-    command_map: dict[str, list[float]] | None = None
+    # Optional {"gain": [6], "bias": [6]}, as a lock stores it (extra keys such
+    # as its "mode" are ignored); omitted means identity.
+    command_map: dict[str, Any] | None = None
 
 
 @app.post("/api/replay")
@@ -1221,6 +1222,11 @@ def replay_with_params(req: ReplayRequest) -> dict:
         cmap = command_map_from_lock({"command_map": req.command_map})
     except (TypeError, ValueError, KeyError) as e:
         raise HTTPException(status_code=400, detail=f"bad params: {e}")
+    if cmap is not None and cmap.gain.shape != (len(ds.joint_names),):
+        raise HTTPException(
+            status_code=400,
+            detail=f"bad params: command_map needs {len(ds.joint_names)} gains and biases, got {cmap.gain.shape}",
+        )
     out = replay_episode(ds, req.episode, params, cmap)
     out["lock"] = None
     return out
