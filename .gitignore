@@ -27,3 +27,4 @@ web/node_modules
 
 # fresh recordings from `antares record-check`
 recordings/
+.policy-data/

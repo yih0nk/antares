@@ -1984,6 +1984,63 @@ should show the policy the arm as it was ~100 ms earlier. The wrist number
 is weak (low correlation, since the whole view moves with the arm) and is
 best read as "late, by a similar amount".
 
+## Does a calibrated sim train a better controller? (sim-to-sim)
+
+A LeRobot policy hands the servos a short future path (its action chunk);
+underneath, something has to make the arm actually follow it.
+`experiments/policy_transfer.py` trains that tracking layer in different
+simulators and tests it on fleet arms it has never seen, each fleet lock
+standing in for a real arm. The controller sees the joint angles, the last
+velocity, its last 5 commands and the next 8 frames of the path; the
+learned ones are linear (21 weights shared by all joints) and trained with
+CMA-ES on closed-loop tracking error, 3 seeds each. References are 480 real
+measured episodes from the fleet datasets (48 training arms); 10 locks are
+held out (one per Hub account), and each is driven along its own dataset's
+paths and again with 150 g at the gripper that no lock models.
+
+RMS tracking error in degrees on the 10 unseen arms (gripper excluded,
+100 rollouts, mean over seeds):
+
+| controller | mean | median | worst arm | payload mean | payload worst |
+|---|---|---|---|---|---|
+| send the path as is | 2.82 | 2.75 | 4.08 | 2.92 | 4.45 |
+| learned in the default sim | 1.93 | 1.84 | 3.00 | 2.04 | 3.36 |
+| learned in the default sim +-30% | 2.12 | 2.03 | 3.31 | 2.24 | 3.71 |
+| learned on the SO-101 lock | 0.78 | 0.77 | 1.08 | 1.09 | 3.24 |
+| learned on the SO-101 lock + `antares dr` ranges | 0.84 | 0.72 | 1.82 | 2.20 | 13.4 |
+| learned on 48 fleet locks | 0.92 | 0.70 | 2.51 | 2.21 | 13.4 |
+| same, given latency and response time | 1.19 | 0.80 | 4.66 | 1.43 | 4.97 |
+| shift by the fleet's mean latency (3) | 0.86 | 0.74 | 2.06 | 1.09 | 2.69 |
+| shift by the arm's own latency | 0.74 | 0.41 | 2.17 | 0.98 | 2.68 |
+| ILC in the arm's own lock (ceiling) | 0.08 | 0.06 | 0.14 | 0.34 | 0.89 |
+
+* Latency is most of the gap: shifting by the arm's own latency alone goes
+  from 2.82 to 0.74 deg.
+* The default MJCF has no latency, so controllers trained there stay near
+  1.9 deg on real-like arms; +-30% around it is worse on every rollout.
+* Training on the calibrated SO-101 lock gives the best learned controller
+  (0.78 deg, worst arm 1.08), as good as knowing each arm's own latency.
+  The `antares dr` ranges around that lock and the fleet of 48 locks do not
+  improve on it here, and both are fragile under the unmodelled payload
+  (worst arm 13.4 deg), where the single-lock controller holds at 3.2.
+* Knowing the whole lock is worth nine times the latency shift (ILC 0.08
+  deg), and an action chunk gives ILC the path ahead it needs, so the
+  practical next step is a deployment adapter that runs ILC on each chunk.
+
+All of it is sim-to-sim, with test arms from the same model class as the
+training arms. Rerun: `python experiments/dump_refs.py` where the Hub is
+reachable, then
+
+```sh
+python experiments/policy_transfer.py --refs .policy-data/refs.npz --generations 150 --batch 32 --out results/policy_transfer
+cp results/policy_transfer/summary.json experiments/results/policy_transfer_summary.json
+```
+
+(about 80 minutes on 4 cores; the script's defaults are a shorter 120
+generations with batches of 24, and a cached `train_*.json` is reused only
+when it was trained with the same settings). The committed summary is
+`experiments/results/policy_transfer_summary.json`.
+
 ## Scene from the logs
 
 With the cameras fitted, the rest of what they see is static, and the
@@ -2256,6 +2313,7 @@ cube being visible inside its box from above.
 | `antares/cli.py` | The `antares` command line |
 | `antares/server.py` | FastAPI backend for the UI |
 | `examples/` | `randomize_env.py`: DR ranges in a training loop |
+| `experiments/` | `policy_transfer.py` (fleet transfer of tracking controllers), `dump_refs.py` (fleet reference trajectories), `results/` |
 | `scripts/` | `sensor_synthetic.py` (synthetic sensor-fit check), `dr_compare.py` (derived vs hand-picked DR ranges) |
 | `antares/fleet.py` | Hub discovery, fleet scan, fleet statistics |
 | `antares/video.py` | Dataset video frames (episode -> file/timestamp, AV1 decode, frame cache) |
