@@ -151,12 +151,18 @@ const Z_UP_TO_Y_UP = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1
 export function MatchCamera({ fit }: { fit: CameraFit }) {
   const camera = useThree((s) => s.camera) as THREE.PerspectiveCamera;
   useEffect(() => {
+    const fov = camera.fov;
     const [x, y, z] = fit.pos;
     const [w, qx, qy, qz] = fit.quat;
     camera.position.set(x, y, z).applyQuaternion(Z_UP_TO_Y_UP);
     camera.quaternion.copy(Z_UP_TO_Y_UP).multiply(new THREE.Quaternion(qx, qy, qz, w));
     camera.fov = fit.fovy;
     camera.updateProjectionMatrix();
+    // FitCamera and the orbit controls restore the pose, not the field of view.
+    return () => {
+      camera.fov = fov;
+      camera.updateProjectionMatrix();
+    };
   }, [camera, fit]);
   return null;
 }
