@@ -1096,6 +1096,33 @@ against field of view (a farther camera with a narrower fov looks nearly
 the same), so expect the position to be loose along the optical axis;
 wrist cameras are skipped; the sim is the SO-101 model for both datasets.
 
+### Video delay
+
+```sh
+.venv/bin/antares camera-delay lerobot/svla_so101_pickplace --camera up --episodes 8
+```
+
+A policy trained on images and joint states assumes both show the same
+instant. `camera-delay` measures how many frames a camera's video lags the
+joint log: the share of pixels that change between frames rises and falls
+with joint speed, so cross-correlating the two over +-10 frames and
+refining the peak gives the lag per episode (median reported). Any camera
+works, wrist cameras included. On the demo datasets, 8 episodes each
+(positive: video is late):
+
+| dataset | camera | median lag | per-episode range | peak corr |
+|---|---|---|---|---|
+| svla_so101_pickplace | `up` | -0.37 frames (-12 ms) | -0.92..+0.15 | 0.75-0.91 |
+| svla_so101_pickplace | `side` | -0.33 frames (-11 ms) | -0.72..-0.13 | 0.66-0.92 |
+| svla_so100_pickplace | `top` | +2.88 frames (+96 ms) | +2.13..+2.92 | 0.54-0.65 |
+| svla_so100_pickplace | `wrist` | +1.96 frames (+65 ms) | +1.46..+2.95 | 0.25-0.45 |
+
+The SO-101 cameras match the joint log to within half a frame. The SO-100
+top camera is consistently about 3 frames late, so a sim for that setup
+should show the policy the arm as it was ~100 ms earlier. The wrist number
+is weak (low correlation, since the whole view moves with the arm) and is
+best read as "late, by a similar amount".
+
 ## Layout
 
 | Path | What |
