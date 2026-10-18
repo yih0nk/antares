@@ -1,5 +1,5 @@
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Canvas, useFrame } from "@react-three/fiber";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Grid, OrbitControls } from "@react-three/drei";
 import {
   api,
@@ -28,6 +28,7 @@ import {
   type Residual,
   type SceneFit,
 } from "./api";
+import * as THREE from "three";
 import { Arm, compMaterial, ghostMaterial, policyDefaultMaterial, policyLockMaterial, realMaterial, type Playhead } from "./Arm";
 import { CameraView } from "./CameraView";
 import { SceneGeometry } from "./Scene";
@@ -47,6 +48,9 @@ const PARAM_KEYS: (keyof Params)[] = ["kp", "kv", "damping", "armature", "fricti
 // Terms a lock omits at their defaults; the row shows only when the lock carries one.
 const OPTIONAL_DEFAULTS: Partial<Record<keyof Params, number>> = { gravity_scale: 1, deadband: 0 };
 const SPEEDS = [0.25, 0.5, 1, 2];
+// Which arms the viewer draws: both overlaid, or one at a time.
+const SHOW = ["both", "real", "sim"] as const;
+type Show = (typeof SHOW)[number];
 // CMA-ES budget for a UI run; also sizes the sparkline's x axis.
 const MAX_EVALUATIONS = 150;
 // Budget of the optional per-joint refinement stage (the API's default).
@@ -64,6 +68,8 @@ type Calibration = {
   result?: CalibrationResult;
   error?: string;
 };
+
+const noop = () => {};
 
 // A policy training or evaluation job streamed from the API.
 type PolicyJob = {
@@ -143,6 +149,156 @@ function Driver({
   return null;
 }
 
+const CAMERA_POSITION: [number, number, number] = [0.62, 0.48, 0.72];
+const CAMERA_TARGET: [number, number, number] = [0, 0.16, 0];
+// Widest view the default camera frames the whole arm in; narrower panes
+// (side by side) pull the camera back so the arm still fits.
+const FRAMED_ASPECT = 1.6;
+
+function FitCamera() {
+  const camera = useThree((s) => s.camera);
+  const aspect = useThree((s) => s.size.width / Math.max(1, s.size.height));
+  // The pull-back factor last applied; a later aspect change rescales the
+  // camera's current offset from the target, so an orbit the user made survives
+  // a resize or the side-by-side toggle.
+  const lastK = useRef<number | null>(null);
+  useEffect(() => {
+    const k = Math.max(1, FRAMED_ASPECT / aspect);
+    const [tx, ty, tz] = CAMERA_TARGET;
+    if (lastK.current == null) {
+      const [x, y, z] = CAMERA_POSITION;
+      camera.position.set(tx + (x - tx) * k, ty + (y - ty) * k, tz + (z - tz) * k);
+    } else if (lastK.current !== k) {
+      const r = k / lastK.current;
+      const { x, y, z } = camera.position;
+      camera.position.set(tx + (x - tx) * r, ty + (y - ty) * r, tz + (z - tz) * r);
+    }
+    lastK.current = k;
+  }, [camera, aspect]);
+  return null;
+}
+
+// A pane that mirrors another pane's playhead: the second episode is a pure
+// function of the first one's clock (scaled by frame rate, wrapped to its
+// own length), so the two never drift apart.
+function Follow({
+  lead,
+  leadFps,
+  playhead,
+  fps,
+  frames,
+}: {
+  lead: Playhead;
+  leadFps: number;
+  playhead: Playhead;
+  fps: number;
+  frames: number;
+}) {
+  useFrame(() => {
+    if (frames < 2) return;
+    playhead.frame = ((lead.frame / Math.max(1, leadFps)) * fps) % frames;
+  });
+  return null;
+}
+
+// One 3D view: the real arm, the sim ghost and (optionally) the
+// lag-compensated sim for one episode, with its own playhead and camera.
+function Scene({
+  geometry,
+  realPoses,
+  simPoses,
+  compPoses,
+  hotSpans,
+  clip,
+  show,
+  playhead,
+  playing,
+  fps,
+  frames,
+  speed,
+  onFrame,
+  ghostMat = ghostMaterial,
+  children,
+  follow,
+}: {
+  geometry: Geometry | null;
+  realPoses: number[][][] | null;
+  simPoses: number[][][] | null;
+  compPoses: number[][][] | null;
+  hotSpans: number[][] | null;
+  clip: string;
+  show: Show;
+  playhead: Playhead;
+  playing: boolean;
+  fps: number;
+  frames: number;
+  speed: number;
+  onFrame: (f: number) => void;
+  // A second pane gets its own copy: the warm glow on hot spans animates it.
+  ghostMat?: THREE.Material;
+  // Extra things drawn in the arm's frame (policy ghosts, the fitted scene, the tracked object).
+  children?: ReactNode;
+  // Follow another pane's playhead (scaled by fps) instead of running its own clock.
+  follow?: { lead: Playhead; leadFps: number };
+}) {
+  return (
+    <Canvas shadows camera={{ position: CAMERA_POSITION, fov: 38, near: 0.01, far: 20 }}>
+      <FitCamera />
+      <color attach="background" args={["#0b0d12"]} />
+      <ambientLight intensity={0.55} />
+      <directionalLight position={[0.8, 1.6, 0.6]} intensity={1.3} castShadow shadow-mapSize={[1024, 1024]} />
+      <directionalLight position={[-1, 0.6, -0.8]} intensity={0.35} />
+      <Grid
+        infiniteGrid
+        cellSize={0.05}
+        sectionSize={0.25}
+        cellColor="#1c2230"
+        sectionColor="#2a3346"
+        fadeDistance={3}
+      />
+      {geometry && (
+        <Suspense fallback={null}>
+          {/* MuJoCo is z-up; three.js is y-up. Keyed by model so a robot switch swaps the meshes cleanly. */}
+          <group key={geometry.robot} rotation={[-Math.PI / 2, 0, 0]}>
+            <Arm
+              geometry={geometry}
+              poses={realPoses}
+              clip={clip}
+              playhead={playhead}
+              material={realMaterial}
+              hidden={show === "sim"}
+            />
+            <Arm
+              geometry={geometry}
+              poses={simPoses}
+              clip={clip}
+              playhead={playhead}
+              material={ghostMat}
+              hotSpans={hotSpans}
+              hidden={show === "real"}
+            />
+            <Arm
+              geometry={geometry}
+              poses={compPoses}
+              clip={clip}
+              playhead={playhead}
+              material={compMaterial}
+              hidden={show === "real"}
+            />
+            {children}
+          </group>
+        </Suspense>
+      )}
+      {follow ? (
+        <Follow lead={follow.lead} leadFps={follow.leadFps} playhead={playhead} fps={fps} frames={frames} />
+      ) : (
+        <Driver playhead={playhead} playing={playing} fps={fps} frames={frames} speed={speed} onFrame={onFrame} />
+      )}
+      <OrbitControls makeDefault target={CAMERA_TARGET} />
+    </Canvas>
+  );
+}
+
 export default function App() {
   // Top-level screen: the single-arm viewer, or the fleet dashboard. The
   // hash deep-links to the fleet (`#fleet`, or `#fleet/<lock>` with a row open).
@@ -168,6 +324,11 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [playing, setPlaying] = useState(true);
   const [speed, setSpeed] = useState(1);
+  const [show, setShow] = useState<Show>("both");
+  // A second episode shown side by side with the first; null when off.
+  const [compare, setCompare] = useState<number | null>(null);
+  const [compareBase, setCompareBase] = useState<Replay | null>(null);
+  const [compareReplay, setCompareReplay] = useState<Replay | null>(null);
   const [frame, setFrame] = useState(0);
   const [joint, setJoint] = useState("shoulder_pan");
   const [calib, setCalib] = useState<Calibration | null>(null);
@@ -201,6 +362,8 @@ export default function App() {
   const [track, setTrack] = useState<ObjectTrack | null>(null);
 
   const playhead = useMemo<Playhead>(() => ({ frame: 0 }), []);
+  const comparePlayhead = useMemo<Playhead>(() => ({ frame: 0 }), []);
+  const compareGhostMat = useMemo(() => ghostMaterial.clone(), []);
 
   // ---- initial load ---------------------------------------------------------
   useEffect(() => {
@@ -248,6 +411,7 @@ export default function App() {
     setReplay(null);
     setBaseline(null);
     setGhost(DEFAULT);
+    setCompare(null);
     api
       .loadDataset(dataset)
       .then((info) => {
@@ -290,11 +454,81 @@ export default function App() {
       (e) => live && setError(`Replay failed: ${e.message}`),
     );
     playhead.frame = 0;
+    comparePlayhead.frame = 0;
     setFrame(0);
     return () => {
       live = false;
     };
-  }, [dataset, episode, playhead]);
+  }, [dataset, episode, playhead, comparePlayhead]);
+
+  // ---- second episode, side by side -----------------------------------------
+  // Its ghost follows the first pane's choice: default, the same lock, or the
+  // live fit's current best parameters. Both panes restart together.
+  useEffect(() => {
+    setCompareBase(null);
+    setCompareReplay(null);
+    if (!dataset || compare == null) return;
+    let live = true;
+    api.replay(dataset, compare, null).then(
+      (r) => live && setCompareBase(r),
+      (e) => live && setError(`Replay of episode ${compare} failed: ${e.message}`),
+    );
+    return () => {
+      live = false;
+    };
+  }, [dataset, compare]);
+
+  useEffect(() => {
+    playhead.frame = 0;
+    comparePlayhead.frame = 0;
+    setFrame(0);
+  }, [compare, playhead, comparePlayhead]);
+
+  // The second pane's ghost with a lock or the live fit is fetched for its
+  // own episode; with the default ghost it is simply the base replay, read at
+  // render time so no request is made for it. Requests run one at a time:
+  // while one is in flight the newest wanted one waits (the live fit lands a
+  // new best every few events), and a reply for an older episode or ghost is
+  // dropped.
+  const liveParams = ghost === LIVE ? replay?.params ?? null : null;
+  const [compareBusy, setCompareBusy] = useState(false);
+  const compareKey = useRef("");
+  const compareWanted = useRef<{ key: string; episode: number; run: () => Promise<Replay> } | null>(null);
+  const compareInFlight = useRef(false);
+  const pumpCompare = useCallback(() => {
+    if (compareInFlight.current || !compareWanted.current) return;
+    const { key, episode: ep, run } = compareWanted.current;
+    compareWanted.current = null;
+    compareInFlight.current = true;
+    setCompareBusy(true);
+    run()
+      .then(
+        (r) => key === compareKey.current && setCompareReplay(r),
+        (e) => key === compareKey.current && setError(`Replay of episode ${ep} failed: ${(e as Error).message}`),
+      )
+      .finally(() => {
+        compareInFlight.current = false;
+        setCompareBusy(false);
+        pumpCompare();
+      });
+  }, []);
+  useEffect(() => {
+    compareKey.current = `${dataset}#${compare}#${ghost}`;
+    setCompareReplay(null);
+  }, [dataset, compare, ghost]);
+  useEffect(() => {
+    if (!dataset || compare == null || ghost === DEFAULT) return;
+    if (ghost === LIVE && !liveParams) return;
+    const ep = compare;
+    const key = compareKey.current;
+    compareWanted.current = {
+      key,
+      episode: ep,
+      run: () => (ghost === LIVE && liveParams ? api.replayParams(dataset, ep, liveParams) : api.replay(dataset, ep, ghost)),
+    };
+    pumpCompare();
+  }, [dataset, compare, ghost, liveParams, pumpCompare]);
+  const shownCompare = ghost === DEFAULT ? compareBase : compareReplay;
 
   // ---- ghost replay for a saved lock ----------------------------------------
   useEffect(() => {
@@ -528,6 +762,7 @@ export default function App() {
   // Camera fits live with a lock: the ghost's, or the dataset's first saved one.
   const cameraLock = ghost !== DEFAULT && ghost !== LIVE ? ghost : dsLocks[0]?.name ?? null;
 
+  const compareFrames = compareBase?.real_poses.length ?? 0;
   // ---- scene fit saved for the camera lock -----------------------------------
   useEffect(() => {
     if (!cameraLock) {
@@ -686,6 +921,7 @@ export default function App() {
 
   const seek = (f: number) => {
     playhead.frame = f;
+    if (compareFrames) comparePlayhead.frame = f % compareFrames;
     setFrame(Math.floor(f));
   };
 
@@ -740,53 +976,88 @@ export default function App() {
       ) : (
       <>
       <main className="viewer">
-        <Canvas shadows camera={{ position: [0.62, 0.48, 0.72], fov: 38, near: 0.01, far: 20 }}>
-          <color attach="background" args={["#0b0d12"]} />
-          <ambientLight intensity={0.55} />
-          <directionalLight position={[0.8, 1.6, 0.6]} intensity={1.3} castShadow shadow-mapSize={[1024, 1024]} />
-          <directionalLight position={[-1, 0.6, -0.8]} intensity={0.35} />
-          <Grid
-            infiniteGrid
-            cellSize={0.05}
-            sectionSize={0.25}
-            cellColor="#1c2230"
-            sectionColor="#2a3346"
-            fadeDistance={3}
-          />
-          {geometry && (
-            <Suspense fallback={null}>
-              {/* MuJoCo is z-up; three.js is y-up. Keyed by model so a robot switch swaps the meshes cleanly. */}
-              <group key={geometry.robot} rotation={[-Math.PI / 2, 0, 0]}>
-                <Arm geometry={geometry} poses={baseline?.real_poses ?? null} clip={clip} playhead={playhead} material={realMaterial} />
-                <Arm
-                  geometry={geometry}
-                  poses={replay?.sim_poses ?? null}
-                  clip={clip}
-                  playhead={playhead}
-                  material={ghostMaterial}
-                  hotSpans={hotSpans}
-                />
-                <Arm geometry={geometry} poses={compPoses} clip={clip} playhead={playhead} material={compMaterial} />
-                <Arm geometry={geometry} poses={polPoses("default")} clip={`${clip}#policy`} playhead={playhead} material={policyDefaultMaterial} />
-                <Arm geometry={geometry} poses={polPoses("lock")} clip={`${clip}#policy`} playhead={playhead} material={policyLockMaterial} />
-                <SceneGeometry scene={scene} />
-                <ObjectMarker track={track} playhead={playhead} />
-              </group>
-            </Suspense>
+        <div className="panes">
+          <div className="pane">
+            <Scene
+              geometry={geometry}
+              realPoses={baseline?.real_poses ?? null}
+              simPoses={replay?.sim_poses ?? null}
+              compPoses={compPoses}
+              hotSpans={hotSpans}
+              clip={clip}
+              show={show}
+              playhead={playhead}
+              playing={playing}
+              fps={fps}
+              frames={frames}
+              speed={speed}
+              onFrame={setFrame}
+            >
+              {geometry && (
+                <>
+                  <Arm geometry={geometry} poses={polPoses("default")} clip={`${clip}#policy`} playhead={playhead} material={policyDefaultMaterial} />
+                  <Arm geometry={geometry} poses={polPoses("lock")} clip={`${clip}#policy`} playhead={playhead} material={policyLockMaterial} />
+                </>
+              )}
+              <SceneGeometry scene={scene} />
+              <ObjectMarker track={track} playhead={playhead} />
+            </Scene>
+            {compare != null && <div className="pane-label">episode {episode ?? "--"} · {deg(ghostGap?.overall_deg)}</div>}
+          </div>
+          {compare != null && (
+            <div className="pane">
+              <Scene
+                geometry={geometry}
+                realPoses={compareBase?.real_poses ?? null}
+                simPoses={shownCompare?.sim_poses ?? null}
+                compPoses={null}
+                hotSpans={null}
+                clip={`${dataset}#${compare}`}
+                show={show}
+                playhead={comparePlayhead}
+                playing={playing}
+                fps={compareBase?.fps ?? fps}
+                frames={compareFrames}
+                speed={speed}
+                onFrame={noop}
+                follow={{ lead: playhead, leadFps: fps }}
+                ghostMat={compareGhostMat}
+              />
+              <div className="pane-label">
+                <select
+                  className="picker"
+                  value={compare}
+                  onChange={(e) => setCompare(Number(e.target.value))}
+                  aria-label="Episode shown beside the first"
+                >
+                  {episodes
+                    .filter((e) => e.index !== episode)
+                    .map((e) => (
+                      <option key={e.index} value={e.index}>
+                        episode {e.index} · {e.duration_s.toFixed(1)}s
+                      </option>
+                    ))}
+                </select>
+                {deg(shownCompare?.gap?.overall_deg)}
+                {compareBusy && <span className="dot" />}
+              </div>
+            </div>
           )}
-          <Driver playhead={playhead} playing={playing} fps={fps} frames={frames} speed={speed} onFrame={setFrame} />
-          <OrbitControls makeDefault target={[0, 0.16, 0]} />
-        </Canvas>
+        </div>
 
         <div className="legend">
-          <span>
-            <i className="swatch real" /> real arm (logged)
-          </span>
-          <span>
-            <i className="swatch sim" /> sim ghost, {ghostLabel}
-            {replayBusy && <span className="dot" />}
-          </span>
-          {showComp && ghost !== LIVE && (
+          {show !== "sim" && (
+            <span>
+              <i className="swatch real" /> real arm (logged)
+            </span>
+          )}
+          {show !== "real" && (
+            <span>
+              <i className="swatch sim" /> sim ghost, {ghostLabel}
+              {replayBusy && <span className="dot" />}
+            </span>
+          )}
+          {showComp && ghost !== LIVE && show !== "real" && (
             <span>
               <i className="swatch comp" /> sim with lag-compensated commands (sim-validated only)
               {compBusy && <span className="dot" />}
@@ -815,12 +1086,32 @@ export default function App() {
               {track.source[Math.min(track.source.length - 1, frame)] === "held" ? " (held: fingertip from FK)" : ""}
             </span>
           )}
-          {inEvent && (
+          {inEvent && show !== "real" && (
             <span className="warm">
               <i className="swatch warm" /> sim disagrees here: {inEvent.kind} on {inEvent.joints.join(", ")} (peak{" "}
               {inEvent.peak_deg.toFixed(1)}°)
             </span>
           )}
+        </div>
+
+        <div className="view-controls">
+          <div className="segmented">
+            <button
+              className={compare != null ? "on" : ""}
+              onClick={() => setCompare(compare != null ? null : episodes.find((e) => e.index !== episode)?.index ?? null)}
+              disabled={episodes.length < 2}
+              title="Play a second episode side by side with the first"
+            >
+              Side by side
+            </button>
+          </div>
+          <div className="segmented" role="group" aria-label="Arms shown">
+            {SHOW.map((v) => (
+              <button key={v} className={show === v ? "on" : ""} onClick={() => setShow(v)}>
+                {v === "both" ? "Real + sim" : v === "real" ? "Real only" : "Sim only"}
+              </button>
+            ))}
+          </div>
         </div>
 
         {(dsState === "loading" || (!baseline && !error)) && (
@@ -1290,10 +1581,21 @@ export default function App() {
           <button className="icon" onClick={() => setPlaying((p) => !p)} disabled={!frames} aria-label={playing ? "Pause" : "Play"}>
             {playing ? "❚❚" : "▶"}
           </button>
+          <div className="speeds">
+            {SPEEDS.map((s) => (
+              <button key={s} className={s === speed ? "on" : ""} onClick={() => setSpeed(s)}>
+                {s}×
+              </button>
+            ))}
+          </div>
           <select
             className="picker"
             value={episode ?? ""}
-            onChange={(e) => setEpisode(Number(e.target.value))}
+            onChange={(e) => {
+              const ep = Number(e.target.value);
+              if (ep === compare) setCompare(null);
+              setEpisode(ep);
+            }}
             disabled={!episodes.length}
           >
             {episodes.map((e) => (
@@ -1312,13 +1614,6 @@ export default function App() {
             |real − sim| <i className="swatch contact" /> contact <i className="swatch anomaly" /> anomaly{" "}
             <i className="swatch grasp" /> gripper closed
           </span>
-          <div className="speeds">
-            {SPEEDS.map((s) => (
-              <button key={s} className={s === speed ? "on" : ""} onClick={() => setSpeed(s)}>
-                {s}×
-              </button>
-            ))}
-          </div>
         </div>
         {baseline && (
           <>
