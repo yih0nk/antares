@@ -752,7 +752,16 @@ export default function App() {
     const src = api.events(jobId);
     sourceRef.current = src;
     let lastBest = Infinity;
+    // The server replays a job's events from the start on every connection,
+    // so after EventSource reconnects skip the ones already handled.
+    let handled = 0;
+    let seenThisConnection = 0;
+    src.onopen = () => {
+      seenThisConnection = 0;
+    };
     src.onmessage = (msg) => {
+      if (++seenThisConnection <= handled) return;
+      handled++;
       const ev = JSON.parse(msg.data) as JobEvent;
       if (ev.type === "progress") {
         setCalib((c) =>
