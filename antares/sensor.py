@@ -29,6 +29,7 @@ from typing import Any
 
 import numpy as np
 
+from antares import factors
 from antares.calibrate import CalibrationResult, ProgressEvent, SimParams, calibrate
 from antares.data import Episode
 from antares.sim import GRIPPER_INDEX, JOINTS, CommandMap
@@ -39,8 +40,8 @@ SensorSimulateFn = Callable[[SimParams, CommandMap, Episode], tuple[np.ndarray, 
 FIT_JOINTS: tuple[int, ...] = tuple(i for i in range(len(JOINTS)) if i != GRIPPER_INDEX)
 
 #: Bounds, in dataset units for bias. Wider than any sane calibration error.
-BIAS_BOUND = 25.0
-GAIN_BOUNDS = (0.75, 1.33)
+BIAS_BOUND = factors.get("sensor_bias").bounds[1]
+GAIN_BOUNDS = factors.get("sensor_gain").bounds
 
 
 def sensor_simulate(robot: str | None = None) -> SensorSimulateFn:
