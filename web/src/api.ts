@@ -367,6 +367,73 @@ export type CameraOverlay = {
   iou: number | null;
 };
 
+// ---- scene (antares.scene): table, workspace and backdrops from the logs ----
+
+export type SceneTable = {
+  z: number; // m, at the arm's base
+  normal: number[];
+  tilt_deg: number;
+  horizontal: boolean;
+  n_grasps: number;
+  n_on_table: number;
+  z_grasp: number;
+  object_half_height: number;
+  fingertip_z: Record<string, number>;
+  jaw_low_z: Record<string, number>;
+  episode_min_z: Record<string, number>;
+  min_fingertip_z: number;
+};
+
+export type SceneWorkspace = { min: number[]; max: number[]; size: number[]; hull_xy: number[][]; n_frames: number };
+
+// One camera's backdrop and how the projected table plane sits in its image.
+export type SceneBackdrop = {
+  camera: string;
+  path: string;
+  width: number;
+  height: number;
+  plane_polygon: number[][]; // pixels
+  plane_frac: number;
+  region_frac: number;
+  plane_in_region: number; // share of the projected plane on the dominant colour region
+  region_in_plane: number;
+  iou: number;
+  table_rgb: number[];
+};
+
+// GET /api/scene?lock=: locks/<lock>.scene.json.
+export type SceneFit = {
+  lock: string;
+  dataset: string;
+  robot: string;
+  table: SceneTable;
+  workspace: SceneWorkspace;
+  grasp_points: number[][];
+  release_points: number[][];
+  backdrops: Record<string, SceneBackdrop>;
+  n_episodes: number;
+  n_frames: number;
+  created_at: string;
+};
+
+// GET /api/scene/view: the real frame and the sim's view of the same instant
+// from the same camera (backdrop + table + flat-shaded arm).
+export type SceneView = {
+  dataset: string;
+  camera: string;
+  episode: number;
+  frame: number;
+  lock: string;
+  width: number;
+  height: number;
+  real_image: string; // data: URL (JPEG)
+  sim_image: string;
+  iou: number;
+  table_polygon: number[][];
+  table_z: number;
+  n_geoms: number;
+};
+
 async function json<T>(r: Response): Promise<T> {
   if (!r.ok) {
     let body: unknown = null;
@@ -496,6 +563,17 @@ export const api = {
     fetch(
       `/api/camera/overlay?${q(lock ? { dataset, camera, episode, frame, lock } : { dataset, camera, episode, frame })}`,
     ).then((r) => json<CameraOverlay>(r)),
+  // ---- scene ----
+  scene: (lock: string) =>
+    fetch(`/api/scene?${q({ lock })}`).then((r) => json<{ lock: string; scene: SceneFit | null }>(r)),
+  sceneFit: (dataset: string, lock: string) =>
+    fetch("/api/scene/fit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dataset, lock }),
+    }).then((r) => json<SceneFit & { path: string }>(r)),
+  sceneView: (dataset: string, camera: string, episode: number, frame: number, lock: string) =>
+    fetch(`/api/scene/view?${q({ dataset, camera, episode, frame, lock })}`).then((r) => json<SceneView>(r)),
   jobEvents: (jobId: string) => new EventSource(`/api/jobs/${jobId}/events`),
   cancelJob: (jobId: string) => fetch(`/api/jobs/${jobId}/cancel`, { method: "POST" }).then((r) => json(r)),
 };

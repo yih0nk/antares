@@ -110,6 +110,9 @@ class RobotLock(JsonFile):
     #: The follower's LeRobot motor calibration the fit used for its unit map
     #: (antares.lerobot_calib.calibration_record()); None = the model's map.
     calibration: dict[str, Any] | None = None
+    # The static scene recovered from the logs (antares.scene.SceneFit.lock_entry():
+    # table height, workspace box, backdrop paths); None until `scene-fit` runs.
+    scene: dict[str, Any] | None = None
 
     @classmethod
     def create(
@@ -160,6 +163,8 @@ class RobotLock(JsonFile):
             d["cameras"] = dict(self.cameras)
         if self.calibration is not None:
             d["calibration"] = self.calibration
+        if self.scene is not None:
+            d["scene"] = dict(self.scene)
         return d
 
     def replace(self, **changes: Any) -> "RobotLock":
@@ -186,6 +191,7 @@ class RobotLock(JsonFile):
             robot=str(d.get("robot") or DEFAULT_ROBOT),
             cameras=dict(d.get("cameras") or {}),
             calibration=d.get("calibration"),
+            scene=dict(d["scene"]) if isinstance(d.get("scene"), dict) else None,
         )
 
 

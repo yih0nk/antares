@@ -17,9 +17,11 @@ import {
   type ProgressEvent,
   type Replay,
   type Residual,
+  type SceneFit,
 } from "./api";
 import { Arm, compMaterial, ghostMaterial, realMaterial, type Playhead } from "./Arm";
 import { CameraView } from "./CameraView";
+import { SceneGeometry } from "./Scene";
 import { CrossHeatmap, JointTrace, ResidualStrip, Sparkline } from "./Charts";
 import { AddDataset } from "./AddDataset";
 import { FleetView } from "./Fleet";
@@ -154,6 +156,8 @@ export default function App() {
   const [showComp, setShowComp] = useState(false);
   const [comp, setComp] = useState<Compensation | null>(null);
   const [compBusy, setCompBusy] = useState(false);
+  // The static scene (table, workspace) fitted for the camera lock, if any.
+  const [scene, setScene] = useState<SceneFit | null>(null);
 
   const playhead = useMemo<Playhead>(() => ({ frame: 0 }), []);
 
@@ -483,6 +487,22 @@ export default function App() {
   // Camera fits live with a lock: the ghost's, or the dataset's first saved one.
   const cameraLock = ghost !== DEFAULT && ghost !== LIVE ? ghost : dsLocks[0]?.name ?? null;
 
+  // ---- scene fit saved for the camera lock -----------------------------------
+  useEffect(() => {
+    if (!cameraLock) {
+      setScene(null);
+      return;
+    }
+    let live = true;
+    api.scene(cameraLock).then(
+      (r) => live && setScene(r.scene),
+      () => live && setScene(null),
+    );
+    return () => {
+      live = false;
+    };
+  }, [cameraLock]);
+
   const seek = (f: number) => {
     playhead.frame = f;
     setFrame(Math.floor(f));
@@ -566,6 +586,7 @@ export default function App() {
                   hotSpans={hotSpans}
                 />
                 <Arm geometry={geometry} poses={compPoses} clip={clip} playhead={playhead} material={compMaterial} />
+                <SceneGeometry scene={scene} />
               </group>
             </Suspense>
           )}
@@ -585,6 +606,11 @@ export default function App() {
             <span>
               <i className="swatch comp" /> sim with lag-compensated commands (sim-validated only)
               {compBusy && <span className="dot" />}
+            </span>
+          )}
+          {scene && (
+            <span className="muted small">
+              table at {(scene.table.z * 1000).toFixed(0)} mm, workspace box from the logs
             </span>
           )}
           {inEvent && (
@@ -764,6 +790,8 @@ export default function App() {
           playing={playing}
           lock={cameraLock}
           busy={running}
+          scene={scene}
+          onSceneChange={setScene}
           onError={setError}
         />
 
