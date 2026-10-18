@@ -193,6 +193,46 @@ def test_verdict_warns_when_parameters_are_weakly_identified():
     assert math.isnan(DriftScan("l", "d", START, 10, 5, 60, 0, 0.1, [], {}, 0).mean_improvement)
 
 
+def test_verdict_only_announces_pinned_parameters():
+    rng = np.random.default_rng(0)
+    n = 9
+    kp_factor = np.linspace(1.0, 0.75, n) * (1 + 0.01 * rng.normal(size=n))
+    windows = _windows(kp_factor, np.full(n, 1.0))
+    trends = compute_trends(windows)
+    assert trends["kp"].drifting and not trends["lock_score"].drifting
+
+    legacy = DriftScan("l", "d", START, 10, 5, 60, 0, 0.1, windows, trends, n)
+    assert legacy.pinned is None and legacy.announced_keys == ["kp"] and legacy.unpinned_drifting == []
+    assert legacy.verdict().startswith("drift: kp")
+    assert legacy.to_dict()["pinned"] is None and legacy.to_dict()["announced"] == ["kp"]
+
+    # the lock pins latency only (no seed spread): kp's trend is reported but not read as wear
+    gated = DriftScan("l", "d", START, 10, 5, 60, 0, 0.1, windows, trends, n, pinned=["latency_frames"])
+    assert gated.drifting["kp"] is True  # the raw flag is kept
+    assert gated.announced_keys == [] and gated.unpinned_drifting == ["kp"]
+    v = gated.verdict()
+    assert v.startswith("no parameter or score drifts across the session")
+    assert "kp move across seeds at equal error, so their trends are not read as wear" in v
+    assert "caution" not in v
+    d = json.loads(json.dumps(gated.to_dict()))
+    assert d["pinned"] == ["latency_frames"] and d["announced"] == [] and d["drifting"]["kp"] is True
+    back = DriftScan.from_dict(d)
+    assert back.pinned == ["latency_frames"] and back.verdict() == v
+
+    # pinned by a seeded lock: announced as before, with the weak-identification caution
+    pinned = DriftScan("l", "d", START, 10, 5, 60, 0, 0.1, windows, trends, n, pinned=["kp", "latency_frames"])
+    assert pinned.announced_keys == ["kp"] and pinned.verdict().startswith("drift: kp")
+
+    # a score drift is always announced; the unpinned clause rides along
+    lock_scores = np.linspace(1.0, 1.6, n) + 0.02 * rng.normal(size=n)
+    windows2 = _windows(kp_factor, lock_scores)
+    both = DriftScan("l", "d", START, 10, 5, 60, 0, 0.1, windows2, compute_trends(windows2), n,
+                     pinned=["latency_frames"])
+    v2 = both.verdict()
+    assert v2.startswith("drift: lock_score") and "kp " not in v2.split(";")[0]
+    assert "kp move across seeds" in v2
+
+
 # ---------------------------------------------------------------------------
 # the scan
 # ---------------------------------------------------------------------------
@@ -207,6 +247,7 @@ def test_drift_scan_sees_the_lock_degrade():
         on_progress=seen.append, simulate=fake_simulate, n_boot=300,
     )
     assert scan.lock == "toy" and scan.dataset == "toy/session"
+    assert scan.pinned == ["latency_frames"]  # FakeLock has no seed spread
     assert scan.window == 6 and scan.step == 3 and scan.n_windows_planned == 9
     assert len(scan.windows) == 9 and not scan.cancelled
     assert [w.first for w in scan.windows] == list(range(0, 25, 3))
@@ -274,6 +315,21 @@ def test_drift_scan_save_load_round_trip(tmp_path):
     assert back.to_dict() == scan.to_dict()
     assert back.windows[1].params == scan.windows[1].params
     assert isinstance(back.trends["kp"], Trend)
+    assert back.pinned == ["latency_frames"]
+    # a scan saved before pinned existed loads ungated
+    d = scan.to_dict()
+    del d["pinned"], d["announced"]
+    assert DriftScan.from_dict(d).pinned is None
+
+
+def test_drift_scan_reads_pinned_from_a_seeded_lock():
+    class SeededLock(FakeLock):
+        result = type("R", (), {"seeds": {"pinned": ["kv", "latency_frames"]}})()
+
+    eps = session(n=12, decay=0.0)
+    scan = drift_scan(eps, SeededLock(), window=4, step=4, max_evaluations=3,
+                      simulate=fake_simulate, n_boot=10)
+    assert scan.pinned == ["kv", "latency_frames"]
 
 
 def test_drift_scan_should_stop_and_errors():

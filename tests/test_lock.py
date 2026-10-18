@@ -8,7 +8,17 @@ import pytest
 from antares import __version__
 from antares.calibrate import CalibrationResult, SimParams
 from antares.data import Episode
-from antares.lock import LOCK_DIR, RobotLock, dataset_digest, list_locks, slug
+from antares.lock import (
+    DEFAULT_PINNED,
+    LOCK_DIR,
+    RobotLock,
+    dataset_digest,
+    list_locks,
+    param_spread,
+    pinned_params,
+    seed_info,
+    slug,
+)
 
 JOINTS = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper")
 
@@ -140,6 +150,11 @@ def test_shipped_locks_load_as_scalar_params():
         # the lock survives a save/load round trip untouched
         back = RobotLock.from_dict(json.loads(json.dumps(lock.to_dict())))
         assert back == lock
+        # written before seeds were recorded: no seed block, only latency is pinned
+        assert "seeds" not in raw["result"] and lock.result.seeds is None
+        assert all("seed" not in s for s in raw["result"].get("stages", []))
+        assert pinned_params(lock) == pinned_params(raw) == ["latency_frames"]
+        assert param_spread(lock) is None and param_spread(raw) is None
 
 
 def _cached_dataset(repo_id: str):
@@ -189,3 +204,114 @@ def test_so101_lock_replays_unchanged():
     scalar_q = arm.replay(ep0)
     arm.apply(lock.params.broadcast())
     np.testing.assert_array_equal(arm.replay(ep0), scalar_q)
+
+
+def test_lock_command_map_round_trip(tmp_path):
+    from antares.sim import CommandMap
+
+    cmap = CommandMap(gain=[1.0, 0.95, 1.05, 1.0, 1.0, 1.0], bias=[0.0, -2.0, 1.5, 0.0, 0.0, 0.0])
+    only = fake_result(eval_score=2.5).to_dict()
+    lock = RobotLock.create("lerobot/x", "so101", episodes(), fake_result(),
+                            command_map=cmap.to_dict(), dynamics_only=only)
+    back = RobotLock.load(lock.save(tmp_path / "x.lock.json"))
+    assert back.command_map == cmap.to_dict()
+    assert back.dynamics_only["eval_score"] == 2.5
+    np.testing.assert_allclose(CommandMap.from_dict(back.command_map).bias, cmap.bias)
+
+
+def test_lock_without_command_map_omits_it():
+    d = RobotLock.create("lerobot/x", "so101", episodes(), fake_result()).to_dict()
+    assert "command_map" not in d and "dynamics_only" not in d
+    assert RobotLock.from_dict(d).command_map is None
+
+
+def test_committed_locks_still_load():
+    from pathlib import Path
+
+    from antares.sim import CommandMap
+
+    locks = list_locks(Path(__file__).resolve().parent.parent / "locks")
+    assert locks
+    for lk in locks:
+        # locks from before sensor fitting have none; sensor locks parse
+        cmap = CommandMap.from_dict(lk.command_map)
+        assert cmap.gain.shape == cmap.bias.shape == (6,)
+        # single-seed locks: no spread recorded, so only latency counts as pinned
+        assert lk.result.seeds is None and seed_info(lk) is None
+        assert pinned_params(lk) == list(DEFAULT_PINNED) == ["latency_frames"]
+        assert param_spread(lk) is None
+        # and re-serializing adds nothing a loader before seeds would trip on
+        d = lk.to_dict()
+        assert "seeds" not in d["result"] and all("seed" not in s for s in d["result"]["stages"])
+        assert RobotLock.from_dict(json.loads(json.dumps(d))) == lk
+
+
+def test_committed_fleet_locks_still_load():
+    from pathlib import Path
+
+    fleet = list_locks(Path(__file__).resolve().parent.parent / "locks" / "fleet")
+    assert len(fleet) >= 10
+    for lk in fleet:
+        assert lk.result.seeds is None and pinned_params(lk) == ["latency_frames"]
+        assert RobotLock.from_dict(json.loads(json.dumps(lk.to_dict()))) == lk
+
+
+# ---------------------------------------------------------------------------
+# best-of-N seeds in a lock
+# ---------------------------------------------------------------------------
+
+
+def seeds_block(pinned=("kp", "latency_frames")) -> dict:
+    p0 = SimParams(kp=100.0, kv=1.0, damping=0.1, armature=0.01, frictionloss=0.1, latency_frames=2)
+    p1 = p0.replace(kp=150.0, kv=5.0, latency_frames=3)
+    return {
+        "n": 2, "seeds": [0, 100], "chosen": 1,
+        "eval_scores": [1.9, 1.7], "train_scores": [1.6, 1.5],
+        "params": [p0.to_dict(), p1.to_dict()],
+        "spread": {
+            "kp": {"min": 100.0, "max": 150.0, "ratio": 1.5},
+            "kv": {"min": 1.0, "max": 5.0, "ratio": 5.0},
+            "damping": {"min": 0.1, "max": 0.1, "ratio": 1.0},
+            "armature": {"min": 0.01, "max": 0.01, "ratio": 1.0},
+            "frictionloss": {"min": 0.1, "max": 0.1, "ratio": 1.0},
+            "latency_frames": {"min": 2.0, "max": 3.0, "range": 1.0},
+        },
+        "pinned": list(pinned),
+    }
+
+
+def test_lock_with_seeds_round_trips_and_reports_pinned(tmp_path):
+    res = fake_result(seeds=seeds_block())
+    lock = RobotLock.create("lerobot/x", "so101", episodes(), res, name="seeded")
+    path = lock.save(tmp_path / "seeded.lock.json")
+    raw = json.loads(path.read_text())
+    assert raw["result"]["seeds"]["chosen"] == 1
+    assert raw["result"]["seeds"]["spread"]["kp"] == {"min": 100.0, "max": 150.0, "ratio": 1.5}
+    assert raw["result"]["seeds"]["spread"]["latency_frames"] == {"min": 2.0, "max": 3.0, "range": 1.0}
+    assert raw["result"]["seeds"]["pinned"] == ["kp", "latency_frames"]
+
+    back = RobotLock.load(path)
+    assert back == lock and back.result.seeds == seeds_block()
+    for view in (back, raw, back.result):
+        assert seed_info(view) == seeds_block()
+        assert pinned_params(view) == ["kp", "latency_frames"]
+        assert param_spread(view)["kv"]["ratio"] == 5.0
+
+    # an explicit empty pinned list is respected: nothing is physical
+    none_pinned = RobotLock.create("lerobot/x", "so101", episodes(), fake_result(seeds=seeds_block(())))
+    assert pinned_params(none_pinned) == [] and pinned_params(none_pinned.to_dict()) == []
+    # NaN scores survive as null
+    nan_block = {**seeds_block(), "eval_scores": [float("nan"), 1.7]}
+    d = RobotLock.create("lerobot/x", "so101", episodes(), fake_result(seeds=nan_block)).to_dict()
+    assert d["result"]["seeds"]["eval_scores"][0] is None
+    assert math.isnan(RobotLock.from_dict(json.loads(json.dumps(d))).result.seeds["eval_scores"][0])
+
+
+def test_pinned_params_tolerates_odd_inputs():
+    assert pinned_params({}) == ["latency_frames"]
+    assert pinned_params({"result": {}}) == ["latency_frames"]
+    assert pinned_params({"result": {"seeds": None}}) == ["latency_frames"]
+    assert pinned_params({"seeds": {"pinned": ["kv"]}}) == ["kv"]  # a bare result dict
+    assert param_spread({"result": {"seeds": {"pinned": []}}}) is None
+    assert pinned_params(object()) == ["latency_frames"]
+    assert DEFAULT_PINNED == ("latency_frames",)

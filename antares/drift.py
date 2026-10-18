@@ -20,6 +20,13 @@ relative threshold (10% by default) from the first window to the last.
 Overlapping windows are not independent, so the interval is optimistic;
 treat the flag as "worth a look", not as a measurement of wear.
 
+A parameter trend is only *announced* as drift when the lock pins that
+parameter (:func:`antares.lock.pinned_params`): several parameter sets
+reproduce an arm equally well, so a parameter that moves across seeds at
+the same error can trend across windows without anything in the arm having
+changed. Scores always count. Scans saved without a ``pinned`` list keep
+the old, ungated verdict.
+
 The simulator is injected as a ``simulate(params, episode) -> (real_q,
 sim_q)`` callable like in :mod:`antares.calibrate`, so this module and its
 tests run without MuJoCo.
@@ -314,14 +321,33 @@ class DriftScan:
     elapsed_s: float = 0.0
     created_at: str = field(default_factory=_now_iso)
     antares_version: str = __version__
+    #: Parameters the lock pins (see :func:`antares.lock.pinned_params`); only
+    #: these are announced as drifting. None (scans from before seed spread
+    #: was recorded) keeps the ungated verdict.
+    pinned: list[str] | None = None
 
     @property
     def drifting(self) -> dict[str, bool]:
+        """Raw trend flags, scores and parameters alike, gated by nothing."""
         return {k: t.drifting for k, t in self.trends.items()}
 
     @property
     def drifting_keys(self) -> list[str]:
         return [k for k, d in self.drifting.items() if d]
+
+    def is_pinned(self, key: str) -> bool:
+        """Scores always count; a parameter counts when the lock pins it."""
+        return key in SCORE_KEYS or self.pinned is None or key in self.pinned
+
+    @property
+    def announced_keys(self) -> list[str]:
+        """Drifting quantities the verdict names: scores, and pinned parameters."""
+        return [k for k in self.drifting_keys if self.is_pinned(k)]
+
+    @property
+    def unpinned_drifting(self) -> list[str]:
+        """Parameters that trend but are not pinned, so not read as wear."""
+        return [k for k in self.drifting_keys if not self.is_pinned(k)]
 
     @property
     def mean_improvement(self) -> float:
@@ -339,21 +365,30 @@ class DriftScan:
         if len(self.windows) < 3:
             return "too few windows to estimate a trend"
         hits = []
-        for k in self.drifting_keys:
+        for k in self.announced_keys:
             t = self.trends[k]
             hits.append(f"{k} {t.total_change:+.0%} over the session (r²={t.r2:.2f})")
+        unpinned = self.unpinned_drifting
+        unpinned_note = (
+            f"{'/'.join(unpinned)} move across seeds at equal error, so their trends are not read as wear"
+            if unpinned
+            else ""
+        )
         if not hits:
-            return (
+            out = (
                 "no parameter or score drifts across the session "
                 f"(no trend both significant and larger than {self.threshold:.0%})"
             )
+            return f"{out}; {unpinned_note}" if unpinned_note else out
         out = "drift: " + "; ".join(hits)
-        params_hit = [k for k in self.drifting_keys if k not in SCORE_KEYS]
+        params_hit = [k for k in self.announced_keys if k not in SCORE_KEYS]
         if params_hit and self.mean_improvement < self.threshold:
             out += (
                 f"; caution: refits beat the lock by only {self.mean_improvement:.0%} on average, "
                 "so parameter trends are weakly identified"
             )
+        if unpinned_note:
+            out += f"; {unpinned_note}"
         return out
 
     def to_dict(self) -> dict:
@@ -369,6 +404,8 @@ class DriftScan:
             "windows": [w.to_dict() for w in self.windows],
             "trends": {k: t.to_dict() for k, t in self.trends.items()},
             "drifting": self.drifting,
+            "pinned": None if self.pinned is None else [str(p) for p in self.pinned],
+            "announced": self.announced_keys,
             "mean_improvement": _json_float(self.mean_improvement),
             "verdict": self.verdict(),
             "n_windows_planned": int(self.n_windows_planned),
@@ -396,6 +433,7 @@ class DriftScan:
             elapsed_s=float(d.get("elapsed_s", 0.0)),
             created_at=str(d.get("created_at", "")),
             antares_version=str(d.get("antares_version", "")),
+            pinned=None if d.get("pinned") is None else [str(p) for p in d["pinned"]],
         )
 
     def default_path(self, drift_dir: Path = DRIFT_DIR) -> Path:
@@ -473,8 +511,12 @@ def drift_scan(
     lock's static score on a window is the warm start's own training score,
     so it costs nothing extra. ``should_stop`` ends the scan after the
     current window; the trends are then computed on the windows finished.
+    The lock's pinned parameters (:func:`antares.lock.pinned_params`; only
+    latency for a lock without seed spread) gate which parameter trends the
+    verdict announces.
     """
     from antares.calibrate import calibrate
+    from antares.lock import pinned_params
 
     t0 = time.perf_counter()
     ordered = sorted(episodes, key=lambda ep: ep.index)
@@ -533,6 +575,7 @@ def drift_scan(
         n_windows_planned=len(slices),
         cancelled=cancelled,
         elapsed_s=time.perf_counter() - t0,
+        pinned=pinned_params(lock),
     )
 
 

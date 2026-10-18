@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import json
+import time
 import sys
 import types
 from dataclasses import dataclass, field
 
 import numpy as np
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from antares import server
@@ -48,10 +50,30 @@ class FakeParams:
         return cls()
 
 
+class FakeCommandMap:
+    def __init__(self, gain, bias):
+        self.gain, self.bias = np.asarray(gain, float), np.asarray(bias, float)
+
+    @classmethod
+    def identity(cls):
+        return cls(np.ones(6), np.zeros(6))
+
+    @classmethod
+    def from_dict(cls, d):
+        return cls.identity() if d is None else cls(d["gain"], d["bias"])
+
+    def to_dict(self):
+        return {"gain": self.gain.tolist(), "bias": self.bias.tolist()}
+
+    def apply(self, u):
+        return np.asarray(u) * self.gain + self.bias
+
+
 class FakeArm:
     body_names = BODIES
+    command_map = None
 
-    def __init__(self, params=None, unit_map=None):
+    def __init__(self, params=None, unit_map=None, robot=None):
         self.params = params or FakeParams()
         self.applied: list = []
 
@@ -64,7 +86,8 @@ class FakeArm:
 
     def replay(self, ep):
         # error that shrinks as kp grows, so calibrated params "help"
-        return np.radians(ep.action) + 0.1 / self.params.kp
+        action = ep.action if self.command_map is None else self.command_map.apply(ep.action)
+        return np.radians(action) + 0.1 / self.params.kp
 
     def fk(self, q):
         T = len(q)
@@ -173,19 +196,26 @@ class FakeLock:
     result: FakeResult
     created_at: str
     antares_version: str
+    command_map: dict | None = None
+    dynamics_only: dict | None = None
+    robot: str = "so101"
 
     @classmethod
-    def create(cls, dataset, robot_type, train_episodes, result, name=None):
+    def create(cls, dataset, robot_type, train_episodes, result, name=None,
+               command_map=None, dynamics_only=None, robot="so101"):
         return cls(name or dataset.replace("/", "__"), dataset, robot_type,
                    f"digest-of-{len(list(train_episodes))}", result.params, result,
-                   "2026-10-17T12:00:00Z", "0.0.1")
+                   "2026-10-17T12:00:00Z", "0.0.1", command_map, dynamics_only, robot)
 
     def to_dict(self):
         return {
             "name": self.name, "dataset": self.dataset, "robot_type": self.robot_type,
+            "robot": self.robot,
             "data_sha256": self.data_sha256, "params": self.params.to_dict(),
             "result": self.result.to_dict(), "created_at": self.created_at,
             "antares_version": self.antares_version,
+            **({"command_map": self.command_map} if self.command_map is not None else {}),
+            **({"dynamics_only": self.dynamics_only} if self.dynamics_only is not None else {}),
         }
 
     def save(self, path=None):
@@ -198,7 +228,8 @@ class FakeLock:
     def from_dict(cls, d):
         params = FakeParams.from_dict(d["params"])
         return cls(d["name"], d["dataset"], d.get("robot_type", "?"), d["data_sha256"], params,
-                   FakeResult(params, FakeParams()), d["created_at"], d.get("antares_version", ""))
+                   FakeResult(params, FakeParams()), d["created_at"], d.get("antares_version", ""),
+                   d.get("command_map"), d.get("dynamics_only"), d.get("robot") or "so101")
 
 
 @dataclass
@@ -291,23 +322,26 @@ def make_dataset(repo_id: str, n_episodes: int = 6, T: int = 20, offset: float =
 @pytest.fixture
 def fakes(monkeypatch, tmp_path):
     """Stub the sibling modules, inject a dataset, and point locks at tmp."""
-    sim = _module("antares.sim", JOINTS=JOINTS, SimParams=FakeParams, Arm=FakeArm,
+    sim = _module("antares.sim", JOINTS=JOINTS, SimParams=FakeParams, Arm=FakeArm, CommandMap=FakeCommandMap,
                   MODEL_PATH=tmp_path / "so101.xml",
                   model_geometry=lambda model=None: {"bodies": [], "geoms": [], "joints": []})
     gap = _module("antares.gap", GapReport=FakeGap, tracking_error=fake_tracking_error,
                   aggregate=fake_aggregate)
     cal = _module("antares.calibrate", calibrate=fake_calibrate, split_episodes=fake_split,
-                  default_simulate=lambda: (lambda params, ep: (ep.state, ep.action)))
+                  default_simulate=lambda command_map=None, robot=None: (lambda params, ep: (ep.state, ep.action)))
     lock = _module("antares.lock", RobotLock=FakeLock, dataset_digest=lambda eps: "deadbeef",
                    slug=lambda r: r.replace("/", "__"), LOCK_DIR=tmp_path / "locks",
-                   LOCK_SUFFIX=LOCK_SUFFIX)
+                   LOCK_SUFFIX=LOCK_SUFFIX,
+                   # no seed spread in the fakes: only latency is pinned, as for a real old lock
+                   pinned_params=lambda lock: ["latency_frames"], seed_info=lambda lock: None)
     comp = _module("antares.compensate", compensate_episode=fake_compensate_episode,
                    compensate_episodes=fake_compensate_episodes, held_out_episodes=fake_held_out,
                    max_joint_velocity=lambda episodes, arm: np.full(6, 100.0))
     for m in (sim, gap, cal, lock, comp):
         monkeypatch.setitem(sys.modules, m.__name__, m)
 
-    monkeypatch.setattr(server, "_arm", FakeArm())
+    monkeypatch.setattr(server, "_ARMS", {"so101": FakeArm()})
+    monkeypatch.setattr(server, "_ARM_LOCKS", {})
     monkeypatch.setattr(server, "LOCK_DIR", tmp_path / "locks")
     monkeypatch.setattr(server, "LOCK_SUFFIX", LOCK_SUFFIX)
     monkeypatch.setattr(server, "MESH_DIR", None)
@@ -321,6 +355,8 @@ def fakes(monkeypatch, tmp_path):
 
     import antares.data
     monkeypatch.setattr(antares.data, "load_dataset", no_network)
+    monkeypatch.setattr(server, "fetch_hub_info", no_network)
+    monkeypatch.setattr(server, "UPLOAD_DIR", tmp_path / "uploads")
     return tmp_path
 
 
@@ -329,12 +365,15 @@ def client():
     return TestClient(server.app)
 
 
-def write_lock(tmp_path, name, kp=50.0, dataset=FAKE_DS):
+def write_lock(tmp_path, name, kp=50.0, dataset=FAKE_DS, command_map=None):
     d = tmp_path / "locks"
     d.mkdir(exist_ok=True)
     lock = FakeLock(name, dataset, "so101_follower", "abc", FakeParams(kp=kp),
                     FakeResult(FakeParams(kp=kp), FakeParams()), "2026-10-17T00:00:00+00:00", "0.0.1")
-    (d / f"{name}{LOCK_SUFFIX}").write_text(json.dumps(lock.to_dict()))
+    body = lock.to_dict()
+    if command_map is not None:
+        body["command_map"] = command_map
+    (d / f"{name}{LOCK_SUFFIX}").write_text(json.dumps(body))
     return lock
 
 
@@ -450,7 +489,7 @@ def test_replay_real_sim_integration(monkeypatch):
     ds = Dataset(repo_id="synthetic/arm", robot_type="so101_follower", fps=30.0,
                  joint_names=JOINTS, episodes=(ep,))
     monkeypatch.setattr(server, "_DATASETS", {ds.repo_id: ds})
-    monkeypatch.setattr(server, "_arm", None)  # force a real Arm
+    monkeypatch.setattr(server, "_ARMS", {})  # force a real Arm
     out = TestClient(server.app).get("/api/replay", params={"dataset": ds.repo_id, "episode": 0}).json()
     nbody = len(out["body_names"])
     assert out["joints"] == list(sim.JOINTS)
@@ -467,7 +506,7 @@ def test_replay_shape(client, fakes):
     r = client.get("/api/replay", params={"dataset": FAKE_DS, "episode": 2})
     assert r.status_code == 200, r.text
     out = r.json()
-    assert out["dataset"] == FAKE_DS and out["episode"] == 2
+    assert out["dataset"] == FAKE_DS and out["episode"] == 2 and out["robot"] == "so101"
     assert out["fps"] == 30.0
     assert out["joints"] == list(JOINTS)
     assert out["body_names"] == BODIES
@@ -574,7 +613,7 @@ def test_compensate_heldout_helper(fakes):
     assert out["rms"]["ilc"] < out["rms"]["raw"]
     assert out["lock"] == "unit-a" and out["params"]["kp"] == 50.0 and out["validation"] == "sim-only"
     assert out["ilc_iterations"] == [4, 4]
-    assert server._arm.params.kp == 50.0
+    assert server._ARMS["so101"].params.kp == 50.0
 
     lock["result"]["eval_episodes"] = []
     with pytest.raises(HTTPException) as e:
@@ -602,7 +641,7 @@ def test_compensate_real_sim_integration(monkeypatch):
     ds = Dataset(repo_id="synthetic/arm", robot_type="so101_follower", fps=30.0,
                  joint_names=JOINTS, episodes=(ep,))
     monkeypatch.setattr(server, "_DATASETS", {ds.repo_id: ds})
-    monkeypatch.setattr(server, "_arm", None)  # force a real Arm
+    monkeypatch.setattr(server, "_ARMS", {})  # force a real Arm
     params = sim.SimParams(kp=90.0, kv=1.5, damping=0.05, armature=0.02, frictionloss=0.025, latency_frames=4)
     out = server.compensate_episode_dict(ds, 0, params, method="ilc", lock=None)
     json.dumps(out)
@@ -734,6 +773,14 @@ def test_calibrate_per_joint_option(client, fakes, monkeypatch):
     assert calls[-1]["per_joint"] is True and calls[-1]["per_joint_max_evaluations"] == 42
     run({"dataset": FAKE_DS, "per_joint": True})
     assert calls[-1]["per_joint_max_evaluations"] == 600  # default budget
+
+    # best of N seeds: forwarded only when asked for, bounded at 10
+    run({"dataset": FAKE_DS, "name": "seeds-a"})
+    assert "n_seeds" not in calls[-1]
+    run({"dataset": FAKE_DS, "name": "seeds-b", "n_seeds": 3})
+    assert calls[-1]["n_seeds"] == 3
+    assert client.post("/api/calibrate", json={"dataset": FAKE_DS, "n_seeds": 0}).status_code == 422
+    assert client.post("/api/calibrate", json={"dataset": FAKE_DS, "n_seeds": 11}).status_code == 422
 
     assert client.post("/api/calibrate", json={"dataset": FAKE_DS, "per_joint_max_evaluations": 0}).status_code == 422
 
@@ -938,12 +985,12 @@ def test_fleet_endpoints(client, fakes, monkeypatch):
 
 def test_arm_lock_serialises_sim_access(client, fakes):
     import threading
-    arm = server._arm
+    arm = server._ARMS["so101"]
     seen = []
     orig_apply = arm.apply
 
     def apply(params):
-        assert server._ARM_LOCK.locked()
+        assert server.arm_lock("so101").locked()
         seen.append(params)
         orig_apply(params)
 
@@ -1122,6 +1169,55 @@ def test_check_detects_drift_and_threshold_overrides(client, fakes):
     assert tight["passed"] is False and tight["limit"] == pytest.approx(0.12)
 
 
+def test_check_explain_adds_a_diagnosis_only_on_drift(client, fakes):
+    write_lock(fakes, "unit-a", kp=50.0)
+    ok = client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a", "explain": True}).json()
+    assert ok["verdict"] == "ok" and "diagnosis" not in ok
+    r = client.post("/api/check", json={"dataset": FAKE_DS2, "lock": "unit-a", "explain": True,
+                                        "explain_evaluations": 20})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["verdict"] == "drifted"
+    d = out["diagnosis"]
+    assert d["lock"] == "unit-a" and d["dataset"] == FAKE_DS2
+    assert set(d) >= {"stale_deg", "refit_deg", "causes", "changes", "explained", "summary"}
+    assert d["refit_episodes"] and d["held_out_episodes"]
+    json.dumps(out)
+    assert client.post("/api/check", json={"dataset": FAKE_DS2, "lock": "unit-a", "explain": True,
+                                           "explain_evaluations": 1}).status_code == 422
+
+
+def test_check_explain_keeps_the_verdict_when_the_diagnosis_cannot_run(client, fakes):
+    write_lock(fakes, "unit-a", kp=50.0)
+    # one scored episode is enough for a verdict but not for a refit/held-out split
+    r = client.post("/api/check", json={"dataset": FAKE_DS2, "lock": "unit-a", "explain": True,
+                                        "last": 1, "min_episodes": 1})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["verdict"] == "drifted" and out["diagnosis"] is None
+    assert "two episodes" in out["diagnosis_error"]
+
+
+def test_diagnose_job_streams_and_finishes(client, fakes):
+    write_lock(fakes, "unit-a", kp=50.0)
+    assert client.post("/api/diagnose", json={"dataset": FAKE_DS2, "lock": "ghost"}).status_code == 404
+    assert client.post("/api/diagnose", json={"dataset": FAKE_DS2, "lock": "unit-a",
+                                              "max_evaluations": 2}).status_code == 422
+    job_id = client.post("/api/diagnose", json={"dataset": FAKE_DS2, "lock": "unit-a",
+                                                "max_evaluations": 12}).json()["job_id"]
+    for _ in range(200):
+        st = client.get(f"/api/jobs/{job_id}").json()
+        if st["status"] != "running":
+            break
+        time.sleep(0.02)
+    assert st["status"] == "done" and st["kind"] == "diagnose", st
+    assert st["result"]["lock"] == "unit-a" and st["result"]["n_evaluations"] == 12
+    events = [json.loads(line[6:]) for line in client.get(f"/api/jobs/{job_id}/events").text.splitlines()
+              if line.startswith("data: ")]
+    assert [e["type"] for e in events][-1] == "done"
+    assert [e["evaluation"] for e in events if e["type"] == "fit"] == list(range(1, 13))
+
+
 def test_check_last_and_insufficient_data(client, fakes):
     write_lock(fakes, "unit-a", kp=50.0)
     out = client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a", "last": 2}).json()
@@ -1145,13 +1241,68 @@ def test_check_rejects_bad_input(client, fakes):
                                            "threshold_deg": -1}).status_code == 422
 
 
+def test_check_notifies_a_webhook_server_side(client, fakes, monkeypatch):
+    import antares.notify as notify
+
+    write_lock(fakes, "unit-a", kp=50.0)
+    sent = []
+    monkeypatch.setattr(notify, "send", lambda url, payload, timeout=10.0: sent.append((url, payload)) or 200)
+    slack_url = "https://hooks.slack.com/services/T0/B0/xyz"
+
+    out = client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a"}).json()
+    assert out["notified"] is None and out["notify_error"] is None
+
+    # ok is quiet by default
+    out = client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a", "notify_url": slack_url}).json()
+    assert out["verdict"] == "ok" and out["notified"] is False and out["notify_error"] is None
+    assert sent == []
+
+    # drifted posts, as Slack blocks for a hooks.slack.com URL
+    out = client.post("/api/check", json={"dataset": FAKE_DS2, "lock": "unit-a", "notify_url": slack_url}).json()
+    assert out["verdict"] == "drifted" and out["notified"] is True and out["notify_error"] is None
+    ((url, payload),) = sent
+    assert url == slack_url
+    assert payload["blocks"][0]["type"] == "header"
+    assert payload["text"].startswith(f"DRIFTED unit-a on {FAKE_DS2}: ")
+
+    # any other host gets the generic envelope; notify_when widens the policy
+    out = client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a",
+                                          "notify_url": "https://example.com/hook",
+                                          "notify_when": "always"}).json()
+    assert out["notified"] is True
+    payload = sent[1][1]
+    assert payload["event"] == "antares.check" and payload["verdict"] == "ok"
+    assert payload["result"]["lock"] == "unit-a" and payload["result"]["verdict"] == "ok"
+    out = client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a", "last": 2,
+                                          "notify_url": "https://example.com/hook",
+                                          "notify_when": "failure", "notify_format": "slack"}).json()
+    assert out["verdict"] == "insufficient_data" and out["notified"] is True
+    assert "blocks" in sent[2][1] and sent[2][1]["text"].startswith("NO DATA unit-a")
+
+    # a dead webhook never changes the verdict or the status code
+    def boom(url, payload, timeout=10.0):
+        raise notify.NotifyError("webhook returned HTTP 500: invalid_payload")
+
+    monkeypatch.setattr(notify, "send", boom)
+    r = client.post("/api/check", json={"dataset": FAKE_DS2, "lock": "unit-a", "notify_url": "https://example.com/hook"})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["verdict"] == "drifted" and out["passed"] is False
+    assert out["notified"] is False and out["notify_error"] == "webhook returned HTTP 500: invalid_payload"
+
+    assert client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a", "notify_url": slack_url,
+                                           "notify_when": "sometimes"}).status_code == 422
+    assert client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a", "notify_url": slack_url,
+                                           "notify_format": "xml"}).status_code == 422
+
+
 def test_check_holds_arm_lock(client, fakes):
     write_lock(fakes, "unit-a", kp=50.0)
-    arm = server._arm
+    arm = server._ARMS["so101"]
     orig = arm.replay
 
     def replay(ep):
-        assert server._ARM_LOCK.locked()
+        assert server.arm_lock("so101").locked()
         return orig(ep)
 
     arm.replay = replay
@@ -1293,3 +1444,214 @@ def test_events_summary_endpoint(client, pick):
     assert s["energy_in_grasp_fraction"] > s["chance"] and s["lift"] > 1.0
     assert out["summary_held_out"]["n_episodes"] == 4
     assert client.get("/api/events", params={"dataset": PICK_DS, "lock": "ghost"}).status_code == 404
+
+
+SHIFT_MAP = {"gain": [1.0] * 6, "bias": [-2.0] * 6}  # FAKE_DS2 state = action - 2
+
+
+def test_replay_uses_lock_command_map(client, fakes):
+    write_lock(fakes, "unit-b", kp=50.0, dataset=FAKE_DS2, command_map=SHIFT_MAP)
+    write_lock(fakes, "unit-b-plain", kp=50.0, dataset=FAKE_DS2)
+    q = {"dataset": FAKE_DS2, "episode": 0}
+    mapped = client.get("/api/replay", params={**q, "lock": "unit-b"}).json()
+    plain = client.get("/api/replay", params={**q, "lock": "unit-b-plain"}).json()
+    assert mapped["command_map"] == SHIFT_MAP
+    assert plain["command_map"] is None
+    assert mapped["gap"]["overall_deg"] < 0.5 * plain["gap"]["overall_deg"]
+    # a later plain replay resets the shared arm to identity
+    again = client.get("/api/replay", params={**q, "lock": "unit-b-plain"}).json()
+    assert again["gap"]["overall_deg"] == plain["gap"]["overall_deg"]
+
+
+def test_post_replay_accepts_command_map(client, fakes):
+    body = {"dataset": FAKE_DS2, "episode": 0, "params": FakeParams(kp=50.0).to_dict()}
+    plain = client.post("/api/replay", json=body).json()
+    mapped = client.post("/api/replay", json={**body, "command_map": SHIFT_MAP}).json()
+    assert mapped["command_map"] == SHIFT_MAP
+    assert mapped["gap"]["overall_deg"] < plain["gap"]["overall_deg"]
+    bad = client.post("/api/replay", json={**body, "command_map": {"gain": [1.0] * 6}})
+    assert bad.status_code == 400
+    # the map exactly as a sensor-fitted lock stores it, "mode" and all
+    as_saved = client.post("/api/replay", json={**body, "command_map": {**SHIFT_MAP, "mode": "sim"}})
+    assert as_saved.status_code == 200 and as_saved.json()["command_map"] == SHIFT_MAP
+    # a wrong-length map is a 400, not a 500 from inside the sim
+    short = client.post("/api/replay", json={**body, "command_map": {"gain": [1.0] * 3, "bias": [0.0] * 3}})
+    assert short.status_code == 400 and "command_map" in short.json()["detail"]
+
+
+def test_cross_matrix_uses_command_map(client, fakes):
+    write_lock(fakes, "unit-b", kp=50.0, dataset=FAKE_DS2, command_map=SHIFT_MAP)
+    write_lock(fakes, "unit-b-plain", kp=50.0, dataset=FAKE_DS2)
+    m = server.cross_matrix([FAKE_DS2], ["unit-b", "unit-b-plain"], n_train=4, n_eval=2)
+    mapped, plain, _ = m["scores"][0]
+    assert mapped < plain
+
+
+def test_calibrate_with_fit_sensor_saves_command_map(client, fakes, monkeypatch):
+    calls = {}
+
+    def fake_calibrate_with_sensor(train, eval, **kw):
+        calls.update(kw)
+        res = fake_calibrate(train, eval, **{k: v for k, v in kw.items() if k != "mode"})
+        return types.SimpleNamespace(
+            result=res,
+            command_map=FakeCommandMap(np.ones(6), np.full(6, -2.0)),
+            dynamics_only=FakeResult(FakeParams(kp=40.0), FakeParams(), eval_score=2.0),
+        )
+
+    monkeypatch.setitem(sys.modules, "antares.sensor",
+                        _module("antares.sensor", calibrate_with_sensor=fake_calibrate_with_sensor))
+    result, lock, path = server.run_calibration(
+        server.get_dataset(FAKE_DS2), n_train=4, n_eval=2, name="unit-b", fit_sensor=True)
+    assert calls["max_evaluations"] == 150 and calls["mode"] == "sim"
+    assert lock["command_map"] == {**SHIFT_MAP, "mode": "sim"}
+    assert lock["dynamics_only"]["eval_score"] == 2.0
+    saved = json.loads(path.read_text())
+    assert saved["command_map"]["bias"] == SHIFT_MAP["bias"]
+    replay = client.get("/api/replay", params={"dataset": FAKE_DS2, "episode": 0, "lock": "unit-b"}).json()
+    assert replay["command_map"] == SHIFT_MAP
+
+
+def test_calibrate_request_forwards_fit_sensor(client, fakes, monkeypatch):
+    seen = {}
+
+    def spy(ds, **kw):
+        seen.update(kw)
+        raise HTTPException(status_code=400, detail="stop here")
+
+    monkeypatch.setattr(server, "run_calibration", spy)
+    assert client.post("/api/calibrate", json={"dataset": FAKE_DS, "sensor_mode": "bogus"}).status_code == 422
+    job = client.post("/api/calibrate", json={"dataset": FAKE_DS, "fit_sensor": True,
+                                              "sensor_mode": "kinematic"}).json()["job_id"]
+    for _ in range(100):
+        if client.get(f"/api/calibrate/{job}").json()["status"] != "running":
+            break
+        time.sleep(0.01)
+    assert seen["fit_sensor"] is True and seen["sensor_mode"] == "kinematic"
+
+
+def test_check_uses_lock_command_map(client, fakes):
+    write_lock(fakes, "unit-b", kp=50.0, dataset=FAKE_DS2, command_map=SHIFT_MAP)
+    write_lock(fakes, "unit-b-plain", kp=50.0, dataset=FAKE_DS2)
+    mapped = client.post("/api/check", json={"dataset": FAKE_DS2, "lock": "unit-b"}).json()
+    plain = client.post("/api/check", json={"dataset": FAKE_DS2, "lock": "unit-b-plain"}).json()
+    assert mapped["score"] < 0.5 * plain["score"]
+    assert mapped["passed"] is True and plain["passed"] is False
+
+
+def test_residual_uses_lock_command_map(client, pick):
+    elbow_up = {"gain": [1.0] * 6, "bias": [0.0, 0.0, 2.0, 0.0, 0.0, 0.0]}
+    write_lock(pick, "unit-a", kp=50.0, dataset=PICK_DS)
+    write_lock(pick, "unit-a-mapped", kp=50.0, dataset=PICK_DS, command_map=elbow_up)
+    q = {"dataset": PICK_DS, "episode": 1}
+    plain = np.asarray(client.get("/api/residual", params={**q, "lock": "unit-a"}).json()["residual"])
+    mapped = np.asarray(client.get("/api/residual", params={**q, "lock": "unit-a-mapped"}).json()["residual"])
+    np.testing.assert_allclose(mapped[:, 2], plain[:, 2] - 2.0, atol=1e-3)
+    np.testing.assert_allclose(mapped[:, :2], plain[:, :2], atol=1e-9)
+
+
+def test_lock_simulate_holds_the_lock_command_map():
+    """Real MuJoCo: drift and DR refits replay a mapped lock with its map."""
+    from antares.sim import SimParams
+
+    assert server.lock_simulate({"params": {}}) is None
+    sim = server.lock_simulate({"command_map": {"gain": [1.0] * 6, "bias": [0.0, 5.0, 0.0, 0.0, 0.0, 0.0]}})
+    T = 30
+    action = np.zeros((T, 6))
+    action[:, 1] = 20.0
+    ep = Episode(index=0, fps=30.0, joint_names=JOINTS, state=np.zeros((T, 6)), action=action)
+    _, mapped = sim(SimParams(), ep)
+    plain = server.lock_simulate({"command_map": {"gain": [1.0] * 6, "bias": [0.0] * 6}})(SimParams(), ep)[1]
+    assert mapped[-1, 1] > plain[-1, 1]
+
+
+# --------------------------------------------------------------------------
+# check history across sessions (``LOCK_DIR/<lock>.history.jsonl``)
+# --------------------------------------------------------------------------
+
+TREND_KEYS = {"n", "first", "last", "slope_deg_per_day", "r2", "latest_verdict", "n_drifted"}
+ENTRY_KEYS = {"at", "lock", "dataset", "verdict", "passed", "score", "reference", "limit",
+              "n_episodes", "episodes", "worst_joint", "per_joint", "antares_version"}
+
+
+def _history_lines(fakes, name="unit-a"):
+    p = fakes / "locks" / f"{name}.history.jsonl"
+    return [json.loads(l) for l in p.read_text().splitlines()] if p.is_file() else None
+
+
+def test_check_records_history_unless_told_not_to(client, fakes):
+    write_lock(fakes, "unit-a", kp=50.0)
+    ok = client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a"}).json()
+    assert "history_error" not in ok
+    (rec,) = _history_lines(fakes)
+    assert set(rec) == ENTRY_KEYS
+    assert rec["lock"] == "unit-a" and rec["dataset"] == FAKE_DS and rec["verdict"] == "ok"
+    assert rec["score"] == pytest.approx(ok["score"]) and rec["limit"] == pytest.approx(1.8)
+    assert rec["episodes"] == [0, 1, 2, 3, 4, 5] and rec["worst_joint"] == ok["worst_joint"]
+    assert rec["per_joint"] == {j: pytest.approx(v["score"]) for j, v in ok["per_joint"].items()}
+    assert rec["at"].endswith("Z")
+
+    client.post("/api/check", json={"dataset": FAKE_DS2, "lock": "unit-a", "record": False})
+    assert len(_history_lines(fakes)) == 1
+
+    # insufficient data is recorded too, with a null score
+    out = client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a", "last": 2}).json()
+    assert out["verdict"] == "insufficient_data"
+    recs = _history_lines(fakes)
+    assert [r["verdict"] for r in recs] == ["ok", "insufficient_data"]
+    assert recs[1]["score"] is None and recs[1]["per_joint"] == {} and recs[1]["n_episodes"] == 2
+
+
+def test_history_get_entries_oldest_first_with_trend(client, fakes):
+    write_lock(fakes, "unit-a", kp=50.0)
+    client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a"})
+    client.post("/api/check", json={"dataset": FAKE_DS2, "lock": "unit-a"})
+    r = client.get("/api/history/unit-a")
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert set(d) == {"lock", "entries", "trend"} and d["lock"] == "unit-a"
+    assert [e["verdict"] for e in d["entries"]] == ["ok", "drifted"]
+    assert [e["dataset"] for e in d["entries"]] == [FAKE_DS, FAKE_DS2]
+    assert d["entries"][0]["at"] <= d["entries"][1]["at"]
+    t = d["trend"]
+    assert set(t) == TREND_KEYS
+    assert t["n"] == 2 and t["n_drifted"] == 1 and t["latest_verdict"] == "drifted"
+    assert t["first"] == d["entries"][0]["at"] and t["last"] == d["entries"][1]["at"]
+    json.dumps(d)
+
+
+def test_history_get_missing_lock_and_empty_history(client, fakes):
+    assert client.get("/api/history/ghost").status_code == 404
+    assert client.get("/api/history/..").status_code in (400, 404)
+    assert client.get("/api/history/a%2Fb").status_code in (400, 404)
+    write_lock(fakes, "unit-a", kp=50.0)
+    d = client.get("/api/history/unit-a").json()
+    assert d == {
+        "lock": "unit-a",
+        "entries": [],
+        "trend": {"n": 0, "first": None, "last": None, "slope_deg_per_day": None, "r2": None,
+                  "latest_verdict": None, "n_drifted": 0},
+    }
+
+
+def test_history_list_covers_every_lock(client, fakes):
+    assert client.get("/api/history").json() == {"locks": []}
+    write_lock(fakes, "unit-a", kp=50.0)
+    write_lock(fakes, "unit-b", kp=50.0)
+    client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a"})
+    d = client.get("/api/history").json()
+    assert [x["lock"] for x in d["locks"]] == ["unit-a", "unit-b"]
+    a, b = d["locks"]
+    assert set(a) == {"lock", "trend", "latest"} and set(a["trend"]) == TREND_KEYS
+    assert a["trend"]["n"] == 1 and a["latest"]["verdict"] == "ok" and set(a["latest"]) == ENTRY_KEYS
+    assert b["trend"]["n"] == 0 and b["latest"] is None
+
+
+def test_history_get_skips_a_corrupt_line(client, fakes):
+    write_lock(fakes, "unit-a", kp=50.0)
+    client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a"})
+    p = fakes / "locks" / "unit-a.history.jsonl"
+    p.write_text(p.read_text() + "garbage\n")
+    with pytest.warns(UserWarning, match="corrupt history line"):
+        d = client.get("/api/history/unit-a").json()
+    assert d["trend"]["n"] == 1 and len(d["entries"]) == 1
