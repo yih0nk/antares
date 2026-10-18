@@ -8,6 +8,7 @@ model can be dropped into any MuJoCo or RL pipeline without Antares:
   ``damping``/``armature``/``frictionloss`` on its ``<joint>``. Per-joint
   values (a sequence of six) are written on the named ``<joint>`` /
   ``<position>`` elements instead.
+* ``gravity_scale``, when the lock fitted one, scales ``<option gravity>``.
 * ``meshdir`` is rewritten: either the STL meshes are copied into an
   ``assets/`` directory next to the output, or it points (absolute) at the
   package's own assets.
@@ -44,7 +45,7 @@ import numpy as np
 
 from antares import __version__
 from antares.lock import RobotLock
-from antares.sim import JOINTS, MESH_DIR, MODEL_PATH, Arm, SimParams, UnitMap
+from antares.sim import JOINTS, MESH_DIR, MODEL_PATH, STANDARD_GRAVITY, Arm, SimParams, UnitMap
 
 SCENE_PATH: Path = MODEL_PATH.parent / "scene.xml"
 SIDECAR_SUFFIX = ".antares.json"
@@ -139,6 +140,13 @@ def bake_params(xml: str, params: Mapping[str, ParamValue], joints: Sequence[str
     if a_attrs:
         block = _sub_one(block, re.compile(r"<position\b[^>]*/>"), a_attrs, f"<position> in class {SERVO_CLASS}")
     xml = xml[:start] + block + xml[end:]
+
+    if "gravity_scale" in params:
+        g = np.asarray(params["gravity_scale"], dtype=np.float64).reshape(-1)
+        if np.any(g != g[0]):
+            raise ExportError("gravity_scale must be one value for all joints")
+        gz = _fmt(-STANDARD_GRAVITY * float(g[0]))
+        xml = _sub_one(xml, re.compile(r"<option\b[^>]*/>"), {"gravity": f"0 0 {gz}"}, "<option>")
 
     for i, joint in enumerate(joints):
         j_attrs = {k: v[i] for k, v in per_joint.items() if k in JOINT_PARAMS}

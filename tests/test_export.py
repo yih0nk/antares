@@ -304,3 +304,21 @@ def test_exported_model_replays_identically_real_dataset(tmp_path):
     got = arm.replay(ep)
     assert got.shape == ref.shape == (len(ep), 6)
     np.testing.assert_allclose(got, ref, rtol=0, atol=1e-9)
+
+
+def test_gravity_scale_is_baked_into_option_and_replays_identically(tmp_path):
+    xml = MODEL_PATH.read_text()
+    assert bake_params(xml, {"kp": 50.0}).count("gravity=") == xml.count("gravity=")
+    baked = bake_params(xml, {"gravity_scale": 0.4})
+    assert re.search(r'<option\b[^>]*gravity="0 0 -3\.924', baked)
+    with pytest.raises(ExportError):
+        bake_params(xml, {"gravity_scale": [0.4, 1, 1, 1, 1, 1]})
+
+    lock = make_lock(params=FITTED.replace(gravity_scale=0.4))
+    out = export_mjcf(lock, tmp_path / "g.xml")
+    ep = synthetic_episode()
+    arm = load_exported_arm(out)
+    assert arm.params.gravity_scale == pytest.approx(0.4)
+    ref = Arm(params=lock.params).replay(ep)
+    np.testing.assert_allclose(arm.replay(ep), ref, rtol=0, atol=1e-9)
+    assert not np.allclose(Arm(params=FITTED).replay(ep), ref, atol=1e-4)
