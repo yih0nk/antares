@@ -153,6 +153,15 @@ def test_unchanged_arm_names_nothing():
     assert all(c.recovers_deg == 0.0 for c in d.changes)
 
 
+def test_lag_and_a_weaker_gain_together_are_both_named():
+    eps = make_episodes(TRUE.replace(latency_frames=3, kp=TRUE.kp * 0.5), seed=5)
+    d = diagnose(eps, lock_of(), simulate=toy_simulate)
+    assert d.explained, d.summary()
+    names = [c.name for c in d.causes]
+    assert "latency_frames" in names and {c.name: c for c in d.changes}["latency_frames"].value == 2
+    assert set(names) & {"kp", "kv", "damping"}  # the gain change is named too
+
+
 def test_drift_outside_the_dynamics_is_not_explained():
     """A sensor offset is not something the servo parameters can absorb."""
     eps = [Episode(e.index, e.fps, e.joint_names, e.state + 0.05, e.action)
