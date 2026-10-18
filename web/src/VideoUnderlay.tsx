@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useThree } from "@react-three/fiber";
 import * as THREE from "three";
-import { api, type CameraFit, type CameraInfo, type CameraJobEvent, type CameraProgressEvent } from "./api";
+import { api, type CameraFit, type CameraInfo, type CameraJobEvent, type CameraProgressEvent, pickCamera } from "./api";
 import type { Playhead } from "./Arm";
 
 // The dataset's own video drawn behind the 3D view. With a fitted camera (the
@@ -35,24 +35,28 @@ export type LineUp = {
   error?: string;
 };
 
-// Cameras of the dataset and the fits saved for the lock, refetched when the
-// underlay is turned on or `fitsRev` changes (a fit saved in the Camera panel).
-// `busy` (a calibration running) holds the automatic camera fit back.
+// The camera shown (of `cameras`, the dataset's, fetched once by the app) and
+// the fits saved for the lock, refetched when the underlay is turned on or
+// `fitsRev` changes (a fit saved in the Camera panel). `busy` (a calibration
+// running) holds the automatic camera fit back.
 export function useUnderlay(
   dataset: string,
+  cameras: CameraInfo[],
   episode: number | null,
   lock: string | null,
   on: boolean,
   fitsRev = 0,
   busy = false,
 ) {
-  const [cameras, setCameras] = useState<CameraInfo[]>([]);
   const [camera, setCamera] = useState("");
   const [fits, setFits] = useState<Record<string, CameraFit>>({});
   const [datasetFits, setDatasetFits] = useState<Record<string, CameraFit & { lock: string }>>({});
   // The dataset whose fits `datasetFits` holds, once they have arrived.
   const [datasetFitsFor, setDatasetFitsFor] = useState<string | null>(null);
-  const [delay, setDelay] = useState(0);
+  // The video's lag behind the joint log is a property of the recording, so
+  // it is kept per dataset and camera: switching camera (or dataset) starts
+  // from 0, and switching back finds the delay set before.
+  const [delays, setDelays] = useState<Record<string, number>>({});
   const [lineUp, setLineUp] = useState<LineUp | null>(null);
   const [lineUpRev, setLineUpRev] = useState(0);
   const tried = useRef(new Set<string>());
@@ -60,22 +64,15 @@ export function useUnderlay(
   useEffect(() => () => sourceRef.current?.close(), []);
   const rev = fitsRev + lineUpRev;
 
-  useEffect(() => {
-    if (!dataset) return;
-    let live = true;
-    setCameras([]);
-    api.cameras(dataset).then(
-      (cs) => {
-        if (!live) return;
-        setCameras(cs);
-        setCamera((cur) => (cs.some((c) => c.name === cur) ? cur : (cs.find((c) => c.fixed) ?? cs[0])?.name ?? ""));
-      },
-      () => live && setCameras([]),
-    );
-    return () => {
-      live = false;
-    };
-  }, [dataset]);
+  useEffect(() => setCamera((cur) => pickCamera(cameras, cur)), [cameras]);
+
+  const delayKey = `${dataset}|${camera}`;
+  const delay = delays[delayKey] ?? 0;
+  const setDelay = useCallback(
+    (next: number | ((d: number) => number)) =>
+      setDelays((ds) => ({ ...ds, [delayKey]: typeof next === "function" ? next(ds[delayKey] ?? 0) : next })),
+    [delayKey],
+  );
 
   useEffect(() => {
     if (!on || !lock) {
@@ -90,7 +87,7 @@ export function useUnderlay(
     return () => {
       live = false;
     };
-  }, [on, lock, camera, rev]);
+  }, [on, lock, rev]);
 
   useEffect(() => {
     if (!on || !dataset) {
@@ -110,20 +107,18 @@ export function useUnderlay(
     return () => {
       live = false;
     };
-  }, [on, dataset, camera, rev]);
+  }, [on, dataset, rev]);
 
   const info = cameras.find((c) => c.name === camera) ?? null;
   const fixed = !!info?.fixed;
+  // The lock's own fit of the camera, whatever dataset id it was saved with:
+  // the same choice as the Camera panel, so the two never disagree on
+  // whether the camera is fitted.
   const own = fixed ? fits[camera] : undefined;
   // Memoised so the pinned camera is only re-posed when the fit changes.
   const fit = useMemo(
-    () =>
-      own && (!own.dataset || own.dataset === dataset)
-        ? { ...own, lock: lock ?? undefined }
-        : fixed
-          ? datasetFits[camera] ?? null
-          : null,
-    [own, dataset, lock, fixed, datasetFits, camera],
+    () => (own ? { ...own, lock: lock ?? undefined } : fixed ? datasetFits[camera] ?? null : null),
+    [own, lock, fixed, datasetFits, camera],
   );
   // ---- automatic fit for a fixed camera no lock of the dataset has fitted ----
   // Once per dataset and camera per page load, so a stop or a failure is not retried.
@@ -171,17 +166,12 @@ export function useUnderlay(
     setLineUp((l) => (l ? { ...l, status: "cancelled" } : l));
   };
 
-  const underlay: Underlay | null =
-    on && info && episode != null
-      ? {
-          camera: info,
-          fit,
-          src: api.cameraClipUrl(dataset, info.name, episode),
-          delay,
-        }
-      : null;
+  // Memoised: the viewer re-poses its camera and re-seeks the video when it changes.
+  const underlay = useMemo<Underlay | null>(
+    () => (on && info && episode != null ? { camera: info, fit, src: api.cameraClipUrl(dataset, info.name, episode), delay } : null),
+    [on, info, episode, fit, dataset, delay],
+  );
   return {
-    cameras,
     camera,
     setCamera,
     delay,

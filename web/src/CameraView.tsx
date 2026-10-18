@@ -9,6 +9,7 @@ import {
   type ObjectsFit,
   type ObjectsJobEvent,
   type ObjectTrack,
+  pickCamera,
   type SceneFit,
   type SceneView,
 } from "./api";
@@ -23,6 +24,9 @@ import { Sparkline } from "./Charts";
 
 type Props = {
   dataset: string;
+  // The dataset's cameras (`useCameras`), fetched once by the app and shared
+  // with the video underlay.
+  cameras: CameraInfo[];
   episode: number | null;
   frame: number;
   playing: boolean;
@@ -80,8 +84,26 @@ const stageLabel = (ev?: CameraProgressEvent) => {
 const mm = (v: number | null | undefined) => (v == null || !isFinite(v) ? "--" : `${(v * 1000).toFixed(1)} mm`);
 const cm = (v: number) => `${(v * 100).toFixed(0)}`;
 
-export function CameraView({ dataset, episode, frame, playing, lock, busy, scene, onSceneChange, objects, onObjectsChange, track, onError, onFitSaved, fitsRev }: Props) {
+// The cameras in the dataset's info, fetched once per dataset for the Camera
+// panel and the video underlay (empty while they load or when there are none).
+export function useCameras(dataset: string): CameraInfo[] {
   const [cameras, setCameras] = useState<CameraInfo[]>([]);
+  useEffect(() => {
+    setCameras([]);
+    if (!dataset) return;
+    let live = true;
+    api.cameras(dataset).then(
+      (cs) => live && setCameras(cs),
+      () => live && setCameras([]),
+    );
+    return () => {
+      live = false;
+    };
+  }, [dataset]);
+  return cameras;
+}
+
+export function CameraView({ dataset, cameras, episode, frame, playing, lock, busy, scene, onSceneChange, objects, onObjectsChange, track, onError, onFitSaved, fitsRev }: Props) {
   const [objectsJob, setObjectsJob] = useState<ObjectsJob | null>(null);
   const objectsSourceRef = useRef<EventSource | null>(null);
   useEffect(() => () => objectsSourceRef.current?.close(), []);
@@ -99,24 +121,11 @@ export function CameraView({ dataset, episode, frame, playing, lock, busy, scene
   const sourceRef = useRef<EventSource | null>(null);
   useEffect(() => () => sourceRef.current?.close(), []);
 
-  // ---- cameras in the dataset's info -----------------------------------------
+  // ---- the camera shown: only a fixed one can be fitted ----------------------
   useEffect(() => {
-    if (!dataset) return;
-    let live = true;
-    setCameras([]);
     setOverlay(null);
-    api.cameras(dataset).then(
-      (cs) => {
-        if (!live) return;
-        setCameras(cs);
-        setCamera((cur) => (cs.some((c) => c.name === cur) ? cur : cs.find((c) => c.fixed)?.name ?? ""));
-      },
-      () => live && setCameras([]),
-    );
-    return () => {
-      live = false;
-    };
-  }, [dataset]);
+    setCamera((cur) => pickCamera(cameras.filter((c) => c.fixed), cur));
+  }, [cameras]);
 
   // ---- fits saved for the lock ------------------------------------------------
   const refreshFits = (name: string | null) => {

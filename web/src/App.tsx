@@ -31,7 +31,7 @@ import {
 } from "./api";
 import * as THREE from "three";
 import { Arm, compMaterial, ghostMaterial, policyDefaultMaterial, policyLockMaterial, realMaterial, type Playhead } from "./Arm";
-import { CameraView } from "./CameraView";
+import { CameraView, useCameras } from "./CameraView";
 import { SceneGeometry } from "./Scene";
 import { MatchCamera, useUnderlay, VideoBackdrop, type Underlay } from "./VideoUnderlay";
 import { ObjectMarker } from "./Objects";
@@ -874,9 +874,10 @@ export default function App() {
   const [videoOn, setVideoOn] = useState(false);
   const [videoError, setVideoError] = useState<string | null>(null);
   const [fitsRev, setFitsRev] = useState(0);
-  const video = useUnderlay(dataset, episode, cameraLock, videoOn, fitsRev, running);
+  const cameras = useCameras(dataset);
+  const video = useUnderlay(dataset, cameras, episode, cameraLock, videoOn, fitsRev, running);
   const underlay = video.underlay;
-  const videoAvail = video.cameras.length > 0;
+  const videoAvail = cameras.length > 0;
 
   const compareFrames = compareBase?.real_poses.length ?? 0;
   // ---- scene fit saved for the camera lock -----------------------------------
@@ -1279,9 +1280,9 @@ export default function App() {
             >
               Video
             </button>
-            {videoOn && video.cameras.length > 1 && (
+            {videoOn && cameras.length > 1 && (
               <select className="picker" value={video.camera} onChange={(e) => video.setCamera(e.target.value)} aria-label="Camera">
-                {video.cameras.map((c) => (
+                {cameras.map((c) => (
                   <option key={c.name} value={c.name}>
                     {c.name}
                   </option>
@@ -1583,6 +1584,7 @@ export default function App() {
 
         <CameraView
           dataset={dataset}
+          cameras={cameras}
           episode={episode}
           frame={frame}
           playing={playing}

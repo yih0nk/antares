@@ -340,6 +340,21 @@ export type CameraInfo = {
   fixed: boolean; // false for wrist cameras, which cannot be fitted
 };
 
+// The camera to show once a dataset's cameras are known: the one already
+// chosen if it is still there, else the first fixed one, else the first.
+// Shared by the Camera panel and the video underlay.
+export function pickCamera(cameras: CameraInfo[], current: string): string {
+  if (cameras.some((c) => c.name === current)) return current;
+  return (cameras.find((c) => c.fixed) ?? cameras[0])?.name ?? "";
+}
+
+// The clip format this browser plays, checked once: H.264 mp4 everywhere but
+// a Chromium build without H.264, which gets VP9 webm.
+const CLIP_FORMAT: "mp4" | "webm" =
+  typeof document !== "undefined" && document.createElement("video").canPlayType('video/mp4; codecs="avc1.42E01E"')
+    ? "mp4"
+    : "webm";
+
 // One fitted camera as saved in locks/<lock>.camera.json (per-frame arrays omitted).
 export type CameraFit = {
   camera: string;
@@ -853,10 +868,8 @@ export const api = {
     }).then((r) => json<{ job_id: string }>(r)),
   // One episode of a camera as a clip whose frame 0 is the episode's frame 0:
   // H.264 mp4, or VP9 webm for a browser without H.264.
-  cameraClipUrl: (dataset: string, camera: string, episode: number) => {
-    const format = document.createElement("video").canPlayType('video/mp4; codecs="avc1.42E01E"') ? "mp4" : "webm";
-    return `/api/camera/clip?${q({ dataset, camera, episode, format })}`;
-  },
+  cameraClipUrl: (dataset: string, camera: string, episode: number) =>
+    `/api/camera/clip?${q({ dataset, camera, episode, format: CLIP_FORMAT })}`,
   cameraOverlay: (dataset: string, camera: string, episode: number, frame: number, lock: string | null) =>
     fetch(
       `/api/camera/overlay?${q(lock ? { dataset, camera, episode, frame, lock } : { dataset, camera, episode, frame })}`,
