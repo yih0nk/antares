@@ -62,8 +62,9 @@ const TUNE_KEYS: { key: NumericParamKey; kind: "scale" | "frames"; hint: string 
 ];
 const TUNE_LOG_RANGE = 2; // the multiplier spans 10^-2 to 10^2
 const TUNE_FRAMES = 6;
-// What the server accepts as a lock name.
+// What the server accepts as a lock name (its check also refuses "..").
 const LOCK_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const validLockName = (s: string) => LOCK_NAME.test(s) && !s.includes("..");
 const PARAM_KEYS: NumericParamKey[] = ["kp", "kv", "damping", "armature", "frictionloss", "latency_frames", "forcerange", "gravity_scale", "deadband"];
 // Terms a lock omits at their defaults; the row shows only when the lock carries one.
 const OPTIONAL_DEFAULTS: Partial<Record<NumericParamKey, number>> = { gravity_scale: 1, deadband: 0 };
@@ -1378,7 +1379,7 @@ export default function App() {
                 aria-label="Name for the new lock"
                 spellCheck={false}
               />
-              <button className="cta" onClick={saveTuned} disabled={saving || !LOCK_NAME.test(saveName.trim())}>
+              <button className="cta" onClick={saveTuned} disabled={saving || !validLockName(saveName.trim())}>
                 {saving ? "Saving…" : "Save as lock"}
               </button>
             </div>
