@@ -257,6 +257,59 @@ def test_check_json_output(monkeypatch, capsys):
     assert set(out["per_joint"]) == set(JOINTS)
 
 
+def _diagnosis():
+    from antares.diagnose import FIELDS, Diagnosis, ParamChange
+
+    values = {"latency_frames": 1}
+    alone = {"latency_frames": 0.4}
+    changes = [ParamChange(f, values.get(f, 0 if f == "latency_frames" else 1.0),
+                           alone_deg=alone.get(f, 3.0), stale_deg=3.0) for f in FIELDS]
+    return Diagnosis(lock="unit-a", dataset="fake/robot", reference_deg=1.0, stale_deg=3.0,
+                     refit_deg=0.4, per_joint_stale={}, per_joint_refit={}, changes=changes,
+                     refit_episodes=[0, 2, 4], held_out_episodes=[1, 3, 5],
+                     n_evaluations=10, elapsed_s=0.1)
+
+
+def _patch_diagnose(monkeypatch, calls):
+    from antares import server
+
+    def run_diagnose(ds, lock, **kw):
+        calls.append((lock, kw))
+        return _diagnosis()
+
+    monkeypatch.setattr(server, "run_diagnose", run_diagnose)
+
+
+def test_check_explain_names_the_cause_on_drift(monkeypatch, capsys):
+    calls = []
+    _patch_check(monkeypatch, _check_result(3.0))
+    _patch_diagnose(monkeypatch, calls)
+    code = cli.main(["check", "fake/robot", "--lock", "unit-a", "--explain", "--last", "6",
+                     "--explain-evaluations", "50"])
+    assert code == 1  # explaining never changes the verdict
+    out = capsys.readouterr().out
+    assert "what changed" in out and "latency_frames  +1 frame" in out and "<- cause" in out
+    assert out.rstrip().splitlines()[-1].endswith("likely cause: latency_frames +1 frame (alone recovers 2.60 deg)")
+    assert calls == [("unit-a", {"last": 6, "max_evaluations": 50})]
+
+
+def test_check_explain_skips_a_passing_robot(monkeypatch, capsys):
+    calls = []
+    _patch_check(monkeypatch, _check_result(1.2))
+    _patch_diagnose(monkeypatch, calls)
+    assert cli.main(["check", "fake/robot", "--lock", "unit-a", "--explain"]) == 0
+    assert calls == [] and "what changed" not in capsys.readouterr().out
+
+
+def test_check_explain_json(monkeypatch, capsys):
+    _patch_check(monkeypatch, _check_result(3.0))
+    _patch_diagnose(monkeypatch, [])
+    assert cli.main(["check", "fake/robot", "--lock", "unit-a", "--explain", "--json"]) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["verdict"] == "drifted"
+    assert out["diagnosis"]["causes"] == ["latency_frames"]
+
+
 def test_check_missing_lock_or_dataset_exits_two(monkeypatch, capsys):
     from antares import server
 

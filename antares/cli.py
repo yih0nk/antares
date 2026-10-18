@@ -299,6 +299,27 @@ def _fmt(v, nd: int = 3) -> str:
     return "-" if v is None else f"{v:.{nd}f}"
 
 
+def _diagnosis_table(d) -> str:
+    """What each change found by the refit recovers when applied alone."""
+    causes = {c.name for c in d.causes}
+    rows = [
+        [c.name, c.change, _fmt(c.alone_deg), f"{c.recovers_deg:+.3f}", "<- cause" if c.name in causes else ""]
+        for c in d.changes
+    ]
+    rows.append(["all together", "", _fmt(d.refit_deg), f"{d.gap_deg:+.3f}", ""])
+    head = (
+        f"what changed (refit on episodes {_episode_list(d.refit_episodes)}, "
+        f"scored on {_episode_list(d.held_out_episodes)}; lock alone {d.stale_deg:.3f} deg):"
+    )
+    return head + "\n" + _table(["param", "change", "alone (deg)", "recovers", ""], rows)
+
+
+def _episode_list(indices: list[int]) -> str:
+    if len(indices) <= 6:
+        return ",".join(str(i) for i in indices)
+    return f"{indices[0]}..{indices[-1]} ({len(indices)})"
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     import json
     import os
@@ -324,8 +345,23 @@ def cmd_check(args: argparse.Namespace) -> int:
         print(f"error: {detail}", file=sys.stderr)
         return EXIT_USAGE
 
+    diagnosis = None
+    if args.explain and res.verdict == "drifted":
+        if not args.json:
+            print("drifted; refitting to find what changed...", file=sys.stderr, flush=True)
+        try:
+            diagnosis = server.run_diagnose(
+                ds, lock, last=args.last, max_evaluations=args.explain_evaluations
+            )
+        except Exception as e:  # noqa: BLE001 - the verdict still stands
+            detail = getattr(e, "detail", None) or f"{type(e).__name__}: {e}"
+            print(f"could not explain the drift: {detail}", file=sys.stderr)
+
     if args.json:
-        print(json.dumps(res.to_dict(), indent=2))
+        out = res.to_dict()
+        if diagnosis is not None:
+            out["diagnosis"] = diagnosis.to_dict()
+        print(json.dumps(out, indent=2))
     else:
         print(f"{res.dataset} vs lock {res.lock}: {res.n_episodes} episodes, {res.n_frames} frames")
         if res.per_joint:
@@ -344,6 +380,10 @@ def cmd_check(args: argparse.Namespace) -> int:
             )
             print(_table(["joint", "rmse (deg)", "reference", "limit", "status"], rows))
         print(res.summary())
+        if diagnosis is not None:
+            print()
+            print(_diagnosis_table(diagnosis))
+            print(diagnosis.summary())
 
     if res.verdict == "ok":
         return EXIT_PASS
@@ -815,6 +855,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--min-episodes", type=int, default=5,
                    help="fewer episodes than this is insufficient data, exit 2 (default 5)")
     p.add_argument("--json", action="store_true", help="print the CheckResult as JSON")
+    p.add_argument("--explain", action="store_true",
+                   help="on drift, refit and name the parameter change that explains it")
+    p.add_argument("--explain-evaluations", type=int, default=120, metavar="N",
+                   help="refit budget for --explain (default 120)")
     p.set_defaults(func=cmd_check)
 
 
