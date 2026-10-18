@@ -1142,10 +1142,12 @@ def replay(
     baseline: int = 0,
 ) -> dict:
     ds = get_dataset(dataset)
-    params = None
+    params = cmap = None
     if lock and not baseline:
-        params = params_from_dict(load_lock_dict(lock)["params"])
-    out = replay_episode(ds, episode, params)
+        lock_d = load_lock_dict(lock)
+        params = params_from_dict(lock_d["params"])
+        cmap = command_map_from_lock(lock_d)
+    out = replay_episode(ds, episode, params, cmap)
     out["lock"] = lock if (lock and not baseline) else None
     return out
 

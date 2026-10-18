@@ -1317,3 +1317,21 @@ def test_events_summary_endpoint(client, pick):
     assert s["energy_in_grasp_fraction"] > s["chance"] and s["lift"] > 1.0
     assert out["summary_held_out"]["n_episodes"] == 4
     assert client.get("/api/events", params={"dataset": PICK_DS, "lock": "ghost"}).status_code == 404
+
+
+SHIFT_MAP = {"gain": [1.0] * 6, "bias": [-2.0] * 6}  # FAKE_DS2 state = action - 2
+
+
+def test_replay_uses_lock_command_map(client, fakes):
+    write_lock(fakes, "unit-b", kp=50.0, dataset=FAKE_DS2, command_map=SHIFT_MAP)
+    write_lock(fakes, "unit-b-plain", kp=50.0, dataset=FAKE_DS2)
+    q = {"dataset": FAKE_DS2, "episode": 0}
+    mapped = client.get("/api/replay", params={**q, "lock": "unit-b"}).json()
+    plain = client.get("/api/replay", params={**q, "lock": "unit-b-plain"}).json()
+    assert mapped["command_map"] == SHIFT_MAP
+    assert plain["command_map"] is None
+    assert mapped["gap"]["overall_deg"] < 0.5 * plain["gap"]["overall_deg"]
+    # a later plain replay resets the shared arm to identity
+    again = client.get("/api/replay", params={**q, "lock": "unit-b-plain"}).json()
+    assert again["gap"]["overall_deg"] == plain["gap"]["overall_deg"]
+
