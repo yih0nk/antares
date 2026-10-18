@@ -14,10 +14,14 @@ tip is the MJCF's ``gripperframe`` site, between the jaws.
 
 Whether a grasp caught anything is read from the jaw: with an object between
 them the jaws stop open by the object's width; on a miss they close all the
-way. "All the way" is the dataset's own empty-closed level (the 1st
-percentile of the measured jaw and of the closed command), and the jaw is
-read just after it settles, before the operator has a chance to let go.
-The angle it stops at is a proxy for the object's width.
+way. "All the way" is the dataset's own empty-closed level of the measured
+jaw (its 1st percentile); the leader's closed command has a level of its
+own (the two arms are calibrated separately, so their units do not line
+up), and the command is only ever compared with that. The jaw is read just
+after it settles, before the operator has a chance to let go. The angle it
+stops at is a proxy for the object's width. A close the command undoes
+before the jaw could settle is a blip of the leader across the hysteresis
+band, not a grasp.
 
 Each close is then one of three kinds: a *pick* (it held something), a
 *miss* (it closed on nothing before anything was picked in that episode),
@@ -31,12 +35,9 @@ Pure kinematics: no dynamics and no lock are needed, only the dataset-unit
 
 from __future__ import annotations
 
-import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import mujoco
 import numpy as np
@@ -44,7 +45,7 @@ import numpy as np
 from antares import __version__
 from antares.data import Episode
 from antares.events import GripperThresholds, gripper_thresholds, gripper_transitions
-from antares.lock import LOCK_DIR, slug
+from antares.lock import JsonFile, now_iso, slug
 from antares.sim import GRIPPER_INDEX, UnitMap, load_model
 
 TASK_SUFFIX = ".task.json"
@@ -66,7 +67,9 @@ TIP_SITE = "gripperframe"
 HELD_GAP = 3.0
 
 #: The jaw is still closing for this long after the command flips; the stop
-#: position is read over the next ``JAW_WINDOW_S`` after it.
+#: position is read over the next ``JAW_WINDOW_S`` after it. A close the
+#: command undoes within ``SETTLE_S`` (a blip across the hysteresis band)
+#: is not a grasp, so the jaw is never read while it is still moving.
 SETTLE_S = 0.3
 JAW_WINDOW_S = 0.5
 
@@ -107,11 +110,12 @@ class Grasp:
     xyz: tuple[float, float, float]  # tip position at ``frame``, metres
     release_frame: int | None  # next flip back to open
     release_xyz: tuple[float, float, float] | None
-    jaw_gap: float  # measured jaw above the empty-closed level just after settling, dataset units
+    jaw_gap: float  # measured jaw above its empty-closed level just after settling, dataset units
     jaw_deg: float  # measured jaw angle just after settling, degrees
     held: bool  # jaw_gap >= the held threshold: an object stopped the jaw
     carried: bool = False  # held, released, and moved more than CARRY_M
     kind: str = "miss"  # "pick", "miss" or "idle"; see the module docstring
+    cmd_gap: float = float("nan")  # closed command above its own empty level over the same frames
 
     def to_dict(self) -> dict:
         return {
@@ -125,6 +129,7 @@ class Grasp:
             "held": self.held,
             "carried": self.carried,
             "kind": self.kind,
+            "cmd_gap": self.cmd_gap,
         }
 
 
@@ -145,19 +150,32 @@ def dataset_thresholds(episodes: Sequence[Episode]) -> GripperThresholds:
     return GripperThresholds(closed_below=mid - half, open_above=mid + half)
 
 
-def empty_level(episodes: Sequence[Episode], thr: GripperThresholds) -> float:
-    """Where the jaw sits when it closes on nothing, dataset units.
+@dataclass(frozen=True)
+class EmptyLevel:
+    """Where each arm's gripper sits when closed on nothing, dataset units.
 
-    The 1st percentile of the measured jaw and of the closed commands, pooled:
-    the measured jaw covers datasets with empty closes, the command covers
-    ones where every close held something but the leader was squeezed shut.
+    ``jaw`` is the follower's measured reading, ``cmd`` the leader's closed
+    command. The two arms are calibrated separately, so the levels can sit
+    a few units apart and each reading is only compared with its own.
     """
-    vals = []
-    for e in episodes:
-        cmd = np.asarray(e.action[:, GRIPPER_INDEX], dtype=np.float64)
-        vals.append(np.asarray(e.state[:, GRIPPER_INDEX], dtype=np.float64))
-        vals.append(cmd[cmd < thr.closed_below])
-    return float(np.percentile(np.concatenate(vals), 1.0))
+
+    jaw: float
+    cmd: float
+
+    def to_dict(self) -> dict[str, float]:
+        return {"jaw": self.jaw, "cmd": self.cmd}
+
+
+def empty_level(episodes: Sequence[Episode], thr: GripperThresholds) -> EmptyLevel:
+    """The 1st percentile of the measured jaw, and of the commands below
+    ``thr.closed_below`` (NaN when the command never closes)."""
+    jaw = np.concatenate([np.asarray(e.state[:, GRIPPER_INDEX], dtype=np.float64) for e in episodes])
+    cmd = np.concatenate([np.asarray(e.action[:, GRIPPER_INDEX], dtype=np.float64) for e in episodes])
+    closed = cmd[cmd < thr.closed_below]
+    return EmptyLevel(
+        jaw=float(np.percentile(jaw, 1.0)),
+        cmd=float(np.percentile(closed, 1.0)) if closed.size else float("nan"),
+    )
 
 
 def find_grasps(
@@ -165,7 +183,7 @@ def find_grasps(
     thr: GripperThresholds,
     tip: Tip,
     unit_map: UnitMap,
-    empty: float,
+    empty: EmptyLevel,
     held_gap: float = HELD_GAP,
 ) -> list[Grasp]:
     """Every grasp in ``episode``, paired with the release that follows it.
@@ -175,11 +193,15 @@ def find_grasps(
     it, whichever comes first.
 
     The jaw is read over :data:`JAW_WINDOW_S` starting :data:`SETTLE_S`
-    after the close, cut short by the release or the end of the episode
-    (at least one frame), and compared with ``empty`` (see :func:`empty_level`).
+    after the close, cut short by the release or the end of the episode,
+    and compared with ``empty.jaw`` (see :func:`empty_level`); the command
+    over the same frames is compared with ``empty.cmd``. A close that the
+    command undoes (or the episode ends) before :data:`SETTLE_S` has passed
+    is a blip, not a grasp: the jaw is never read before it has settled.
     """
     jaw = episode.state[:, GRIPPER_INDEX]
-    grasps, releases = gripper_transitions(episode.action[:, GRIPPER_INDEX], thr)
+    cmd = episode.action[:, GRIPPER_INDEX]
+    grasps, releases = gripper_transitions(cmd, thr)
     q = unit_map.to_rad(episode.state)
     settle = int(round(SETTLE_S * episode.fps))
     window = max(1, int(round(JAW_WINDOW_S * episode.fps)))
@@ -188,10 +210,12 @@ def find_grasps(
         later = releases[releases > g]
         r = int(later[0]) if later.size else None
         end = r if r is not None else len(episode)
-        start = min(g + settle, end - 1)
+        start = g + settle
+        if start >= end:
+            continue  # opened again (or the log ended) before the jaw could settle: a blip
         stop = min(start + window, end)
         hold = float(np.median(jaw[start:stop]))
-        gap = hold - empty
+        gap = hold - empty.jaw
         jaw_rad = float(np.median(q[start:stop, GRIPPER_INDEX]))
         if gap >= held_gap:
             # Letting go opens the jaw past where the object held it, even
@@ -209,6 +233,7 @@ def find_grasps(
                 jaw_gap=gap,
                 jaw_deg=float(np.degrees(jaw_rad)),
                 held=gap >= held_gap,
+                cmd_gap=float(np.median(cmd[start:stop])) - empty.cmd,
             )
         )
     picked = False
@@ -222,10 +247,6 @@ def find_grasps(
         picked = picked or gr.held
         out[i] = replace(gr, carried=carried, kind=kind)
     return out
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _stats(points: np.ndarray) -> dict[str, Any] | None:
@@ -242,12 +263,14 @@ def _stats(points: np.ndarray) -> dict[str, Any] | None:
 
 
 @dataclass
-class TaskDistribution:
+class TaskDistribution(JsonFile):
     """Where one dataset's objects were picked and placed, and where episodes start.
 
     Positions are the gripper tip in the arm's base frame, metres. Start
     poses are joint angles in radians (all six joints, gripper included).
     """
+
+    FILE_SUFFIX: ClassVar[str] = TASK_SUFFIX
 
     name: str
     dataset: str
@@ -256,8 +279,13 @@ class TaskDistribution:
     grasps: list[Grasp]
     start_q: np.ndarray  # (E, 6) rad
     episodes: list[int]
-    created_at: str = field(default_factory=_now_iso)
+    empty: EmptyLevel = EmptyLevel(float("nan"), float("nan"))
+    created_at: str = field(default_factory=now_iso)
     antares_version: str = __version__
+
+    @property
+    def file_stem(self) -> str:
+        return slug(self.name)
 
     @classmethod
     def from_episodes(
@@ -283,6 +311,7 @@ class TaskDistribution:
             grasps=grasps,
             start_q=np.stack([unit_map.to_rad(e.state[0]) for e in episodes]),
             episodes=[int(e.index) for e in episodes],
+            empty=empty,
         )
 
     # -- the clouds -----------------------------------------------------------
@@ -372,6 +401,7 @@ class TaskDistribution:
                 "closed_below": self.thresholds.closed_below,
                 "open_above": self.thresholds.open_above,
             },
+            "empty_level": self.empty.to_dict(),
             "grasps": [g.to_dict() for g in self.grasps],
             "start_q": self.start_q.tolist(),
             "episodes": self.episodes,
@@ -385,6 +415,7 @@ class TaskDistribution:
         def xyz(v):
             return None if v is None else tuple(float(x) for x in v)
 
+        e = d.get("empty_level") or {}
         return cls(
             name=str(d["name"]),
             dataset=str(d.get("dataset", "")),
@@ -405,32 +436,26 @@ class TaskDistribution:
                     held=bool(g["held"]),
                     carried=bool(g.get("carried", False)),
                     kind=str(g.get("kind", "pick" if g["held"] else "miss")),
+                    cmd_gap=float(g.get("cmd_gap", float("nan"))),
                 )
                 for g in d["grasps"]
             ],
             start_q=np.asarray(d["start_q"], dtype=np.float64).reshape(-1, 6),
             episodes=[int(i) for i in d["episodes"]],
+            empty=EmptyLevel(float(e.get("jaw", float("nan"))), float(e.get("cmd", float("nan")))),
             created_at=str(d.get("created_at", "")),
             antares_version=str(d.get("antares_version", "")),
         )
-
-    def default_path(self, lock_dir: Path = LOCK_DIR) -> Path:
-        return Path(lock_dir) / f"{slug(self.name)}{TASK_SUFFIX}"
-
-    def save(self, path: Path | None = None) -> Path:
-        path = Path(path) if path is not None else self.default_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(self.to_dict(), indent=2, sort_keys=True) + "\n")
-        return path
-
-    @classmethod
-    def load(cls, path: Path | str) -> TaskDistribution:
-        return cls.from_dict(json.loads(Path(path).read_text()))
 
 
 # --------------------------------------------------------------------------
 # scene
 # --------------------------------------------------------------------------
+
+
+def _vec(values: Sequence[float]) -> str:
+    """An MJCF vector attribute: space-separated, six significant digits."""
+    return " ".join(f"{x:.6g}" for x in values)
 
 
 def _resting(xyz: Sequence[float], size: float) -> np.ndarray:
@@ -452,14 +477,13 @@ def scene_xml(td: TaskDistribution, size: float = OBJECT_SIZE, mass: float = OBJ
     pick = _resting(picks.mean(axis=0), size)
     place = places.mean(axis=0) if len(places) else pick
     h = size / 2.0
-    f = lambda v: " ".join(f"{x:.6g}" for x in v)  # noqa: E731
     return (
-        f'    <body name="{OBJECT_BODY}" pos="{f(pick)}">\n'
+        f'    <body name="{OBJECT_BODY}" pos="{_vec(pick)}">\n'
         f'      <freejoint name="{OBJECT_JOINT}"/>\n'
         f'      <geom type="box" size="{h:.6g} {h:.6g} {h:.6g}" mass="{mass:.6g}" '
         f'friction="1 5e-3 1e-4" rgba="0.85 0.25 0.2 1"/>\n'
         f"    </body>\n"
-        f'    <site name="{PLACE_SITE}" pos="{f(place)}" size="{h:.6g}" type="sphere" rgba="0.2 0.8 0.3 0.4"/>\n'
+        f'    <site name="{PLACE_SITE}" pos="{_vec(place)}" size="{h:.6g}" type="sphere" rgba="0.2 0.8 0.3 0.4"/>\n'
     )
 
 

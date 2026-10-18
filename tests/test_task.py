@@ -3,7 +3,7 @@ import pytest
 
 from antares.data import Episode
 from antares.sim import JOINTS, UnitMap, load_model
-from antares.task import Tip, dataset_thresholds, empty_level, find_grasps
+from antares.task import SETTLE_S, Tip, dataset_thresholds, empty_level, find_grasps
 
 FPS = 30.0
 OPEN, SHUT = 80.0, 2.0
@@ -13,9 +13,14 @@ POSE_C = [-25.0, -15.0, 25.0, 35.0, 10.0]  # where it is put down
 
 
 def pick_place_episode(index=0, held_jaw=25.0):
-    """A -> B (open), close at B, carry to C, open at C, back to A."""
+    """A -> B (open), close at B, carry to C, open at C, back to A.
+
+    The follower is still shut from the previous episode when the recording
+    starts (its reading lags the open command for a few frames), so the
+    dataset has an empty-closed jaw reading even when every grasp holds."""
     segments = [
-        (POSE_A, OPEN, OPEN, 20),
+        (POSE_A, OPEN, SHUT, 3),
+        (POSE_A, OPEN, OPEN, 17),
         (POSE_B, OPEN, OPEN, 20),
         (POSE_B, SHUT, held_jaw, 20),  # grasp at frame 40
         (POSE_C, SHUT, held_jaw, 20),
@@ -83,12 +88,59 @@ def test_held_and_missed_grasps(tip, unit_map):
     missed = pick_place_episode(1, held_jaw=SHUT + 0.5)
     thr = dataset_thresholds([held, missed])
     empty = empty_level([held, missed], thr)
-    assert empty == pytest.approx(SHUT)
+    assert empty.jaw == pytest.approx(SHUT) and empty.cmd == pytest.approx(SHUT)
     (g,) = find_grasps(held, thr, tip, unit_map, empty)
-    assert g.held and g.jaw_gap == pytest.approx(25.0 - SHUT)
+    assert g.held and g.jaw_gap == pytest.approx(25.0 - SHUT) and g.cmd_gap == pytest.approx(0.0)
     assert g.jaw_deg == pytest.approx(np.degrees(unit_map.to_rad(np.array([0, 0, 0, 0, 0, 25.0]))[5]))
     (m,) = find_grasps(missed, thr, tip, unit_map, empty)
     assert not m.held and m.jaw_gap == pytest.approx(0.5)
+
+
+def test_leader_and_follower_closed_levels_are_not_pooled(tip, unit_map):
+    """The leader's closed command sits 5 units below the follower's physical
+    closed reading (separate calibrations). An empty close must be a miss,
+    not a pick 5 units above a pooled level."""
+    cmd_shut, jaw_shut = 0.0, 5.0
+
+    def episode(index, held_jaw):
+        return _segments_episode(index, [
+            (POSE_A, OPEN, OPEN, 20),
+            (POSE_B, OPEN, OPEN, 20),
+            (POSE_B, cmd_shut, held_jaw, 20),
+            (POSE_C, cmd_shut, held_jaw, 20),
+            (POSE_C, OPEN, OPEN, 20),
+            (POSE_A, OPEN, OPEN, 20),
+        ])
+
+    held, empty_close = episode(0, 25.0), episode(1, jaw_shut)
+    thr = dataset_thresholds([held, empty_close])
+    empty = empty_level([held, empty_close], thr)
+    assert empty.jaw == pytest.approx(jaw_shut) and empty.cmd == pytest.approx(cmd_shut)
+    (m,) = find_grasps(empty_close, thr, tip, unit_map, empty)
+    assert not m.held and m.jaw_gap == pytest.approx(0.0) and m.cmd_gap == pytest.approx(0.0)
+    (g,) = find_grasps(held, thr, tip, unit_map, empty)
+    assert g.held and g.jaw_gap == pytest.approx(25.0 - jaw_shut)
+
+
+def test_one_frame_command_blip_is_not_a_grasp(tip, unit_map):
+    """A command that crosses the hysteresis band for one frame and flips
+    back must not be read as a grasp (the jaw never moved)."""
+    real = pick_place_episode(0)
+    blip = _segments_episode(1, [
+        (POSE_A, OPEN, OPEN, 20),
+        (POSE_B, SHUT, OPEN, 1),  # the leader flickers shut for one frame
+        (POSE_B, OPEN, OPEN, 40),
+    ])
+    thr = dataset_thresholds([real, blip])
+    empty = empty_level([real, blip], thr)
+    assert find_grasps(blip, thr, tip, unit_map, empty) == []
+    # anything shorter than the settle time is a blip too; one frame longer is a grasp
+    too_short = int(round(SETTLE_S * FPS))
+    short = _segments_episode(2, [(POSE_A, OPEN, OPEN, 20), (POSE_B, SHUT, OPEN, too_short), (POSE_B, OPEN, OPEN, 40)])
+    assert find_grasps(short, thr, tip, unit_map, empty) == []
+    long = _segments_episode(3, [(POSE_A, OPEN, OPEN, 20), (POSE_B, SHUT, SHUT, too_short + 1), (POSE_B, OPEN, OPEN, 40)])
+    (g,) = find_grasps(long, thr, tip, unit_map, empty)
+    assert g.frame == 20 and g.release_frame == 20 + too_short + 1 and not g.held and g.kind == "miss"
 
 
 def test_distribution_clouds_summary_and_roundtrip(tmp_path, tip, unit_map):
@@ -107,7 +159,9 @@ def test_distribution_clouds_summary_and_roundtrip(tmp_path, tip, unit_map):
     path = td.save(tmp_path / "toy.task.json")
     back = TaskDistribution.load(path)
     assert back.to_dict() == td.to_dict()
+    assert back.empty == td.empty and back.to_dict()["empty_level"] == {"jaw": SHUT, "cmd": SHUT}
     assert td.default_path(tmp_path).name == "toy.task.json"
+    assert td.default_path().parent.name == "locks"
 
 
 def test_sample_draws_near_logged_points():
