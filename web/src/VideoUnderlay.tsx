@@ -52,6 +52,8 @@ export function useUnderlay(
 ) {
   const [camera, setCamera] = useState("");
   const [fits, setFits] = useState<Record<string, CameraFit>>({});
+  // The lock whose fits `fits` holds, once they have arrived.
+  const [fitsFor, setFitsFor] = useState<string | null>(null);
   const [datasetFits, setDatasetFits] = useState<Record<string, CameraFit & { lock: string }>>({});
   // The dataset whose fits `datasetFits` holds, once they have arrived.
   const [datasetFitsFor, setDatasetFitsFor] = useState<string | null>(null);
@@ -79,11 +81,16 @@ export function useUnderlay(
   useEffect(() => {
     if (!on || !lock) {
       setFits({});
+      setFitsFor(null);
       return;
     }
     let live = true;
     api.cameraFits(lock).then(
-      (r) => live && setFits(r.cameras),
+      (r) => {
+        if (!live) return;
+        setFits(r.cameras);
+        setFitsFor(lock);
+      },
       () => live && setFits({}),
     );
     return () => {
@@ -116,11 +123,12 @@ export function useUnderlay(
   // The lock's own fit of the camera, whatever dataset id it was saved with:
   // the same choice as the Camera panel, so the two never disagree on
   // whether the camera is fitted.
-  const own = fixed ? fits[camera] : undefined;
+  // Fits fetched for another lock or dataset (just after a switch) are not used.
+  const own = fixed && fitsFor === lock ? fits[camera] : undefined;
   // Memoised so the pinned camera is only re-posed when the fit changes.
   const fit = useMemo(
-    () => (own ? { ...own, lock: lock ?? undefined } : fixed ? datasetFits[camera] ?? null : null),
-    [own, lock, fixed, datasetFits, camera],
+    () => (own ? { ...own, lock: lock ?? undefined } : fixed && datasetFitsFor === dataset ? datasetFits[camera] ?? null : null),
+    [own, lock, fixed, datasetFits, datasetFitsFor, dataset, camera],
   );
   // ---- automatic fit for a fixed camera no lock of the dataset has fitted ----
   // Once per dataset and camera per page load, so a stop or a failure is not retried.

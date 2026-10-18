@@ -84,23 +84,27 @@ const stageLabel = (ev?: CameraProgressEvent) => {
 const mm = (v: number | null | undefined) => (v == null || !isFinite(v) ? "--" : `${(v * 1000).toFixed(1)} mm`);
 const cm = (v: number) => `${(v * 100).toFixed(0)}`;
 
+const NO_CAMERAS: CameraInfo[] = [];
+
 // The cameras in the dataset's info, fetched once per dataset for the Camera
 // panel and the video underlay (empty while they load or when there are none).
 export function useCameras(dataset: string): CameraInfo[] {
-  const [cameras, setCameras] = useState<CameraInfo[]>([]);
+  // Kept with the dataset they belong to, so right after a dataset switch the
+  // new dataset is never paired with the old one's cameras (and a clip or
+  // overlay asked for with a camera it does not have).
+  const [got, setGot] = useState<{ dataset: string; cameras: CameraInfo[] } | null>(null);
   useEffect(() => {
-    setCameras([]);
     if (!dataset) return;
     let live = true;
     api.cameras(dataset).then(
-      (cs) => live && setCameras(cs),
-      () => live && setCameras([]),
+      (cs) => live && setGot({ dataset, cameras: cs }),
+      () => live && setGot({ dataset, cameras: NO_CAMERAS }),
     );
     return () => {
       live = false;
     };
   }, [dataset]);
-  return cameras;
+  return got && got.dataset === dataset ? got.cameras : NO_CAMERAS;
 }
 
 export function CameraView({ dataset, cameras, episode, frame, playing, lock, busy, scene, onSceneChange, objects, onObjectsChange, track, onError, onFitSaved, fitsRev }: Props) {
