@@ -706,6 +706,28 @@ bimanual or non-SO arms (14).
   below the fleet median. Score outliers are kept out of the cross matrix so
   one unexplained arm does not dominate it.
 
+#### Fleet dashboard
+
+The UI's **Fleet** toggle (top bar, next to Viewer) is the one screen for a
+company with many arms: stat tiles (robots, median gap closed, robots drifted
+at their last check, robots never checked) over a sortable table with one row
+per lock in the lock directory: dataset, calibration date, default → calibrated
+held-out error, gap closed, fitted latency in frames and ms, the last `antares
+check` (date, verdict, score against its limit), the trend of those checks in
+deg/day with its r², the worst body joint after calibration, and the pinned
+parameters when a seeded lock records them. Clicking a row expands it to a
+sparkline of every check's score over time against the lock's reference and
+limit, and the per-joint error of the last check next to the lock's own. All of
+it comes from one route:
+
+```sh
+curl localhost:8000/api/dashboard   # {"robots": [...], "fleet": <fleet.json summary or null>, "generated_at": ...}
+```
+
+Each robot joins the lock with its `.drift.json` verdict, whether the fleet
+scan produced it, and its latest check and trend from the check history (the
+view fetches `/api/history/<lock>` on expand; a 404 means never checked).
+
 
 ## Sensor calibration
 
