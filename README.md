@@ -68,6 +68,13 @@ Or build the UI once (`cd web && npm run build`) and `antares serve` alone
 serves it on :8000. The `video` extra is for the camera, scene and object
 fits (PyAV, OpenCV, SciPy); `policy` is torch for the state policy.
 
+Offline (a demo with no network, or behind a captive portal): open each
+dataset and camera view once while online, then run `antares serve
+--offline` from the repo root. It reads datasets and videos only from the
+local Hugging Face cache; without the flag a Hub error still falls back to
+the cache, but each request waits on the network first. Locks are read from
+`./locks` (or `ANTARES_LOCK_DIR`).
+
 In the viewer the white arm is the logged robot and the blue ghost is the
 simulator replaying the same commands. Pick an episode, scrub the timeline,
 switch the ghost between the default sim and a saved lock, or press
