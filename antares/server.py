@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import io
 import base64
+import importlib
 import json
 import os
 import re
@@ -553,20 +554,40 @@ def command_map_from_lock(lock: dict):
     return CommandMap.from_dict(d)
 
 
+def unit_map_from_lock(lock: dict):
+    """The UnitMap a lock's ``calibration`` block (the follower's LeRobot
+    calibration, :mod:`antares.lerobot_calib`) was fitted with, or None for
+    a lock on the model-derived map."""
+    rec = lock.get("calibration")
+    if not rec:
+        return None
+    from antares.lerobot_calib import unit_map_from_record
+
+    model = getattr(get_arm(check_robot(lock.get("robot"))), "model", None)
+    return unit_map_from_record(rec, model)
+
+
 @contextmanager
-def _command_map(arm, cmap):
-    """Use ``cmap`` on the shared ``arm`` for the block, then restore identity
-    so callers that never set one keep the plain mapping."""
-    if cmap is None:
+def _command_map(arm, cmap, unit_map=None):
+    """Use ``cmap`` (and ``unit_map``, a lock's calibration-derived map) on
+    the shared ``arm`` for the block, then restore identity and the arm's
+    own map so callers that never set one keep the plain mapping."""
+    if cmap is None and unit_map is None:
         yield
         return
     from antares.sim import CommandMap
 
-    arm.command_map = cmap
+    prev_unit_map = getattr(arm, "unit_map", None)
+    if cmap is not None:
+        arm.command_map = cmap
+    if unit_map is not None:
+        arm.unit_map = unit_map
     try:
         yield
     finally:
         arm.command_map = CommandMap.identity()
+        if unit_map is not None:
+            arm.unit_map = prev_unit_map
 
 
 def lock_simulate(lock: dict):
@@ -575,12 +596,13 @@ def lock_simulate(lock: dict):
     has neither. For refits warm-started from a lock: the dynamics move, the
     sensor calibration and the model do not."""
     cmap = command_map_from_lock(lock)
+    unit_map = unit_map_from_lock(lock)
     robot = check_robot(lock.get("robot"))
-    if cmap is None and robot == DEFAULT_ROBOT:
+    if cmap is None and unit_map is None and robot == DEFAULT_ROBOT:
         return None
     from antares.calibrate import default_simulate
 
-    return default_simulate(cmap, robot=robot)
+    return default_simulate(cmap, robot=robot, **({"unit_map": unit_map} if unit_map is not None else {}))
 
 
 def mesh_dir(robot: str | None = None) -> Path:
@@ -593,11 +615,15 @@ def _rounded(a: np.ndarray) -> list:
     return np.round(np.asarray(a, dtype=np.float64), ROUND).tolist()
 
 
-def replay_episode(ds: Dataset, episode: int, params=None, command_map=None, robot: str | None = None) -> dict:
+def replay_episode(
+    ds: Dataset, episode: int, params=None, command_map=None, robot: str | None = None, unit_map=None
+) -> dict:
     """Real FK + sim replay for one episode. Angles in degrees, poses (T,nbody,7).
 
     ``command_map`` (a CommandMap, or None for identity) corrects the commands.
     ``robot`` overrides the model (default: the one for the dataset's family).
+    ``unit_map`` (a UnitMap, or None for the model's) is a lock's
+    calibration-derived map (``unit_map_from_lock``).
     """
     from antares.gap import tracking_error
     from antares.sim import JOINTS
@@ -607,7 +633,7 @@ def replay_episode(ds: Dataset, episode: int, params=None, command_map=None, rob
         params = default_params()
     robot = check_robot(robot or dataset_robot(ds))
     arm = get_arm(robot)
-    with arm_lock(robot), _command_map(arm, command_map):
+    with arm_lock(robot), _command_map(arm, command_map, unit_map):
         arm.apply(params)
         real_q = np.asarray(arm.real_q(ep))
         sim_q = np.asarray(arm.replay(ep))
@@ -624,6 +650,7 @@ def replay_episode(ds: Dataset, episode: int, params=None, command_map=None, rob
         "body_names": body_names,
         "params": params.to_dict(),
         "command_map": None if command_map is None else command_map.to_dict(),
+        "unit_map": None if unit_map is None else unit_map.to_dict(),
         "real_q": _rounded(np.degrees(real_q)),
         "sim_q": _rounded(np.degrees(sim_q)),
         "real_poses": _rounded(real_poses),
@@ -817,10 +844,77 @@ def list_lock_dicts() -> list[dict]:
 
 
 def load_lock_dict(name: str, lock_dir: Path | str | None = None) -> dict:
+    name = resolve_lock_ref(name, lock_dir)  # @<robot> -> its active lock
     p = _lock_path(name, lock_dir)
     if not p.is_file():
         raise HTTPException(status_code=404, detail=f"no lock named {name!r}")
     return json.loads(p.read_text())
+
+
+# Robot registry (``LOCK_DIR/registry.json``): one id per physical robot, a
+# lineage of its locks and the active one. ``@<robot>`` stands for the
+# active lock wherever a lock name is accepted; every read goes through
+# ``resolve_lock_ref`` so an unregistered lock name passes through unchanged.
+
+
+def registry_path(lock_dir: Path | str | None = None) -> Path:
+    from antares.registry import registry_path as _rp
+
+    return _rp(lock_dir if lock_dir is not None else LOCK_DIR)
+
+
+def load_registry(lock_dir: Path | str | None = None):
+    """The registry in ``lock_dir`` (default LOCK_DIR); a missing file is empty."""
+    from antares.registry import Registry, RegistryError
+
+    try:
+        return Registry.load(registry_path(lock_dir))
+    except RegistryError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def resolve_lock_ref(ref: str, lock_dir: Path | str | None = None) -> str:
+    """A lock name (or path) passes through; ``@<robot>`` becomes the robot's
+    active lock name, 404 when the robot is unknown or has no active lock."""
+    from antares.registry import RegistryError, UnknownRobot, is_robot_ref
+
+    if not is_robot_ref(ref):
+        return ref
+    try:
+        return load_registry(lock_dir).resolve(ref)
+    except UnknownRobot as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RegistryError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+def register_lock(
+    robot_id: str,
+    lock: Any,
+    *,
+    activate: bool | None = None,
+    note: str | None = None,
+    max_regression: float | None = None,
+) -> dict:
+    """Register ``lock`` (a name, dict or RobotLock) for ``robot_id`` in
+    LOCK_DIR's registry, save, and return the ``RegistrationResult`` dict."""
+    from antares.registry import DEFAULT_MAX_REGRESSION, RegistryError
+
+    reg = load_registry()
+    try:
+        res = reg.register(
+            robot_id,
+            lock,
+            activate=activate,
+            note=note,
+            max_regression=DEFAULT_MAX_REGRESSION if max_regression is None else max_regression,
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RegistryError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    reg.save()
+    return res.to_dict()
 
 
 def save_lock(lock) -> Path:
@@ -847,11 +941,38 @@ def export_lock_xml(name: str) -> bytes:
         return export_mjcf(lock, Path(tmp) / f"{lock.name}.xml", bundle_assets=False).read_bytes()
 
 
-def export_lock_zip(name: str) -> bytes:
-    """``<name>/`` with the MJCF, sidecar, scene.xml and STL meshes, zipped."""
+def export_lock_zip(name: str, targets: list[str] | tuple[str, ...] = (), fps: float | None = None) -> bytes:
+    """``<name>/`` with the MJCF, sidecar, scene.xml and STL meshes, zipped,
+    plus each extra export target's files (``antares.export_targets.TARGETS``)."""
     from antares.export import export_zip
 
-    return export_zip(load_lock(name))
+    return export_zip(load_lock(name), targets=targets, fps=fps)
+
+
+def export_lock_target(name: str, target: str, fps: float | None = None):
+    """One non-MJCF export target rendered for ``name`` (a ``TargetExport``);
+    DR ranges are read from ``LOCK_DIR/<name>.dr.json`` when present."""
+    from antares.export_targets import TargetExportError, render
+
+    try:
+        return render(load_lock(name), target, fps=fps, lock_dir=LOCK_DIR)
+    except TargetExportError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+def parse_export_targets(targets: str | None) -> list[str]:
+    """``?targets=`` of the zip route: ``all``, a comma list of targets, or empty."""
+    from antares.export_targets import TARGETS
+
+    if not targets:
+        return []
+    if targets == "all":
+        return list(TARGETS)
+    wanted = [t.strip() for t in targets.split(",") if t.strip()]
+    unknown = [t for t in wanted if t not in TARGETS]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"unknown export targets {unknown}; known: {list(TARGETS)} or all")
+    return wanted
 
 
 def lock_summary(lock: dict) -> dict:
@@ -960,6 +1081,7 @@ def run_drift(
     """Sliding-window refits of ``lock_name`` over ``ds``; saves and returns (DriftScan, path)."""
     from antares.drift import drift_scan
 
+    lock_name = resolve_lock_ref(lock_name)
     lock = load_lock(lock_name)
     path = _drift_path(lock_name)
     sim = simulate_for(dataset_robot(ds))
@@ -1138,6 +1260,8 @@ def job_status_dict(job: Job) -> dict:
             out["lock"] = job.lock
         if job.error is not None:
             out["error"] = job.error
+        if getattr(job, "registration", None) is not None:  # calibrate with robot_id
+            out["registration"] = job.registration
     return out
 
 
@@ -1164,6 +1288,9 @@ def run_calibration(
     fit_sensor: bool = False,
     sensor_mode: str = "sim",
     n_seeds: int = 1,
+    calibration_path: str | Path | None = None,
+    robot_id: str | None = None,
+    robot_type: str = "so101_follower",
 ) -> tuple[Any, dict, Path]:
     """Calibrate on ``ds``, save a lock, return (CalibrationResult, lock dict, path).
 
@@ -1179,6 +1306,13 @@ def run_calibration(
     with the dynamics-only fit for comparison. ``sensor_mode`` is ``"sim"``
     (fit through the sim, alternating) or ``"kinematic"`` (pre-fit from
     still frames, then frozen).
+
+    ``calibration_path`` (a LeRobot calibration file) or ``robot_id`` (the
+    ``--robot.id`` LeRobot saved it under, with ``robot_type``) replaces the
+    model-derived unit map with the follower's own tick-to-angle map for
+    the replay and records it in the lock's ``calibration`` block
+    (:mod:`antares.lerobot_calib`). With ``fit_sensor`` the map fit starts
+    from that calibration's prior.
     """
     from antares.calibrate import calibrate, split_episodes
 
@@ -1187,6 +1321,17 @@ def run_calibration(
     if name is not None:
         _lock_path(name)  # validate the name before spending minutes fitting
     robot = check_robot(robot or dataset_robot(ds))
+    unit_map = cal_record = cal_prior = None
+    # An explicit file must exist; a bare robot id is looked up opportunistically.
+    calib = resolve_calibration(calibration_path, robot_id, robot_type, strict=calibration_path is not None)
+    if calib is not None:
+        from antares.lerobot_calib import calibration_record, command_map_prior, unit_map_from_calibration
+
+        calib_d, cal_path = calib
+        model = get_arm(robot).model
+        unit_map = unit_map_from_calibration(calib_d, model)
+        cal_prior = command_map_prior(calib_d, model)
+        cal_record = calibration_record(calib_d, model, path=cal_path, robot_id=robot_id, robot_type=robot_type)
     train, eval_ = split_episodes(ds.episodes, n_train, n_eval, seed=seed)
     extra: dict[str, Any] = {}
     if per_joint:
@@ -1198,12 +1343,14 @@ def run_calibration(
     if fit_sensor:
         from antares.sensor import calibrate_with_sensor
 
-        if robot != DEFAULT_ROBOT:
+        if robot != DEFAULT_ROBOT or unit_map is not None:
             # The sensor fitter builds its own SO-101 arm by default; give it
-            # one of this model instead.
+            # one of this model (and of this arm's unit map) instead.
             from antares.sensor import sensor_simulate
 
-            extra["simulate"] = sensor_simulate(robot)
+            extra["simulate"] = sensor_simulate(robot, unit_map=unit_map)
+        if cal_prior is not None:
+            extra["prior"] = cal_prior
         out = calibrate_with_sensor(
             train,
             eval_,
@@ -1220,9 +1367,14 @@ def run_calibration(
             robot=robot,
             command_map={**out.command_map.to_dict(), "mode": sensor_mode},
             dynamics_only=out.dynamics_only.to_dict(),
+            **({"calibration": cal_record} if cal_record is not None else {}),
         )
         return out.result, lock.to_dict(), save_lock(lock)
     sim = simulate_for(robot)
+    if unit_map is not None:
+        from antares.calibrate import default_simulate
+
+        sim = default_simulate(robot=robot, unit_map=unit_map)
     if sim is not None:
         extra["simulate"] = sim
     result = calibrate(
@@ -1235,9 +1387,47 @@ def run_calibration(
         should_stop=should_stop,
         **extra,
     )
-    lock = build_lock(ds, train, result, name, robot=robot)
+    lock = build_lock(ds, train, result, name, robot=robot,
+                      **({"calibration": cal_record} if cal_record is not None else {}))
     path = save_lock(lock)
     return result, lock.to_dict(), path
+
+
+def resolve_calibration(
+    calibration_path, robot_id: str | None, robot_type: str = "so101_follower", *, strict: bool = True
+):
+    """``(calibration, path)`` from an explicit LeRobot calibration file or from
+    the robot id LeRobot saved it under; None when neither is given. 404 when
+    the id has no file, 400 when the file does not parse.
+
+    With ``strict=False`` an id without a file is not an error: None comes
+    back and the caller proceeds on the model's unit map. ``calibrate`` uses
+    that, because ``robot_id`` also names the robot in the registry and a
+    registered robot need not have a LeRobot calibration on this machine."""
+    if calibration_path is None and not robot_id:
+        return None
+    from antares.lerobot_calib import calibration_dirs, find_calibration, load_calibration
+
+    path = Path(calibration_path) if calibration_path is not None else None
+    if path is None:
+        try:
+            path = find_calibration(robot_id, robot_type)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        if path is None and not strict:
+            return None
+        if path is None:
+            looked = ", ".join(str(d) for d in calibration_dirs(robot_type))
+            raise HTTPException(
+                status_code=404,
+                detail=f"no LeRobot calibration named {robot_id!r} for {robot_type} (looked in {looked})",
+            )
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail=f"no calibration file {path}")
+    try:
+        return load_calibration(path), path
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"{path}: {e}")
 
 
 def _job_worker(job: Job, req: "CalibrateRequest") -> None:
@@ -1262,10 +1452,16 @@ def _job_worker(job: Job, req: "CalibrateRequest") -> None:
             fit_sensor=req.fit_sensor,
             sensor_mode=req.sensor_mode,
             n_seeds=req.n_seeds,
+            calibration_path=req.calibration_path,
+            robot_id=req.robot_id,
+            robot_type=req.robot_type,
         )
         result_d = result.to_dict()
-        job.push({"type": "done", "lock": lock, "result": result_d})
-        job.finish("done", result=result_d, lock=lock)
+        extra: dict[str, Any] = {}
+        if req.robot_id:
+            extra["registration"] = register_lock(req.robot_id, lock, activate=req.activate)
+        job.push({"type": "done", "lock": lock, "result": result_d, **extra})
+        job.finish("done", result=result_d, lock=lock, **extra)
     except Exception as e:  # noqa: BLE001 - report to the client
         job_fail(job, e)
 
@@ -1295,6 +1491,7 @@ def run_dr(
         raise HTTPException(status_code=400, detail="n_fits must be >= 1")
     if n_train < 1:
         raise HTTPException(status_code=400, detail="n_train must be >= 1")
+    lock_name = resolve_lock_ref(lock_name)
     name = name or lock_name
     _dr_path(name)  # validate the name before spending time fitting
     lock = load_lock_dict(lock_name)
@@ -1440,7 +1637,7 @@ def run_check(
         return np.asarray(arm.real_q(ep)), np.asarray(arm.replay(ep))
 
     try:
-        with arm_lock(robot), _command_map(arm, command_map_from_lock(lock_d)):
+        with arm_lock(robot), _command_map(arm, command_map_from_lock(lock_d), unit_map_from_lock(lock_d)):
             return check(
                 ds.episodes,
                 lock_d,
@@ -1460,7 +1657,7 @@ def run_diagnose(
     lock: str | dict,
     *,
     last: int | None = None,
-    max_evaluations: int = 240,
+    max_evaluations: int = 300,
     seed: int = 0,
     should_stop: Callable[[], bool] | None = None,
     on_progress: Callable[[int, float], None] | None = None,
@@ -1660,6 +1857,31 @@ def datasets_validate(dataset: str = Query(...)) -> dict:
     }
 
 
+@app.get("/api/datasets/calibration-check")
+def datasets_calibration_check(
+    dataset: str = Query(...),
+    calibration_path: str | None = Query(None, description="a LeRobot calibration file"),
+    robot_id: str | None = Query(None, description="the --robot.id LeRobot saved the calibration under"),
+    robot_type: str = Query("so101_follower"),
+    robot: str | None = Query(None, description="override the sim model (default: the dataset's family)"),
+) -> dict:
+    """The model's assumed unit map against this arm's LeRobot calibration,
+    joint by joint (degrees at -100/0/+100, flagged over 2 deg). 400 when
+    neither ``calibration_path`` nor ``robot_id`` is given."""
+    from antares.lerobot_calib import calibration_check, file_sha256
+
+    calib = resolve_calibration(calibration_path, robot_id, robot_type)
+    if calib is None:
+        raise HTTPException(status_code=400, detail="give calibration_path or robot_id")
+    calib_d, path = calib
+    ds = get_dataset(dataset)
+    robot = check_robot(robot or dataset_robot(ds))
+    out = calibration_check(calib_d, get_arm(robot).model)
+    out.update(dataset=ds.repo_id, robot=robot, source=str(path), sha256=file_sha256(path),
+               robot_id=robot_id, robot_type=robot_type)
+    return out
+
+
 @app.post("/api/datasets/upload")
 def datasets_upload(
     file: UploadFile = File(..., description="a .zip of a LeRobot dataset directory, or one .parquet"),
@@ -1732,12 +1954,13 @@ def replay(
     robot: str | None = Query(None, description="override the sim model (default: the dataset's family)"),
 ) -> dict:
     ds = get_dataset(dataset)
-    params = cmap = None
+    params = cmap = unit_map = None
     if lock and not baseline:
         lock_d = load_lock_dict(lock)
         params = params_from_dict(lock_d["params"])
         cmap = command_map_from_lock(lock_d)
-    out = replay_episode(ds, episode, params, cmap, robot=robot)
+        unit_map = unit_map_from_lock(lock_d)
+    out = replay_episode(ds, episode, params, cmap, robot=robot, unit_map=unit_map)
     out["lock"] = lock if (lock and not baseline) else None
     return out
 
@@ -1833,12 +2056,29 @@ class CalibrateRequest(BaseModel):
     sensor_mode: Literal["sim", "kinematic"] = "sim"
     # Sim model override (registry name); default: the dataset's family.
     robot: str | None = None
+    # The physical robot's id (LeRobot's --robot.id, e.g. "arm_a"). Two effects:
+    # the follower's LeRobot calibration saved under it is used as the unit map
+    # when such a file exists, and the saved lock is registered for it in
+    # locks/registry.json and activated by the registry's rule.
+    robot_id: str | None = None
+    # A calibration file given explicitly (takes precedence over the lookup).
+    calibration_path: str | None = None
+    robot_type: str = "so101_follower"
+    # With robot_id: None applies the registry rule, True/False forces it.
+    activate: bool | None = None
 
 
 @app.post("/api/calibrate")
 def calibrate_start(req: CalibrateRequest) -> dict:
     if req.name is not None:
         _lock_path(req.name)  # validate early
+    if req.robot_id is not None:
+        from antares.registry import RegistryError, validate_robot_id
+
+        try:
+            validate_robot_id(req.robot_id)
+        except RegistryError as e:
+            raise HTTPException(status_code=400, detail=str(e))
     check_robot(req.robot)
     job = start_job("calibrate", req.dataset, _job_worker, req)
     return {"job_id": job.id}
@@ -1891,7 +2131,7 @@ class DRRequest(BaseModel):
 
 @app.post("/api/dr")
 def dr_start(req: DRRequest) -> dict:
-    lock_name = req.lock or _slug(req.dataset)
+    lock_name = resolve_lock_ref(req.lock or _slug(req.dataset))
     load_lock_dict(lock_name)  # 404 now rather than as a job error
     _dr_path(req.name or lock_name)
     job = Job(id=uuid.uuid4().hex[:12], dataset=req.dataset, kind="dr")
@@ -1930,22 +2170,44 @@ def _attachment(filename: str) -> dict[str, str]:
 
 
 @app.get("/api/locks/{name}/export")
-def lock_export(name: str) -> Response:
-    """Calibrated MJCF as a download. ``meshdir`` is the absolute package
-    assets dir; use ``export.zip`` for a self-contained bundle."""
+def lock_export(
+    name: str,
+    format: Literal["mjcf", "isaaclab", "maniskill", "mjlab", "json"] = Query("mjcf"),
+    fps: float | None = Query(None, gt=0, description="dataset fps for latency seconds"),
+) -> Response:
+    """Calibrated MJCF as a download (``format=mjcf``, the default; ``meshdir``
+    is the absolute package assets dir; use ``export.zip`` for a self-contained
+    bundle), or the main file of another export target: the Isaac Lab /
+    ManiSkill / mjlab Python config or the neutral ``.params.json``."""
+    name = resolve_lock_ref(name)
+    if format == "mjcf":
+        return Response(
+            export_lock_xml(name),
+            media_type="application/xml",
+            headers=_attachment(f"{name}.xml"),
+        )
+    from antares.export_targets import media_type
+
+    export = export_lock_target(name, format, fps=fps)
     return Response(
-        export_lock_xml(name),
-        media_type="application/xml",
-        headers=_attachment(f"{name}.xml"),
+        export.files[export.main],
+        media_type=media_type(export.main),
+        headers=_attachment(export.main),
     )
 
 
 @app.get("/api/locks/{name}/export.zip")
-def lock_export_zip(name: str) -> Response:
+def lock_export_zip(
+    name: str,
+    targets: str | None = Query(None, description="all, or a comma list of isaaclab,maniskill,mjlab,json"),
+    fps: float | None = Query(None, gt=0),
+) -> Response:
     """Zip of ``<name>/<name>.xml``, ``<name>.antares.json``, ``scene.xml``
-    and ``assets/*.stl``."""
+    and ``assets/*.stl``; with ``?targets=all`` also every other export
+    target's files."""
+    name = resolve_lock_ref(name)
     return Response(
-        export_lock_zip(name),
+        export_lock_zip(name, targets=parse_export_targets(targets), fps=fps),
         media_type="application/zip",
         headers=_attachment(f"{name}.zip"),
     )
@@ -2010,6 +2272,214 @@ def fleet_cross() -> dict:
     return cross
 
 
+# --------------------------------------------------------------------------
+# Fleet dashboard: one row per lock in LOCK_DIR, with its check history
+# --------------------------------------------------------------------------
+
+# Joints that count for "worst joint": the gripper is a different mechanism
+# and is excluded from the tracking score too.
+_DASHBOARD_BODY_JOINTS_EXCLUDE = ("gripper",)
+
+
+def _finite(v: Any) -> float | None:
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if np.isfinite(f) else None
+
+
+def _worst_body_joint(per_joint: dict | None) -> tuple[str | None, float | None]:
+    """``(joint, deg)`` with the largest error among the body joints."""
+    worst: tuple[str, float] | None = None
+    for k, v in (per_joint or {}).items():
+        if k in _DASHBOARD_BODY_JOINTS_EXCLUDE:
+            continue
+        f = _finite(v)
+        if f is None:
+            continue
+        if worst is None or f > worst[1]:
+            worst = (str(k), f)
+    return worst if worst is not None else (None, None)
+
+
+def _drift_verdicts() -> dict[str, str | None]:
+    """lock name -> verdict for every ``<lock>.drift.json`` in LOCK_DIR.
+
+    The saved scan carries its verdict; when it does not, the drift module
+    (imported lazily, tolerated missing) recomputes it from the dict.
+    """
+    d = Path(LOCK_DIR)
+    if not d.is_dir():
+        return {}
+    out: dict[str, str | None] = {}
+    for p in sorted(d.glob(f"*{DRIFT_SUFFIX}")):
+        name = p.name[: -len(DRIFT_SUFFIX)]
+        verdict: str | None = None
+        try:
+            scan = json.loads(p.read_text())
+        except (OSError, ValueError):
+            out[name] = None
+            continue
+        if isinstance(scan.get("verdict"), str):
+            verdict = scan["verdict"]
+        else:
+            try:
+                from antares.drift import DriftScan
+
+                verdict = str(DriftScan.from_dict(scan).verdict())
+            except Exception:
+                verdict = None
+        out[name] = verdict
+    return out
+
+
+def _history_index() -> dict[str, dict]:
+    """lock name -> ``{"latest": entry | None, "trend": dict | None}``.
+
+    ``antares.history`` (the check-history store) is optional. When it is
+    importable it is asked for the ``GET /api/history`` shape
+    (``{"locks": [{"lock", "trend", "latest"}, ...]}``) through the first
+    callable it exposes under one of the names below; anything else degrades
+    to "never checked".
+    """
+    try:
+        # import_module (not ``from antares import history``) so a stubbed or
+        # missing ``sys.modules["antares.history"]`` is honored.
+        _history = importlib.import_module("antares.history")
+    except ImportError:
+        return {}
+    for fn_name in ("summary_all", "history_index", "dashboard_index", "summary", "index", "list_history", "load_all"):
+        fn = getattr(_history, fn_name, None)
+        if not callable(fn):
+            continue
+        try:
+            try:
+                data = fn(Path(LOCK_DIR))
+            except TypeError:
+                data = fn()
+        except Exception:
+            continue
+        rows = data.get("locks") if isinstance(data, dict) else data
+        if not isinstance(rows, list):
+            continue
+        out: dict[str, dict] = {}
+        for row in rows:
+            if isinstance(row, dict) and row.get("lock"):
+                out[str(row["lock"])] = {"latest": row.get("latest"), "trend": row.get("trend")}
+        return out
+    return {}
+
+
+def _fleet_index() -> tuple[dict | None, dict[str, dict]]:
+    """``(fleet summary or None, lock name -> fleet robot entry)``."""
+    try:
+        report = load_fleet_dict()
+    except HTTPException:
+        return None, {}
+    robots = [r for r in (report.get("robots") or []) if isinstance(r, dict)]
+    by_lock = {str(r["lock"]): r for r in robots if r.get("lock")}
+    summary = dict(report.get("summary") or {})
+    summary.setdefault("n_robots", len(robots))
+    summary["created_at"] = report.get("created_at")
+    summary["locks"] = sorted(by_lock)
+    return summary, by_lock
+
+
+def _dataset_fps(dataset: str | None, fleet_robot: dict | None) -> float | None:
+    if fleet_robot is not None and _finite(fleet_robot.get("fps")) is not None:
+        return _finite(fleet_robot.get("fps"))
+    if dataset:
+        with _DATASETS_LOCK:
+            ds = _DATASETS.get(dataset)
+        if ds is not None:
+            return _finite(getattr(ds, "fps", None))
+    return None
+
+
+def _registry_index() -> dict[str, dict]:
+    """lock name -> ``{"robot_id", "is_active", "version", "n_versions"}`` from
+    the registry; empty (never an error) when there is none or it is unreadable."""
+    try:
+        return load_registry().index_by_lock()
+    except Exception:  # noqa: BLE001 - a broken registry must not take the dashboard down
+        return {}
+
+
+def dashboard_robot(
+    lock: dict,
+    *,
+    drift: dict[str, str | None],
+    history: dict[str, dict],
+    fleet_by_lock: dict[str, dict],
+    registry: dict[str, dict] | None = None,
+) -> dict:
+    """One dashboard row for a lock dict."""
+    name = str(lock.get("name") or "")
+    res = lock.get("result") or {}
+    params = lock.get("params") or res.get("params") or {}
+    before = _finite(res.get("baseline_eval_score"))
+    after = _finite(res.get("eval_score"))
+    improvement = _finite(res.get("improvement"))
+    if improvement is None and before is not None and after is not None and before > 0:
+        improvement = 1.0 - after / before
+    worst_joint, worst_deg = _worst_body_joint(res.get("per_joint_after"))
+    seeds = lock.get("seeds") if isinstance(lock.get("seeds"), dict) else None
+    pinned = seeds.get("pinned") if seeds else None
+    hist = history.get(name) or {}
+    fleet_robot = fleet_by_lock.get(name)
+    reg = (registry or {}).get(name) or {}
+    return {
+        "name": name,
+        # registry: which physical robot this lock belongs to, and where it
+        # sits in that robot's lineage (all null/None when unregistered)
+        "robot_id": reg.get("robot_id"),
+        "is_active": reg.get("is_active"),
+        "version": reg.get("version"),
+        "n_versions": reg.get("n_versions"),
+        "dataset": lock.get("dataset"),
+        "robot_type": lock.get("robot_type"),
+        "robot": lock.get("robot") or DEFAULT_ROBOT,
+        "created_at": lock.get("created_at"),
+        "space": res.get("space", "shared"),
+        "baseline_eval_score": before,
+        "eval_score": after,
+        "improvement": improvement,
+        "per_joint_after": res.get("per_joint_after"),
+        "worst_joint": worst_joint,
+        "worst_joint_deg": worst_deg,
+        "latency_frames": params.get("latency_frames"),
+        "fps": _dataset_fps(lock.get("dataset"), fleet_robot),
+        "drift": {"exists": name in drift, "verdict": drift.get(name)},
+        "in_fleet": fleet_robot is not None,
+        "pinned": list(pinned) if isinstance(pinned, (list, tuple)) else None,
+        "history": {"latest": hist.get("latest"), "trend": hist.get("trend")},
+    }
+
+
+def dashboard() -> dict:
+    """Every lock in LOCK_DIR as a dashboard row plus the fleet summary."""
+    drift = _drift_verdicts()
+    history = _history_index()
+    fleet, fleet_by_lock = _fleet_index()
+    registry = _registry_index()
+    robots = [
+        dashboard_robot(l, drift=drift, history=history, fleet_by_lock=fleet_by_lock, registry=registry)
+        for l in list_lock_dicts()
+        if l.get("name")
+    ]
+    return {
+        "robots": robots,
+        "fleet": fleet,
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+    }
+
+
+@app.get("/api/dashboard")
+def dashboard_get() -> dict:
+    return dashboard()
+
+
 def _csv(s: str | None) -> list[str]:
     return [x.strip() for x in (s or "").split(",") if x.strip()]
 
@@ -2036,7 +2506,7 @@ class CheckRequest(BaseModel):
     last: int | None = Field(None, ge=1)
     min_episodes: int = Field(5, ge=1)
     explain: bool = False
-    explain_evaluations: int = Field(240, ge=10, le=2000)
+    explain_evaluations: int = Field(300, ge=20, le=2000)
     notify_url: str | None = None
     notify_when: Literal["drifted", "failure", "always"] = "drifted"
     notify_format: Literal["auto", "slack", "json"] = "auto"
@@ -2058,11 +2528,12 @@ def check_drift(req: CheckRequest) -> dict:
     Unless ``record`` is false the result (insufficient data included) is
     appended to ``LOCK_DIR/<lock>.history.jsonl``; see ``GET /api/history``.
     """
-    _lock_path(req.lock)  # validate the name before loading a dataset
+    lock_name = resolve_lock_ref(req.lock)  # @<robot> -> its active lock
+    _lock_path(lock_name)  # validate the name before loading a dataset
     ds = get_dataset(req.dataset)
     result = run_check(
         ds,
-        req.lock,
+        lock_name,
         threshold_deg=req.threshold_deg,
         ratio=req.ratio,
         last=req.last,
@@ -2073,13 +2544,13 @@ def check_drift(req: CheckRequest) -> dict:
         from antares import history
 
         try:
-            history.append(result, LOCK_DIR, name=req.lock)
+            history.append(result, LOCK_DIR, name=lock_name)
         except OSError as e:  # the verdict stands; say why it was not recorded
             out["history_error"] = str(e)
     if req.explain and result.verdict == "drifted":
         try:
             out["diagnosis"] = run_diagnose(
-                ds, req.lock, last=req.last, max_evaluations=req.explain_evaluations
+                ds, lock_name, last=req.last, max_evaluations=req.explain_evaluations
             ).to_dict()
         except HTTPException as e:  # the verdict stands; say why it has no diagnosis
             out["diagnosis"] = None
@@ -2116,16 +2587,125 @@ def history_get(lock: str) -> dict:
     """
     from antares import history
 
+    lock = resolve_lock_ref(lock)
     if not _lock_path(lock).is_file():  # 400 on a bad name
         raise HTTPException(status_code=404, detail=f"no lock named {lock!r}")
     return history.report(lock, LOCK_DIR)
+
+
+# --------------------------------------------------------------------------
+# Robot registry routes (see antares.registry)
+# --------------------------------------------------------------------------
+
+
+def registry_robot(reg, robot_id: str) -> dict:
+    """``GET /api/registry/{robot_id}``: the summary plus the lineage with pinned flags."""
+    from antares.registry import UnknownRobot, param_drift
+
+    try:
+        out = reg.summary(robot_id)
+        lineage = reg.lineage(robot_id)
+    except UnknownRobot as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    out["lineage"] = lineage
+    out["param_drift"] = param_drift(lineage)
+    return out
+
+
+@app.get("/api/registry")
+def registry_list() -> dict:
+    """Every registered robot: active lock, version, held-out score, lineage entries."""
+    reg = load_registry()
+    return {
+        "version": reg.version,
+        "path": str(reg.path),
+        "robots": [reg.summary(rid) for rid in reg.robots()],
+    }
+
+
+@app.get("/api/registry/{robot_id}")
+def registry_get(robot_id: str) -> dict:
+    return registry_robot(load_registry(), robot_id)
+
+
+class RegisterRequest(BaseModel):
+    lock: str
+    activate: bool | None = None
+    note: str | None = None
+    max_regression: float | None = Field(None, ge=0)
+
+
+@app.post("/api/registry/{robot_id}/register")
+def registry_register(robot_id: str, req: RegisterRequest) -> dict:
+    """Add a saved lock to the robot's lineage; the activation rule decides
+    whether it becomes active (see ``registration.reason``)."""
+    registration = register_lock(
+        robot_id, req.lock, activate=req.activate, note=req.note, max_regression=req.max_regression
+    )
+    out = registry_robot(load_registry(), robot_id)
+    out["registration"] = registration
+    return out
+
+
+class ActivateRequest(BaseModel):
+    lock: str
+
+
+@app.post("/api/registry/{robot_id}/activate")
+def registry_activate(robot_id: str, req: ActivateRequest) -> dict:
+    from antares.registry import RegistryError, UnknownRobot
+
+    reg = load_registry()
+    try:
+        previous = reg.activate(robot_id, req.lock)
+    except UnknownRobot as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RegistryError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    reg.save()
+    out = registry_robot(reg, robot_id)
+    out["previous_active"] = previous
+    return out
+
+
+@app.post("/api/registry/{robot_id}/rollback")
+def registry_rollback(robot_id: str) -> dict:
+    from antares.registry import RegistryError, UnknownRobot
+
+    reg = load_registry()
+    try:
+        previous, _ = reg.rollback(robot_id)
+    except UnknownRobot as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RegistryError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    reg.save()
+    out = registry_robot(reg, robot_id)
+    out["previous_active"] = previous
+    return out
+
+
+@app.delete("/api/registry/{robot_id}")
+def registry_delete(robot_id: str) -> dict:
+    """Forget the robot; its lock files stay."""
+    from antares.registry import RegistryError, UnknownRobot
+
+    reg = load_registry()
+    try:
+        entry = reg.remove(robot_id)
+    except UnknownRobot as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RegistryError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    reg.save()
+    return {"removed": robot_id, "locks": entry.names}
 
 
 class DiagnoseRequest(BaseModel):
     dataset: str
     lock: str
     last: int | None = Field(None, ge=1)
-    max_evaluations: int = Field(240, ge=10, le=2000)
+    max_evaluations: int = Field(300, ge=20, le=2000)
     seed: int = 0
 
 
@@ -2216,6 +2796,7 @@ def load_camera_fit_dicts(lock_name: str) -> dict[str, dict]:
     """Camera fits for a lock from ``<lock>.camera.json`` (falls back to the lock's ``cameras``)."""
     from antares.camera import load_camera_fits
 
+    lock_name = resolve_lock_ref(lock_name)
     _lock_path(lock_name)  # validates the name
     fits = {name: f.to_dict() for name, f in load_camera_fits(lock_name, LOCK_DIR).items()}
     if not fits:
@@ -2241,6 +2822,7 @@ def run_camera_fit(
     from antares.camera import fit_camera, save_camera_fit
     from antares.sim import Arm
 
+    lock_name = resolve_lock_ref(lock_name)
     _lock_path(lock_name)
     # A fit runs for a minute; it gets its own Arm so overlay requests
     # (which share ``_camera_arm``) are not blocked behind it.
@@ -2351,7 +2933,7 @@ def camera_cameras(dataset: str = Query(...)) -> list[dict]:
 
 @app.post("/api/camera/fit")
 def camera_fit_start(req: CameraFitRequest) -> dict:
-    _lock_path(req.lock)  # validate early
+    _lock_path(resolve_lock_ref(req.lock))  # validate early
     job = start_job("camera", req.dataset, _camera_job_worker, req)
     return {"job_id": job.id}
 

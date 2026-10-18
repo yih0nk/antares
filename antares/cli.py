@@ -127,7 +127,51 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     print("joints:", ", ".join(ds.joint_names))
     print(f"sim model: {model_for_dataset(ds.robot_type)}")
     _print_verdict(v)
+    if getattr(args, "calibration", None) or getattr(args, "robot_id", None):
+        if _print_calibration_check(ds, args) is None:
+            return 2
     return 0 if v.ok else 1
+
+
+def _print_calibration_check(ds, args: argparse.Namespace):
+    """Model-range unit map vs the arm's LeRobot calibration, per joint.
+
+    Prints the table and a warning per joint over 2 deg. Returns the check
+    dict, or None (after printing the error) when the calibration cannot be
+    read.
+    """
+    from fastapi import HTTPException
+
+    from antares import server
+    from antares.lerobot_calib import FLAG_MESSAGE, calibration_check
+
+    try:
+        calib, path = server.resolve_calibration(args.calibration, args.robot_id, args.robot_type)
+        robot = server.check_robot(server.dataset_robot(ds))
+        chk = calibration_check(calib, server.get_arm(robot).model)
+    except HTTPException as e:
+        print(f"error: {_detail(e)}", file=sys.stderr)
+        return None
+    print()
+    print(f"LeRobot calibration {path} vs the {robot} model's joint ranges")
+    print("(calibration map - model map, degrees, at -100/0/+100 units; gripper at 0/50/100):")
+    rows = []
+    for r in chk["joints"]:
+        at = list(r["at"].values())
+        rows.append([
+            r["joint"], str(r["range_min"]), str(r["range_max"]), str(r["homing_offset"]),
+            f"{r['calibration_span_deg']:.1f}", f"{r['model_span_deg']:.1f}",
+            f"{at[0]:+.2f}", f"{at[1]:+.2f}", f"{at[2]:+.2f}", f"{r['max_deg']:.2f}",
+            "FLAG" if r["flagged"] else "",
+        ])
+    print(_table(["joint", "range_min", "range_max", "homing", "arm span", "model span",
+                  "lo", "mid", "hi", "max", ""], rows))
+    for r in chk["joints"]:
+        if r["flagged"]:
+            print(f"  warning: {r['joint']} is off by up to {r['max_deg']:.1f} deg: {FLAG_MESSAGE}")
+    if not chk["flagged"]:
+        print(f"  all joints within {chk['threshold_deg']:g} deg of the model's ranges")
+    return chk
 
 
 def cmd_replay(args: argparse.Namespace) -> int:
@@ -136,12 +180,14 @@ def cmd_replay(args: argparse.Namespace) -> int:
     ds = _load_dataset(args.repo_id)
     if ds is None:
         return 2
-    params = cmap = None
+    params = cmap = unit_map = None
     if args.lock:
         lock = server.load_lock_dict(args.lock)
         params = server.params_from_dict(lock["params"])
         cmap = server.command_map_from_lock(lock)
-    out = server.replay_episode(ds, args.episode, params, cmap, robot=args.robot)
+        unit_map = server.unit_map_from_lock(lock)
+    out = server.replay_episode(ds, args.episode, params, cmap, robot=args.robot,
+                                **({"unit_map": unit_map} if unit_map is not None else {}))
     gap = out["gap"]
     label = f"lock {args.lock}" if args.lock else "default params"
     print(f"{ds.repo_id} episode {out['episode']} ({len(out['real_q'])} frames, {label}, model {out.get('robot', 'so101')})")
@@ -162,6 +208,8 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
         stages += f" + {args.per_joint_evaluations} per-joint evaluations"
     if args.fit_sensor:
         stages += " per round, fitting the sensor calibration"
+    if args.calibration:
+        stages += ", unit map from the arm's LeRobot calibration"
     print(f"calibrating {ds.repo_id}: {args.n_train} train / {args.n_eval} eval episodes, {stages}")
     last = {"n": 0, "stage": None, "seed": None}
 
@@ -197,6 +245,9 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
         fit_sensor=args.fit_sensor,
         sensor_mode=args.sensor_mode,
         n_seeds=args.seeds,
+        calibration_path=args.calibration,
+        robot_id=args.robot_id,
+        robot_type=args.robot_type,
     )
     r = result.to_dict()
     only = lock.get("dynamics_only")
@@ -232,8 +283,24 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
         print("sensor calibration (command = gain * logged + bias, dataset units):")
         print(_table(["joint", "gain", "bias"],
                      [[j, f"{g:.4f}", f"{b:+.3f}"] for j, g, b in zip(joints, cm["gain"], cm["bias"])]))
+    if lock.get("calibration"):
+        cal = lock["calibration"]
+        dis = cal.get("unit_map_disagreement_deg") or {}
+        print()
+        print(f"unit map from LeRobot calibration {cal.get('source')} (robot id {cal.get('robot_id')})")
+        print("  disagreement with the model's ranges (deg): "
+              + ", ".join(f"{j}={v:.2f}" for j, v in dis.items()))
     print(f"{r['n_evaluations']} evaluations in {r['elapsed_s']:.1f}s")
     print(f"saved lock {lock['name']} -> {path}")
+    if getattr(args, "robot_id", None):
+        # One identity per physical robot: the new lock joins the robot's
+        # lineage and the registry's rule decides whether it becomes active.
+        try:
+            reg = server.register_lock(args.robot_id, lock, activate=True if args.activate else None)
+        except Exception as e:  # noqa: BLE001 - the lock is saved; say why it was not registered
+            print(f"warning: lock saved but not registered: {_detail(e)}", file=sys.stderr)
+        else:
+            print(reg["summary"])
     return 0
 
 
@@ -404,7 +471,7 @@ def cmd_dr(args: argparse.Namespace) -> int:
 EXIT_PASS = 0
 EXIT_DRIFT = 1
 EXIT_USAGE = 2  # bad arguments, missing lock/dataset, or too few episodes
-MIN_EXPLAIN_EVALUATIONS = 10  # as POST /api/check validates explain_evaluations
+MIN_EXPLAIN_EVALUATIONS = 20  # as POST /api/check validates explain_evaluations
 
 
 def _fmt(v, nd: int = 3) -> str:
@@ -459,15 +526,16 @@ def cmd_check(args: argparse.Namespace) -> int:
 
     from antares import server
 
-    lock: str | dict = args.lock
-    if os.path.isfile(args.lock):
-        with open(args.lock) as f:
-            lock = json.load(f)
     webhook = args.notify or os.environ.get("ANTARES_WEBHOOK_URL") or None
     if args.explain and args.explain_evaluations < MIN_EXPLAIN_EVALUATIONS:
         print(f"error: --explain-evaluations must be >= {MIN_EXPLAIN_EVALUATIONS}", file=sys.stderr)
         return EXIT_USAGE
     try:
+        args.lock = _resolve_lock(args.lock)  # @<robot> -> its active lock; names and paths pass through
+        lock: str | dict = args.lock
+        if os.path.isfile(args.lock):
+            with open(args.lock) as f:
+                lock = json.load(f)
         ds = server.get_dataset(args.dataset)
         res = server.run_check(
             ds,
@@ -569,6 +637,13 @@ def cmd_record_check(args: argparse.Namespace) -> int:
         print(f"warning: --episodes {episodes} is below --min-episodes {args.min_episodes}; "
               f"recording {args.min_episodes}", file=sys.stderr)
         episodes = args.min_episodes
+    # --lock defaults to the robot's active lock in the registry (@<robot-id>).
+    try:
+        args.lock = _resolve_lock(args.lock if args.lock else f"@{args.robot_id}")
+    except Exception as e:  # noqa: BLE001 - HTTPException from the resolver
+        hint = "" if args.lock else " (pass --lock, or register the robot with `antares robots register`)"
+        print(f"error: {_detail(e)}{hint}", file=sys.stderr)
+        return EXIT_USAGE
     opts = rc.RecordOptions(
         robot_port=args.robot_port,
         robot_id=args.robot_id,
@@ -711,6 +786,16 @@ def cmd_history(args: argparse.Namespace) -> int:
     if args.last is not None and args.last < 1:
         print("error: --last must be >= 1", file=sys.stderr)
         return EXIT_USAGE
+    if args.robot:
+        return _history_for_robot(args)
+    if not args.lock:
+        print("error: give a lock (name, .lock.json path or @<robot>) or --robot <id>", file=sys.stderr)
+        return EXIT_USAGE
+    try:
+        args.lock = _resolve_lock(args.lock)
+    except Exception as e:  # noqa: BLE001 - HTTPException from the resolver
+        print(f"error: {_detail(e)}", file=sys.stderr)
+        return EXIT_USAGE
     name, d = _history_target(args.lock, args.history_dir, server.LOCK_DIR)
     try:
         records = history.load(name, d)
@@ -736,6 +821,226 @@ def cmd_history(args: argparse.Namespace) -> int:
     print(_table(["date (utc)", "dataset", "verdict", "score (deg)", "limit", "worst joint"], rows))
     print(history.summary_line(records))
     return EXIT_PASS
+
+
+def _history_for_robot(args: argparse.Namespace) -> int:
+    """``antares history --robot <id>``: every lock in the robot's lineage, one
+    time-ordered history, each entry tagged with its lock."""
+    import json
+    from pathlib import Path
+
+    from antares import history, server
+    from antares.registry import UnknownRobot
+
+    try:
+        entry = server.load_registry().get(args.robot)
+    except UnknownRobot as e:
+        print(f"error: {e}", file=sys.stderr)
+        return EXIT_USAGE
+    except Exception as e:  # noqa: BLE001 - HTTPException on a corrupt registry
+        print(f"error: {_detail(e)}", file=sys.stderr)
+        return EXIT_USAGE
+    d = Path(args.history_dir) if args.history_dir else Path(server.LOCK_DIR)
+    # Each entry is tagged with the lineage lock whose history file holds it
+    # (a lock checked through a file path records the name inside the file).
+    tagged = [(name, r) for name in entry.names for r in history.load(name, d)]
+    tagged.sort(key=lambda t: t[1].time)
+    records = [r for _, r in tagged]
+    shown = tagged[-args.last:] if args.last else tagged
+    if args.json:
+        out = {"robot": args.robot, "locks": entry.names, "active": entry.active,
+               "entries": [{**r.to_dict(), "lock": name} for name, r in shown], "trend": history.trend(records)}
+        print(json.dumps(out, indent=2))
+        return EXIT_PASS
+    if not records:
+        print(f"no checks recorded for robot {args.robot} (locks: {', '.join(entry.names) or 'none'})")
+        return EXIT_PASS
+    rows = [
+        [r.at[:16].replace("T", " "), name + (" *" if name == entry.active else ""), r.dataset, r.verdict,
+         _fmt(r.score), _fmt(r.limit), r.worst_joint or "-"]
+        for name, r in shown
+    ]
+    print(_table(["date (utc)", "lock", "dataset", "verdict", "score (deg)", "limit", "worst joint"], rows))
+    n_locks = len({name for name, _ in tagged})
+    print(f"{history.summary_line(records)}; across {n_locks} lock{'s' if n_locks != 1 else ''} of robot {args.robot}"
+          f" (* = active)")
+    return EXIT_PASS
+
+
+# --------------------------------------------------------------------------
+# robots: the registry (antares.registry)
+# --------------------------------------------------------------------------
+
+
+def _resolve_lock(ref: str) -> str:
+    """The one place the CLI turns ``@<robot>`` into the robot's active lock
+    name; lock names and ``.lock.json`` paths pass through unchanged."""
+    from antares import server
+
+    return server.resolve_lock_ref(ref)
+
+
+def _pfmt(v) -> str:
+    """A parameter value for a table: scalars to 4 significant digits, a
+    per-joint list as its range."""
+    if v is None:
+        return "-"
+    if isinstance(v, (list, tuple)):
+        xs = [x for x in v if isinstance(x, (int, float))]
+        if not xs:
+            return "-"
+        lo, hi = min(xs), max(xs)
+        return _pfmt(lo) if lo == hi else f"{_pfmt(lo)}..{_pfmt(hi)}"
+    if isinstance(v, bool):
+        return str(v)
+    if isinstance(v, int) or (isinstance(v, float) and v.is_integer() and abs(v) < 1e6):
+        return str(int(v))
+    return f"{v:.4g}"
+
+
+def _score_pair(before, after) -> str:
+    b = "-" if before is None else f"{before:.3f}"
+    a = "-" if after is None else f"{after:.3f}"
+    return f"{b} -> {a}"
+
+
+def _last_check(name: str | None, lock_dir) -> str:
+    """``<verdict> <date>`` of the newest recorded check of ``name``, or ``never``."""
+    if not name:
+        return "-"
+    from antares import history
+
+    try:
+        records = history.load(name, lock_dir)
+    except ValueError:
+        return "-"
+    if not records:
+        return "never"
+    r = records[-1]
+    return f"{r.verdict} {r.date}"
+
+
+def cmd_robots(args: argparse.Namespace) -> int:
+    import json
+
+    from antares import server
+    from antares.registry import RegistryError, UnknownRobot, param_drift
+
+    sub = getattr(args, "robots_cmd", None) or "list"
+    try:
+        reg = server.load_registry()
+    except Exception as e:  # noqa: BLE001 - HTTPException on a corrupt file
+        print(f"error: {_detail(e)}", file=sys.stderr)
+        return EXIT_USAGE
+
+    try:
+        if sub == "list":
+            rows = [reg.summary(rid) for rid in reg.robots()]
+            if args.json:
+                print(json.dumps({"path": str(reg.path), "robots": rows}, indent=2))
+                return EXIT_PASS
+            if not rows:
+                print(f"no robots registered in {reg.path} "
+                      f"(antares robots register <id> --lock <name>, or calibrate ... --robot-id <id>)")
+                return EXIT_PASS
+            table = []
+            for s in rows:
+                ver = f"v{s['version']} of {s['n_versions']}" if s["version"] else f"- of {s['n_versions']}"
+                table.append([
+                    s["robot_id"],
+                    s["active"] or "-",
+                    ver,
+                    "-" if s["eval_score"] is None else f"{s['eval_score']:.3f}",
+                    str(s["n_versions"]),
+                    str(s["last_calibrated"] or "")[:10] or "-",
+                    _last_check(s["active"], server.LOCK_DIR),
+                ])
+            print(_table(["robot", "active lock", "version", "held-out (deg)", "locks", "last calibrated", "last check"], table))
+            return EXIT_PASS
+
+        if sub == "show":
+            s = reg.summary(args.robot_id)
+            lineage = reg.lineage(args.robot_id)
+            drift = param_drift(lineage)
+            if args.json:
+                print(json.dumps({**s, "lineage": lineage, "param_drift": drift}, indent=2))
+                return EXIT_PASS
+            typ = f" ({s['robot_type']})" if s["robot_type"] else ""
+            active = f"active {s['active']} (v{s['version']} of {s['n_versions']})" if s["active"] else "no active lock"
+            print(f"robot {s['robot_id']}{typ}: {s['n_versions']} lock{'s' if s['n_versions'] != 1 else ''}, {active}")
+            rows = []
+            for row in lineage:
+                mark = "*" if row["is_active"] else ""
+                missing = "" if row["exists"] else " (file missing)"
+                rows.append([
+                    f"v{row['version']}{mark}",
+                    f"{row['name']}{missing}",
+                    str(row["created_at"] or "")[:10] or "-",
+                    row["dataset"] or "-",
+                    _score_pair(row["baseline_eval_score"], row["eval_score"]),
+                    ", ".join(row["pinned"]) if row["pinned"] else ("-" if row["exists"] else "?"),
+                    _last_check(row["name"], server.LOCK_DIR),
+                    row["note"] or "",
+                ])
+            print(_table(["version", "lock", "created", "dataset", "held-out before -> after", "pinned", "last check", "note"], rows))
+            print("* = active; a parameter is pinned when the fit can read it as a measurement (see `--seeds`)")
+            if drift["versions"]:
+                print()
+                print("parameter drift across versions (pinned in every version only):")
+                heads = ["param"] + [f"v{v}" for v in drift["versions"]] + ["change"]
+                prow = [[k] + [_pfmt(v) for v in c["values"]] + [c["change"]] for k, c in drift["comparable"].items()]
+                if prow:
+                    print(_table(heads, prow))
+                else:
+                    print("  none: no parameter is pinned in every version")
+                if drift["not_comparable"]:
+                    print("not comparable across fits (unpinned, so each value is a fit, not a measurement): "
+                          + ", ".join(f"{k} (v{', v'.join(str(v) for v in vs)})" for k, vs in drift["not_comparable"].items()))
+            return EXIT_PASS
+
+        if sub == "register":
+            if args.max_regression is not None and args.max_regression < 0:
+                print("error: --max-regression must be >= 0", file=sys.stderr)
+                return EXIT_USAGE
+            res = server.register_lock(
+                args.robot_id, args.lock, activate=True if args.activate else None, note=args.note,
+                max_regression=args.max_regression,
+            )
+            print(res["summary"])
+            return EXIT_PASS
+
+        if sub == "activate":
+            previous = reg.activate(args.robot_id, args.lock)
+            reg.save()
+            e = reg.get(args.robot_id)
+            was = f" (was {previous})" if previous and previous != args.lock else ""
+            print(f"robot {args.robot_id}: active lock {args.lock} (v{e.version(args.lock)} of {len(e.locks)}){was}")
+            return EXIT_PASS
+
+        if sub == "rollback":
+            previous, now = reg.rollback(args.robot_id)
+            reg.save()
+            e = reg.get(args.robot_id)
+            print(f"robot {args.robot_id}: rolled back {previous} -> {now} (v{e.version(now)} of {len(e.locks)})")
+            return EXIT_PASS
+
+        if sub == "remove":
+            entry = reg.remove(args.robot_id)
+            reg.save()
+            print(f"removed robot {args.robot_id} from {reg.path}; its {len(entry.locks)} lock file(s) stay: "
+                  + (", ".join(entry.names) or "none"))
+            return EXIT_PASS
+    except UnknownRobot as e:
+        print(f"error: {e}", file=sys.stderr)
+        return EXIT_USAGE
+    except RegistryError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return EXIT_USAGE
+    except Exception as e:  # noqa: BLE001 - HTTPException from register_lock (missing lock, bad name)
+        print(f"error: {_detail(e)}", file=sys.stderr)
+        return EXIT_USAGE
+    print(f"error: unknown robots command {sub!r}", file=sys.stderr)
+    return EXIT_USAGE
 
 
 def _frac(v) -> str:
@@ -1056,6 +1361,62 @@ def cmd_synth(args: argparse.Namespace) -> int:
 
 
 
+def cmd_transfer_run(args: argparse.Namespace) -> int:
+    from antares import transfer
+
+    lock_paths = dict(transfer.DEFAULT_ARM_LOCKS)
+    if args.arm:
+        lock_paths = {}
+        for item in args.arm:
+            name, sep, path = item.partition("=")
+            if not sep or not name or not path:
+                print(f"--arm: expected NAME=LOCK_PATH, got {item!r}", file=sys.stderr)
+                return EXIT_USAGE
+            lock_paths[name] = path
+    try:
+        arms = transfer.arms_from_locks(lock_paths)
+    except (OSError, KeyError, ValueError) as e:
+        print(f"could not read a hidden arm's lock: {e}", file=sys.stderr)
+        return EXIT_USAGE
+    overrides = {}
+    if args.seeds is not None:
+        overrides["seeds"] = tuple(range(args.seeds))
+    if args.generations is not None:
+        overrides["generations"] = args.generations
+    if args.workers is not None:
+        overrides["workers"] = args.workers
+    if args.quick:
+        cfg = transfer.TransferConfig.quick_config(arms, **overrides)
+    else:
+        cfg = transfer.TransferConfig(arms=arms, **overrides)
+    report = transfer.run_experiment(cfg, log=lambda line: print(line, flush=True))
+    out = args.out
+    json_path = out if out.endswith(".json") else out + ".json"
+    path = report.save(json_path)
+    print(report.to_markdown())
+    print(f"wrote {path} and {path.with_suffix('.md')} ({report.elapsed_s / 60:.1f} min)")
+    return 0
+
+
+def cmd_transfer_report(args: argparse.Namespace) -> int:
+    from antares.transfer import TransferReport
+
+    try:
+        report = TransferReport.load(args.json)
+    except (OSError, KeyError, ValueError) as e:
+        print(f"could not read {args.json}: {e}", file=sys.stderr)
+        return EXIT_USAGE
+    md = report.to_markdown()
+    if args.md:
+        from pathlib import Path
+
+        Path(args.md).write_text(md)
+        print(f"wrote {args.md}")
+    else:
+        print(md)
+    return 0
+
+
 def _print_specificity(m: dict, lock_datasets: dict[str, str]) -> dict:
     """Print whether each dataset's own lock beats every other arm's lock."""
     from antares.specificity import summarize_cross
@@ -1301,6 +1662,7 @@ def cmd_export(args: argparse.Namespace) -> int:
 
     from antares import server
     from antares.export import SCENE_FILENAME, TASK_FILENAME, export_scene, sidecar_path
+    from antares.export_targets import TARGET_LABELS, TargetExportError, dataset_fps, render, resolve_targets
     from antares.lock import RobotLock
     from antares.task import TASK_SUFFIX, TaskDistribution
 
@@ -1321,6 +1683,11 @@ def cmd_export(args: argparse.Namespace) -> int:
         if not task.held:
             print(f"error: task {task.name} ({task_path}) has no held grasps: nothing to put in the scene", file=sys.stderr)
             return 1
+    try:
+        targets = resolve_targets(getattr(args, "format", "mjcf"))
+    except TargetExportError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
     out_dir = Path(args.output) if args.output else Path("export") / lock.name
     try:
         scene = export_scene(
@@ -1341,6 +1708,15 @@ def cmd_export(args: argparse.Namespace) -> int:
         print("  meshdir points at the antares package assets (absolute path)")
     else:
         print(f"  {'assets/':<40} STL meshes")
+    fps = getattr(args, "fps", None)
+    for target in targets:
+        export = render(lock, target, fps=fps, lock_dir=server.LOCK_DIR)
+        for path in export.write(out_dir):
+            twin = " (JSON twin)" if path.suffix == ".json" and target != "json" else ""
+            print(f"  {path.name:<40} {TARGET_LABELS[target]}{twin}")
+    if targets:
+        hz, source = dataset_fps(lock, fps)
+        print(f"latency: {p.latency_frames} frame(s) at {hz:g} Hz (fps {source}); apply as a command delay in your control loop")
     print(f"view: python -m mujoco.viewer --mjcf {scene}")
     return 0
 
@@ -1595,8 +1971,22 @@ def build_parser() -> argparse.ArgumentParser:
     dataset_help = "Hub dataset id, upload/<name>, or a LeRobot dataset directory on disk"
     robot_help = "sim model from the registry (so101, so100); default: the dataset's family"
 
+    def add_calibration_args(p: argparse.ArgumentParser) -> None:
+        g = p.add_argument_group("LeRobot calibration (the follower arm's own tick-to-angle map)")
+        g.add_argument("--calibration", default=None, metavar="PATH",
+                       help="the follower's LeRobot calibration file (<robot.id>.json)")
+        g.add_argument("--robot-id", default=None, metavar="ID",
+                       help="LeRobot --robot.id of this arm: its calibration ID.json is looked up under "
+                       "$HF_LEROBOT_CALIBRATION/robots/<robot-type>/ (inspect: required; calibrate: used "
+                       "when present), and calibrate also registers the saved lock for this robot in "
+                       "locks/registry.json")
+        g.add_argument("--robot-type", default="so101_follower",
+                       help="LeRobot robot type for --robot-id (default so101_follower; the so_follower "
+                       "directory of LeRobot >= 0.5 is tried too)")
+
     p = sub.add_parser("inspect", help="validate and summarize a LeRobot dataset")
     p.add_argument("repo_id", help=dataset_help)
+    add_calibration_args(p)
     p.set_defaults(func=cmd_inspect)
 
     p = sub.add_parser("replay", help="replay one episode in sim and print the gap")
@@ -1652,6 +2042,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="with --fit-sensor: fit the map through the sim, alternating with the dynamics "
         "(sim, default), or pre-fit it from still frames and freeze it (kinematic)",
     )
+    add_calibration_args(p)
+    p.add_argument("--activate", action="store_true",
+                   help="with --robot-id: activate the new lock even if it scores worse")
     p.set_defaults(func=cmd_calibrate)
 
     p = sub.add_parser("cross", help="score locks across datasets (matrix)")
@@ -1694,7 +2087,8 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument("dataset", help="Hub dataset id or a LeRobot dataset directory on disk")
-    p.add_argument("--lock", required=True, help="lock name in the lock dir, or a .lock.json path")
+    p.add_argument("--lock", required=True,
+                   help="lock name in the lock dir, a .lock.json path, or @<robot-id> for a registered robot's active lock")
     p.add_argument("--threshold", type=float, default=None, metavar="DEG",
                    help="absolute error allowed in degrees (default: none)")
     p.add_argument("--ratio", type=float, default=1.5,
@@ -1706,8 +2100,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true", help="print the CheckResult as JSON")
     p.add_argument("--explain", action="store_true",
                    help="on drift, refit and name the parameter change that explains it")
-    p.add_argument("--explain-evaluations", type=int, default=240, metavar="N",
-                   help="refit budget for --explain (default 240, at least 10)")
+    p.add_argument("--explain-evaluations", type=int, default=300, metavar="N",
+                   help="refit budget for --explain (default 300, at least 20)")
     p.add_argument("--notify", default=None, metavar="URL",
                    help="POST an alert to this webhook (default: $ANTARES_WEBHOOK_URL); "
                         "a failed POST only warns and leaves the exit code alone")
@@ -1746,7 +2140,9 @@ def build_parser() -> argparse.ArgumentParser:
             "pass --recorder when lerobot-record lives in another environment."
         ),
     )
-    p.add_argument("--lock", required=True, help="lock name in the lock dir, or a .lock.json path")
+    p.add_argument("--lock", default=None,
+                   help="lock name in the lock dir, a .lock.json path, or @<robot-id>; "
+                        "default: the active lock registered for --robot-id")
     p.add_argument("--robot-port", required=True, metavar="PORT", help="follower arm serial port, e.g. /dev/tty.usbmodem...")
     p.add_argument("--robot-id", required=True, metavar="ID", help="the LeRobot id the arm was calibrated under (names the recording and the banner)")
     p.add_argument("--robot-type", default="so101_follower", help="LeRobot robot type (default so101_follower)")
@@ -1775,7 +2171,10 @@ def build_parser() -> argparse.ArgumentParser:
             "oldest first) and the least-squares slope of their score in degrees per day."
         ),
     )
-    p.add_argument("lock", help="lock name in the lock dir, or a .lock.json path")
+    p.add_argument("lock", nargs="?", default=None,
+                   help="lock name in the lock dir, a .lock.json path, or @<robot-id> (its active lock)")
+    p.add_argument("--robot", default=None, metavar="ID",
+                   help="instead of one lock: every lock in the registered robot's lineage, in time order")
     p.add_argument("--last", type=int, default=None, metavar="N",
                    help="show only the newest N checks (the trend still uses all of them)")
     p.add_argument("--json", action="store_true",
@@ -1783,6 +2182,44 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--history-dir", default=None, metavar="DIR",
                    help="directory of the history file (default: next to the lock)")
     p.set_defaults(func=cmd_history)
+
+    p = sub.add_parser(
+        "robots",
+        help="the registry: one id per physical robot, its lock lineage and the active lock",
+        description=(
+            "locks/registry.json gives each physical robot (LeRobot's robot id) a versioned lineage "
+            "of calibrations and one active lock. `@<id>` then stands for that lock wherever a --lock "
+            "is accepted. Without a subcommand, list the robots."
+        ),
+    )
+    p.add_argument("--json", action="store_true", help="print the table as JSON")
+    p.set_defaults(func=cmd_robots, robots_cmd="list")
+    rsub = p.add_subparsers(dest="robots_cmd")
+    r = rsub.add_parser("list", help="one row per robot: active lock, version, held-out score, last check")
+    r.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    r.set_defaults(func=cmd_robots)
+    r = rsub.add_parser("show", help="a robot's lineage and how its pinned parameters moved between versions")
+    r.add_argument("robot_id")
+    r.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    r.set_defaults(func=cmd_robots)
+    r = rsub.add_parser("register", help="add a saved lock to a robot's lineage (activated by the rule)")
+    r.add_argument("robot_id")
+    r.add_argument("--lock", required=True, help="lock name in the lock dir, or a .lock.json path")
+    r.add_argument("--activate", action="store_true", help="activate even if it scores worse than the active lock")
+    r.add_argument("--note", default=None, help="free text kept with the entry (why it was recalibrated)")
+    r.add_argument("--max-regression", type=float, default=None, metavar="FRAC",
+                   help="activate when the held-out score is at most this fraction worse (default 0.10)")
+    r.set_defaults(func=cmd_robots)
+    r = rsub.add_parser("activate", help="make one lock of the lineage the active one")
+    r.add_argument("robot_id")
+    r.add_argument("lock")
+    r.set_defaults(func=cmd_robots)
+    r = rsub.add_parser("rollback", help="activate the lock before the active one")
+    r.add_argument("robot_id")
+    r.set_defaults(func=cmd_robots)
+    r = rsub.add_parser("remove", help="forget a robot (its lock files stay)")
+    r.add_argument("robot_id")
+    r.set_defaults(func=cmd_robots)
 
 
     p = sub.add_parser("events", help="detect contact events from the real-sim residual")
@@ -1873,6 +2310,25 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=0)
     p.set_defaults(func=cmd_synth)
 
+    p = sub.add_parser("transfer", help="does calibration help a policy transfer? (sim-to-sim experiment)")
+    tsub = p.add_subparsers(dest="transfer_cmd", required=True)
+    t = tsub.add_parser(
+        "run",
+        help="fit locks to hidden synthetic arms, train reaching policies in each sim, score them on the hidden arms",
+    )
+    t.add_argument("--quick", action="store_true", help="tiny budgets (under a minute); what the tests run")
+    t.add_argument("--seeds", type=int, default=None, help="training seeds per variant (default 3; 1 with --quick)")
+    t.add_argument("--generations", type=int, default=None, help="CMA-ES generations per policy (default 150)")
+    t.add_argument("--workers", type=int, default=None, help="training processes (default: all cores)")
+    t.add_argument("--arm", action="append", default=None, metavar="NAME=LOCK_PATH",
+                   help="hidden arm whose truth is this lock's params (repeatable; default: the two demo locks)")
+    t.add_argument("--out", default="results/policy_transfer", help="output path prefix for .json and .md")
+    t.set_defaults(func=cmd_transfer_run)
+    t = tsub.add_parser("report", help="render a saved transfer report as markdown")
+    t.add_argument("json", help="report written by `antares transfer run`")
+    t.add_argument("--md", default=None, help="write the markdown here instead of printing it")
+    t.set_defaults(func=cmd_transfer_report)
+
     p = sub.add_parser("export", help="write a lock as a standalone MJCF (+ scene, sidecar, meshes)")
     p.add_argument("name", help="lock name (see `antares locks`)")
     p.add_argument("-o", "--output", default=None, help="output directory (default: export/<name>)")
@@ -1884,6 +2340,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--task", default=None,
                    help="task name or .task.json path (from `antares task`): add a cube and place marker")
     p.add_argument("--object-size", type=float, default=0.03, help="cube edge length in metres (with --task)")
+    p.add_argument(
+        "--format",
+        choices=["mjcf", "isaaclab", "maniskill", "mjlab", "json", "all"],  # antares.export_targets.FORMATS
+        default="mjcf",
+        help="also write that simulator's actuator config next to the MJCF (default: mjcf only; "
+        "all = isaaclab + maniskill + mjlab + json)",
+    )
+    p.add_argument(
+        "--fps",
+        type=float,
+        default=None,
+        help="dataset frame rate used to turn latency_frames into seconds "
+        "(default: the dataset's meta/info.json in the local HF cache, else 30)",
+    )
     p.set_defaults(func=cmd_export)
 
 
