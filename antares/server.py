@@ -184,6 +184,18 @@ def _command_map(arm, cmap):
         arm.command_map = CommandMap.identity()
 
 
+def lock_simulate(lock: dict):
+    """A SimulateFn holding the lock's command map fixed, or None (the
+    callee's default) for a lock without one. For refits warm-started from
+    a lock: the dynamics move, the sensor calibration does not."""
+    cmap = command_map_from_lock(lock)
+    if cmap is None:
+        return None
+    from antares.calibrate import default_simulate
+
+    return default_simulate(cmap)
+
+
 def mesh_dir() -> Path:
     if MESH_DIR is not None:
         return Path(MESH_DIR)
@@ -561,6 +573,7 @@ def run_drift(
         scan = drift_scan(
             ds.episodes,
             lock,
+            simulate=lock_simulate(load_lock_dict(lock_name)),
             window=window,
             step=step,
             max_evaluations=max_evaluations,
@@ -885,6 +898,7 @@ def run_dr(
         on_progress=on_progress,
         should_stop=should_stop,
         on_fit=on_fit,
+        simulate=lock_simulate(lock),
     )
     if not results:
         raise HTTPException(status_code=409, detail="cancelled before the first fit finished")

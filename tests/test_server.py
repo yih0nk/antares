@@ -1422,3 +1422,18 @@ def test_residual_uses_lock_command_map(client, pick):
     mapped = np.asarray(client.get("/api/residual", params={**q, "lock": "unit-a-mapped"}).json()["residual"])
     np.testing.assert_allclose(mapped[:, 2], plain[:, 2] - 2.0, atol=1e-3)
     np.testing.assert_allclose(mapped[:, :2], plain[:, :2], atol=1e-9)
+
+
+def test_lock_simulate_holds_the_lock_command_map():
+    """Real MuJoCo: drift and DR refits replay a mapped lock with its map."""
+    from antares.sim import SimParams
+
+    assert server.lock_simulate({"params": {}}) is None
+    sim = server.lock_simulate({"command_map": {"gain": [1.0] * 6, "bias": [0.0, 5.0, 0.0, 0.0, 0.0, 0.0]}})
+    T = 30
+    action = np.zeros((T, 6))
+    action[:, 1] = 20.0
+    ep = Episode(index=0, fps=30.0, joint_names=JOINTS, state=np.zeros((T, 6)), action=action)
+    _, mapped = sim(SimParams(), ep)
+    plain = server.lock_simulate({"command_map": {"gain": [1.0] * 6, "bias": [0.0] * 6}})(SimParams(), ep)[1]
+    assert mapped[-1, 1] > plain[-1, 1]
