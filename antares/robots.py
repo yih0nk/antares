@@ -255,6 +255,8 @@ REGISTRY: dict[str, RobotModel] = {
         joint_names=("Rotation", "Pitch", "Elbow", "Wrist_Pitch", "Wrist_Roll", "Jaw"),
         description="The Robot Studio SO-ARM100 v1.3 (MuJoCo Menagerie trs_so_arm100); Euler at 2 ms, white meshes.",
         unit_map_factory=default_unit_map,
+        # Its MJCF has no shared sts3215 class to bake into: export through MjSpec.
+        export_class=None,
         label="SO-100",
     ),
     "aloha": _menagerie_robot(

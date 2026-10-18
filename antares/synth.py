@@ -25,6 +25,18 @@ from antares.data import Dataset, Episode
 JOINTS = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper")
 
 
+def robot_type_for(robot) -> str:
+    """The ``robot_type`` a LeRobot recording on ``robot`` (a
+    :class:`~antares.robots.RobotModel`) would carry: ``so101_follower`` /
+    ``so100_follower`` for the SO arms (whatever the unit variant), else the
+    registry name, which the registry's own ``robot_types`` patterns match."""
+    name = robot.name
+    for so in ("so100", "so101"):
+        if name == so or name.startswith(so + "_"):
+            return f"{so}_follower"
+    return name
+
+
 def command_trajectory(n_frames: int, fps: float, rng: np.random.Generator) -> np.ndarray:
     """Smooth random commands, (T, 6) in dataset units.
 
@@ -54,7 +66,7 @@ def synthesize(
     seed: int = 0,
     noise_units: float = 0.2,
     repo_id: str = "synthetic/arm",
-    robot_type: str = "so101_follower",
+    robot_type: str | None = None,
     arm=None,
 ) -> Dataset:
     """Simulate ``n_episodes`` recordings of an arm whose true dynamics are ``params``.
@@ -63,25 +75,37 @@ def synthesize(
     arm that has settled before recording starts. ``noise_units`` is the
     standard deviation of Gaussian sensor noise on the measured state, in
     dataset units (100 units is half a joint's range).
+
+    ``arm`` (default: the stock SO-101) is the sim that records; the dataset
+    carries its robot's dataset columns as joint names and, unless
+    ``robot_type`` is given, the ``robot_type`` that robot's recordings
+    carry (:func:`robot_type_for`), so a replay of the recording resolves
+    to the same model. The commands are SO-arm motions: five body joints
+    and a gripper, so the arm must have six joints.
     """
     if arm is None:
         from antares.sim import Arm
 
         arm = Arm()
+    joints = tuple(arm.robot.joints)
+    if len(joints) != len(JOINTS):
+        raise ValueError(f"synth generates SO-arm motions; {arm.robot.name} has {len(joints)} joints, not {len(JOINTS)}")
+    if robot_type is None:
+        robot_type = robot_type_for(arm.robot)
     arm.apply(params)
     rng = np.random.default_rng(seed)
     episodes = []
     for i in range(n_episodes):
         action = command_trajectory(n_frames, fps, rng)
-        commanded = Episode(index=i, fps=fps, joint_names=JOINTS, state=action, action=action)
+        commanded = Episode(index=i, fps=fps, joint_names=joints, state=action, action=action)
         sim_q = arm.replay(commanded)
         state = arm.unit_map.to_units(sim_q) + rng.normal(0.0, noise_units, size=sim_q.shape)
-        episodes.append(Episode(index=i, fps=fps, joint_names=JOINTS, state=state, action=action))
+        episodes.append(Episode(index=i, fps=fps, joint_names=joints, state=state, action=action))
     return Dataset(
         repo_id=repo_id,
         robot_type=robot_type,
         fps=fps,
-        joint_names=JOINTS,
+        joint_names=joints,
         episodes=tuple(episodes),
     )
 
@@ -164,4 +188,4 @@ def write_local(ds: Dataset, root: str | Path) -> Path:
     return root
 
 
-__all__ = ["JOINTS", "command_trajectory", "parse_changes", "synthesize", "worn", "write_local"]
+__all__ = ["JOINTS", "command_trajectory", "parse_changes", "robot_type_for", "synthesize", "worn", "write_local"]

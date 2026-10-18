@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -1330,6 +1331,22 @@ def test_synth_writes_a_dataset_check_reads(tmp_path, capsys):
     assert "'latency_frames': 2" in printed and "'kp': 499.11" in printed
     ds = read_local(out)
     assert len(ds.episodes) == 2 and ds.episodes[0].state.shape == (30, 6)
+
+
+@pytest.mark.slow
+def test_synth_with_a_sensor_lock_passes_check_without_wear(monkeypatch, tmp_path, capsys):
+    """synth --lock records through the lock's sensor map, so an unworn arm
+    passes the check that replays with that map."""
+    import shutil
+
+    from antares import server
+
+    name = "svla_so101_pickplace_sensor_sim"
+    shutil.copy(Path(__file__).parent.parent / "locks" / f"{name}.lock.json", tmp_path)
+    monkeypatch.setattr(server, "LOCK_DIR", tmp_path)
+    out = tmp_path / "fresh"
+    assert cli.main(["synth", str(out), "--lock", name, "--episodes", "5", "--frames", "90"]) == 0
+    assert cli.main(["check", str(out), "--lock", name, "--no-record"]) == 0
 
 
 def test_replay_with_lock_passes_command_map(monkeypatch, tmp_path, capsys):

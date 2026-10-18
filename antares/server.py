@@ -117,10 +117,9 @@ def rejected(verdict: Verdict, what: str) -> HTTPException:
 
 def fetch_hub_info(repo_id: str) -> dict:
     """Only ``meta/info.json`` from the Hub (cached by huggingface_hub)."""
-    from huggingface_hub import hf_hub_download
+    from antares.hub import download
 
-    path = hf_hub_download(repo_id, "meta/info.json", repo_type="dataset")
-    return json.loads(Path(path).read_text())
+    return json.loads(download(repo_id, "meta/info.json").read_text())
 
 
 def _upload_dir_for(repo_id: str) -> Path | None:
@@ -1058,6 +1057,139 @@ def build_lock(ds: Dataset, train: list, result, name: str | None, robot: str | 
     )
 
 
+def save_tuned_lock(
+    ds: Dataset,
+    params,
+    name: str,
+    *,
+    from_lock: str | None = None,
+    n_train: int = 20,
+    n_eval: int = 10,
+    seed: int = 0,
+) -> dict:
+    """Save hand-picked ``params`` (the viewer's tuning panel) as lock ``name``.
+
+    Scored like a calibration on the same train/eval split, against the
+    robot's default parameters, so the lock's numbers compare with fitted
+    ones. Tuned from a saved lock (``from_lock``), the new lock keeps that
+    lock's model, sensor command map, LeRobot calibration and camera/scene
+    fits: only the physics changed. Refuses to overwrite an existing lock.
+    """
+    import math
+    import os
+    import time
+
+    from antares.calibrate import CalibrationResult, _safe_score, default_simulate, split_episodes
+
+    path = _lock_path(name)
+    if path.exists():
+        raise HTTPException(status_code=409, detail=f"a lock named {name!r} already exists")
+    src = load_lock_dict(from_lock) if from_lock else None
+    # The lock is for this dataset's robot; a source lock fitted for another
+    # model, or with a command map of another width, cannot lend its setup.
+    robot = check_robot(dataset_robot(ds))
+    if src is not None:
+        src_robot = check_robot(src.get("robot") or robot)
+        if src_robot != robot:
+            raise HTTPException(
+                status_code=400,
+                detail=f"lock {from_lock!r} was fitted for robot {src_robot!r}; {ds.repo_id} simulates on {robot!r}",
+            )
+        cmap = command_map_from_lock(src)
+        if cmap is not None and cmap.gain.shape != (len(ds.joint_names),):
+            raise HTTPException(
+                status_code=400,
+                detail=f"lock {from_lock!r} has a command map for {cmap.gain.shape[0]} joints; "
+                f"{ds.repo_id} has {len(ds.joint_names)}",
+            )
+    sim = (lock_simulate(src) if src else None) or default_simulate(robot=robot)
+    try:
+        train, eval_ = split_episodes(ds.episodes, n_train, n_eval, seed=seed)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    t0 = time.perf_counter()
+    # The same start a calibration of this lock would use (BAM's values for
+    # a servo-model lock), so the saved scores compare with fitted ones.
+    start = start_params(str(getattr(params, "servo", None) or "position"), robot)
+
+    def scored(p, episodes):
+        report, value = _safe_score(p, episodes, sim)
+        if report is None or not math.isfinite(value) or not math.isfinite(float(report.overall_deg)):
+            raise HTTPException(
+                status_code=400,
+                detail="these parameters make the simulation unstable; move the sliders back toward the lock",
+            )
+        return report
+
+    before_train, after_train = scored(start, train), scored(params, train)
+    if eval_:
+        before_eval, after_eval = scored(start, eval_), scored(params, eval_)
+    else:  # no held-out episodes: the training reports stand in, as calibrate() does
+        before_eval, after_eval = before_train, after_train
+    result = CalibrationResult(
+        params=params,
+        baseline=start,
+        train_score=float(after_train.overall_deg),
+        eval_score=float(after_eval.overall_deg),
+        baseline_train_score=float(before_train.overall_deg),
+        baseline_eval_score=float(before_eval.overall_deg),
+        per_joint_before={k: float(v) for k, v in before_eval.per_joint_deg.items()},
+        per_joint_after={k: float(v) for k, v in after_eval.per_joint_deg.items()},
+        history=[],
+        n_evaluations=0,
+        elapsed_s=time.perf_counter() - t0,
+        train_episodes=[ep.index for ep in train],
+        eval_episodes=[ep.index for ep in eval_],
+        space="per_joint" if params.has_per_joint else "shared",
+        # No search ran: the one "manual" stage records the hand-set values.
+        stages=[{"name": "manual", "n_evaluations": 0, "train_score": float(after_train.overall_deg),
+                 "params": params.to_dict()}],
+    )
+    # Only the fixed setup carries over: the sensor map and the LeRobot
+    # calibration. The source's dynamics-only fit describes a search that
+    # never ran for these values.
+    carried = {k: src[k] for k in ("command_map", "calibration") if src and src.get(k) is not None}
+    lock = build_lock(ds, train, result, name, robot=robot, **carried)
+    if src:
+        lock = lock.replace(cameras=dict(src.get("cameras") or {}), scene=src.get("scene"), objects=src.get("objects"))
+    # Refuse to overwrite: the file is claimed exclusively between the check
+    # above (before the scoring passes) and the write.
+    try:
+        os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+    except FileExistsError:
+        raise HTTPException(status_code=409, detail=f"a lock named {name!r} was saved meanwhile")
+    try:
+        save_lock(lock)
+        if from_lock:
+            _copy_fit_sidecars(from_lock, name)
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+    return lock.to_dict()
+
+
+def _copy_fit_sidecars(from_lock: str, name: str) -> None:
+    """The scene and object fits live next to the lock in ``<lock>.scene.json``
+    / ``<lock>.objects.json`` and every reader looks them up by lock name, so
+    a lock tuned from another gets its own copies (naming the new lock)."""
+    import json as _json
+
+    from antares.objects import objects_path
+    from antares.scene import scene_path
+
+    for path_of in (scene_path, objects_path):
+        src_path = path_of(from_lock, LOCK_DIR)
+        if not src_path.is_file():
+            continue
+        try:
+            d = _json.loads(src_path.read_text())
+        except ValueError:
+            continue
+        if isinstance(d, dict) and "lock" in d:
+            d["lock"] = name
+        path_of(name, LOCK_DIR).write_text(_json.dumps(d, indent=2) + "\n")
+
+
 # --------------------------------------------------------------------------
 # Drift scans (``LOCK_DIR/<lock>.drift.json``, one per lock)
 # --------------------------------------------------------------------------
@@ -1122,19 +1254,19 @@ def run_drift(
     lock_name = resolve_lock_ref(lock_name)
     lock = load_lock(lock_name)
     path = _drift_path(lock_name)
-    sim = simulate_for(dataset_robot(ds))
+    # The lock's own sim (its robot, sensor and unit maps), else the dataset's robot.
+    sim = lock_simulate(lock.to_dict()) or simulate_for(dataset_robot(ds))
     try:
         scan = drift_scan(
             ds.episodes,
             lock,
-            simulate=lock_simulate(lock.to_dict()),
+            simulate=sim,
             window=window,
             step=step,
             max_evaluations=max_evaluations,
             seed=seed,
             on_progress=on_progress,
             should_stop=should_stop,
-            **({"simulate": sim} if sim is not None else {}),
         )
     except ValueError as e:  # e.g. fewer episodes than one window
         raise HTTPException(status_code=400, detail=str(e))
@@ -1397,10 +1529,18 @@ def run_calibration(
     if n_seeds > 1:
         extra["n_seeds"] = int(n_seeds)
     try:
+        if factors is not None or per_joint_factors is not None:
+            # +/- edits apply to what this fit searches by default (the servo
+            # model's fields on a servo start).
+            from antares.calibrate import default_factor_names
+
+            servo_fit = start.uses_servo_model
         if factors is not None:
-            extra["fit_factors"] = _factor_names(factors, "shared")
+            extra["fit_factors"] = _factor_names(factors, "shared", default_factor_names(servo_fit)[0])
         if per_joint_factors is not None:
-            extra["per_joint_factors"] = _factor_names(per_joint_factors, "per_joint")
+            extra["per_joint_factors"] = _factor_names(
+                per_joint_factors, "per_joint", default_factor_names(servo_fit, extra.get("fit_factors"))[1]
+            )
     except (KeyError, ValueError) as e:
         raise HTTPException(status_code=400, detail=str(e).strip("'\"")) from e
     if fit_sensor:
@@ -1456,14 +1596,15 @@ def run_calibration(
     return result, lock.to_dict(), path
 
 
-def _factor_names(selection: list[str], stage: str) -> list[str] | None:
-    """Resolve a factor selection (names, or ``+x``/``-y`` edits of the
-    stage's defaults) into the list calibrate takes (``None``: defaults)."""
+def _factor_names(selection: list[str], stage: str, defaults=None) -> list[str] | None:
+    """Resolve a factor selection (names, or ``+x``/``-y`` edits of
+    ``defaults``, what the fit searches without one) into the list calibrate
+    takes (``None``: defaults)."""
     from antares import factors
 
     if not selection:
         raise ValueError(f"{stage} factors: an empty list leaves nothing to fit; omit it for the defaults")
-    out = factors.parse_selection(",".join(selection), stage)
+    out = factors.parse_selection(",".join(selection), stage, defaults=defaults)
     return None if out is None else list(out)
 def resolve_calibration(
     calibration_path, robot_id: str | None, robot_type: str = "so101_follower", *, strict: bool = True
@@ -1703,6 +1844,7 @@ def run_check(
 ):
     """Score ``lock`` (a name in LOCK_DIR, or a lock dict) on ``ds`` with the
     shared Arm and return an :class:`antares.check.CheckResult`."""
+    from antares.calibrate import describe_simulate
     from antares.check import check
 
     lock_d = lock if isinstance(lock, dict) else load_lock_dict(lock)
@@ -1713,6 +1855,8 @@ def run_check(
         arm.apply(params)
         return np.asarray(arm.real_q(ep)), np.asarray(arm.replay(ep))
 
+    # Tagged with the robot so scoring uses its joints, not the SO arms' six.
+    describe_simulate(simulate, arm)
     try:
         with arm_lock(robot), _command_map(arm, command_map_from_lock(lock_d), unit_map_from_lock(lock_d)):
             return check(
@@ -2210,7 +2354,11 @@ class CalibrateRequest(BaseModel):
 @app.post("/api/calibrate")
 def calibrate_start(req: CalibrateRequest) -> dict:
     if req.name is not None:
-        _lock_path(req.name)  # validate early
+        if _lock_path(req.name).exists():  # validates the name too
+            raise HTTPException(
+                status_code=409,
+                detail=f"a lock named {req.name!r} already exists; pick another name or delete it first",
+            )
     if req.robot_id is not None:
         from antares.registry import RegistryError, validate_robot_id
 
@@ -2357,6 +2505,32 @@ def lock_export_zip(
         media_type="application/zip",
         headers=_attachment(f"{name}.zip"),
     )
+
+
+class SaveLockRequest(BaseModel):
+    dataset: str
+    name: str
+    # As POST /api/replay takes them: scalars or per-joint lists, plus "servo".
+    params: dict[str, float | list[float] | str]
+    # The saved lock the values were tuned from; its sensor map, calibration
+    # and camera fits carry over.
+    from_lock: str | None = None
+    n_train: int = Field(20, ge=1)
+    n_eval: int = Field(10, ge=0)
+    seed: int = 0
+
+
+@app.post("/api/locks")
+def lock_save(req: SaveLockRequest) -> dict:
+    """Save hand-tuned parameters as a new lock; returns its summary."""
+    ds = get_dataset(req.dataset)
+    try:
+        params = params_from_dict(req.params)
+    except (TypeError, ValueError, KeyError) as e:
+        raise HTTPException(status_code=400, detail=f"bad params: {e}")
+    return lock_summary(save_tuned_lock(
+        ds, params, req.name, from_lock=req.from_lock, n_train=req.n_train, n_eval=req.n_eval, seed=req.seed
+    ))
 
 
 @app.delete("/api/locks/{name}")

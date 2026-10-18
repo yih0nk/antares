@@ -97,6 +97,20 @@ class FakeLock:
 # ---------------------------------------------------------------------------
 
 
+def test_compute_trends_mixes_per_joint_and_shared_windows():
+    # A per-joint lock's windows refit to shared values when that helps and
+    # keep per-joint tuples when it does not; trends average the tuples.
+    pj = SimParams(kp=(80.0,) * 6, latency_frames=(4, 4, 4, 3, 4, 5))
+    shared = SimParams(kp=60.0, latency_frames=4)
+    windows = [
+        DriftWindow(list(range(5 * i, 5 * i + 10)), shared if i % 2 else pj, 0.8, 1.0 + 0.1 * i)
+        for i in range(4)
+    ]
+    trends = compute_trends(windows, n_boot=20)
+    assert "kp" in trends and "latency_frames" in trends
+    assert trends["kp"].slope != 0
+
+
 def test_window_slices():
     s = window_slices(50, 10, 5)
     assert len(s) == 9
