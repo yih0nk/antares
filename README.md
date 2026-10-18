@@ -436,7 +436,7 @@ and sets a `cause` output.
 ## Contact detection from the residual
 
 Once the sim reproduces the arm's free-space motion (the SO-101 lock
-tracks held-out episodes to 1.05 deg RMSE), whatever is left in
+tracks held-out episodes to 0.74 deg RMSE), whatever is left in
 `real - sim` is something the sim does not model. In a pick-and-place
 log that should be the arm touching, grasping or pushing an object, so a
 sustained deviation is a contact event read off the joint encoders alone,
