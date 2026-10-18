@@ -55,6 +55,10 @@ MIN_EPISODES = 15
 ALLOWED_FPS: tuple[float, ...] = (30.0, 50.0)
 MAX_DATA_BYTES = 200 * 2**20  # tabular part only; videos are never downloaded
 MAX_DATA_FILES = 200  # v2 datasets store one parquet per episode; thousands of tiny downloads are too slow
+#: Below this command-to-state gap (a fraction of how far the joints move,
+#: see :func:`command_state_gap`) the log is not teleoperation: the commands
+#: are the measured joints.
+MIN_COMMAND_GAP = 0.02
 
 # ``so100``/``so101`` in any spelling, plus LeRobot's newer unified
 # ``so_follower`` name for the same arm.
@@ -493,6 +497,39 @@ def _usable_episodes(ds: Dataset) -> list[Episode]:
     return out
 
 
+def command_state_gap(episodes: Sequence[Episode], max_shift: int = 5) -> float:
+    """How far the commands sit from the measured joints, relative to the motion.
+
+    RMS of ``action[t] - state[t + k]`` over the arm joints (gripper
+    excluded) and all frames, minimised over shifts ``k`` in
+    ``0..max_shift`` so a log that stores the next or a later state as its
+    action still reads as zero, then divided by the RMS spread of the
+    measured joints so the number does not depend on the dataset's units.
+    A teleoperated follower lags and sags behind its leader by a few
+    percent of its motion; a scripted or replayed log whose commands are
+    its own measurements does not, and any sim matches it trivially.
+    """
+    arm = [i for i, j in enumerate(JOINTS) if j != "gripper"]
+    if not episodes:
+        return math.inf
+    state = np.concatenate([ep.state[:, arm] for ep in episodes])
+    spread = float(np.sqrt(np.mean((state - state.mean(axis=0)) ** 2)))
+    if spread == 0:
+        return math.inf
+    best = math.inf
+    for k in range(max_shift + 1):
+        sq, n = 0.0, 0
+        for ep in episodes:
+            if len(ep) <= k:
+                continue
+            d = ep.action[: len(ep) - k, arm] - ep.state[k:, arm]
+            sq += float(np.sum(d**2))
+            n += d.size
+        if n:
+            best = min(best, math.sqrt(sq / n))
+    return best / spread
+
+
 def load_with_retries(
     repo_id: str,
     load: Callable[[str], Dataset],
@@ -540,8 +577,11 @@ def scan(
     ``<lock_dir>/<owner>__<name>.lock.json``. Any exception from one dataset
     is recorded under ``failures`` and the scan continues. Candidates not
     reached before ``time_budget_s`` runs out are listed under ``skipped``.
-    ``on_progress`` receives dict events (``start``, ``fit``, ``robot``,
-    ``failed``, ``skipped``, ``done``). The report is saved to
+    A dataset whose commands equal its measured joints
+    (:func:`command_state_gap` below :data:`MIN_COMMAND_GAP`) is moved to
+    ``rejected`` without a fit. ``on_progress`` receives dict events
+    (``start``, ``fit``, ``robot``, ``rejected``, ``failed``, ``skipped``,
+    ``done``). The report is saved to
     ``report_path`` (default ``<lock_dir>/fleet.json``) after every robot.
 
     Afterwards :func:`finalize` adds the fleet statistics, outliers and a
@@ -589,6 +629,17 @@ def scan(
             if tuple(ds.joint_names) != JOINTS:
                 raise ValueError(f"joints {list(ds.joint_names)} are not the SO-101 joints")
             episodes = _usable_episodes(ds)
+            gap = command_state_gap(episodes)
+            if gap < MIN_COMMAND_GAP:
+                reason = (
+                    f"commands equal the measured joints (gap {gap:.1%} of the motion < {MIN_COMMAND_GAP:.0%}); "
+                    "not a teleoperation log"
+                )
+                report.rejected.append({"dataset": cand.repo_id, "reason": reason})
+                emit({"type": "rejected", "dataset": cand.repo_id, "reason": reason})
+                report.elapsed_s = time.monotonic() - t0
+                report.save(report_path)
+                continue
             n_tr, n_ev = plan_split(len(episodes), n_train, n_eval)
             train, eval_ = split_episodes(episodes, n_tr, n_ev, seed=seed)
 
@@ -937,6 +988,7 @@ __all__ = [
     "JOINTS",
     "MAX_DATA_BYTES",
     "MAX_DATA_FILES",
+    "MIN_COMMAND_GAP",
     "MIN_EPISODES",
     "PINNED",
     "Candidate",
@@ -944,6 +996,7 @@ __all__ = [
     "RobotEntry",
     "accepted",
     "check_info",
+    "command_state_gap",
     "discover",
     "fetch_data_files",
     "fetch_info",
