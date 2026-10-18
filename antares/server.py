@@ -958,7 +958,7 @@ def run_diagnose(
     lock: str | dict,
     *,
     last: int | None = None,
-    max_evaluations: int = 120,
+    max_evaluations: int = 240,
     seed: int = 0,
 ):
     """Name what changed since ``lock`` was fitted, from the same episodes
@@ -1426,7 +1426,7 @@ class CheckRequest(BaseModel):
     last: int | None = Field(None, ge=1)
     min_episodes: int = Field(5, ge=1)
     explain: bool = False
-    explain_evaluations: int = Field(120, ge=10, le=2000)
+    explain_evaluations: int = Field(240, ge=10, le=2000)
 
 
 @app.post("/api/check")

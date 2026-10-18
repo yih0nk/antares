@@ -884,8 +884,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true", help="print the CheckResult as JSON")
     p.add_argument("--explain", action="store_true",
                    help="on drift, refit and name the parameter change that explains it")
-    p.add_argument("--explain-evaluations", type=int, default=120, metavar="N",
-                   help="refit budget for --explain (default 120)")
+    p.add_argument("--explain-evaluations", type=int, default=240, metavar="N",
+                   help="refit budget for --explain (default 240)")
     p.set_defaults(func=cmd_check)
 
 
