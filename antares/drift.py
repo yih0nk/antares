@@ -519,8 +519,9 @@ def drift_scan(
     slices = window_slices(len(ordered), window, step)
     if simulate is None:
         from antares.calibrate import default_simulate
+        from antares.check import lock_robot
 
-        simulate = default_simulate()
+        simulate = default_simulate(robot=lock_robot(lock))
     stop = should_stop or (lambda: False)
 
     windows: list[DriftWindow] = []

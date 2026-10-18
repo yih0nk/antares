@@ -157,6 +157,13 @@ def _lock_view(lock: Any) -> tuple[str, str, Any, float | None, dict[str, float]
     return name, dataset, params, reference, per_joint
 
 
+def lock_robot(lock: Any) -> str | None:
+    """Registry name of the model a lock was fitted on (``None``: default)."""
+    if isinstance(lock, dict):
+        return lock.get("robot") or None
+    return getattr(lock, "robot", None) or None
+
+
 def _finite_or_none(v: Any) -> float | None:
     if v is None:
         return None
@@ -246,8 +253,10 @@ def check(
     if simulate is None:
         from antares.calibrate import default_simulate
 
-        simulate = default_simulate()
-    report = aggregate([tracking_error(*simulate(params, ep)) for ep in eps])
+        simulate = default_simulate(robot=lock_robot(lock))
+    r = getattr(simulate, "robot", None)  # see antares.calibrate.describe_simulate
+    names = {"joint_names": tuple(r.joints), "exclude": tuple(r.grippers)} if r is not None else {}
+    report = aggregate([tracking_error(*simulate(params, ep), **names) for ep in eps])
     overall = float(report.overall_deg)
     scored = tuple(report.scored_joints)
 
