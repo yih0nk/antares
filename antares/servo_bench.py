@@ -388,7 +388,8 @@ def cmd_live(args) -> int:
     from antares import servo_live
 
     lock = load_lock(args.lock)
-    pot = servo_live.pot_for_lock(lock, args.dataset)
+    lock_file = Path(args.lock)
+    pot = servo_live.pot_for_lock(lock, args.dataset, lock_file if lock_file.is_file() else None)
     if args.replay:
         ticks = servo_live.csv_ticks(args.replay, args.servo)
     else:

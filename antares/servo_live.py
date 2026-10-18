@@ -124,9 +124,19 @@ def csv_ticks(path: str | Path, servo: str, loop: bool = True) -> Iterator[tuple
             return
 
 
-def pot_for_lock(lock, dataset: str | None = None) -> sb.PotFit:
-    """The counts -> degrees line saved with the dataset the lock was fitted on."""
+def pot_for_lock(lock, dataset: str | None = None, lock_path: str | Path | None = None) -> sb.PotFit:
+    """The counts -> degrees line saved with the dataset the lock was fitted on.
+
+    The lock names its dataset as calibrate saw it, relative to where it ran
+    (bench/pipeline.sh runs inside the recordings folder, locks in its
+    ``locks/``); when that is not found from here it is looked up next to
+    the lock's folder, ``lock_path``.
+    """
     path = Path(dataset or lock.dataset) / "meta" / "info.json"
+    if dataset is None and not path.is_file() and lock_path is not None and not Path(lock.dataset).is_absolute():
+        near = Path(lock_path).resolve().parent.parent / lock.dataset / "meta" / "info.json"
+        if near.is_file():
+            path = near
     if not path.is_file():
         raise SystemExit(f"error: no {path}; pass --dataset <the servo's imported dataset> for its pot conversion")
     bench = json.loads(path.read_text()).get("antares_bench")
