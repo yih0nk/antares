@@ -150,9 +150,9 @@ def test_shipped_locks_load_as_scalar_params():
         # the lock survives a save/load round trip untouched
         back = RobotLock.from_dict(json.loads(json.dumps(lock.to_dict())))
         assert back == lock
-        # written before seeds were recorded: no seed block, only latency is pinned
+        # single-seed fits: no seed block (stages may record seed 0), only latency is pinned
         assert "seeds" not in raw["result"] and lock.result.seeds is None
-        assert all("seed" not in s for s in raw["result"].get("stages", []))
+        assert all(s.get("seed", 0) == 0 for s in raw["result"].get("stages", []))
         assert pinned_params(lock) == pinned_params(raw) == ["latency_frames"]
         assert param_spread(lock) is None and param_spread(raw) is None
 
@@ -221,7 +221,7 @@ def test_sensor_locks_replay_to_their_stored_scores(name):
     ds = _cached_dataset(lock.dataset)
     _, eval_ = split_episodes(ds.episodes, 20, 10, seed=0)
     assert [e.index for e in eval_] == lock.result.eval_episodes
-    arm = Arm(lock.params, command_map=CommandMap.from_dict(lock.command_map))
+    arm = Arm(lock.params, command_map=CommandMap.from_dict(lock.command_map), robot=lock.robot)
     report = aggregate([tracking_error(arm.real_q(e), arm.replay(e)) for e in eval_])
     assert report.overall_deg == pytest.approx(lock.result.eval_score, abs=1e-4)
     for joint, deg in lock.result.per_joint_after.items():
