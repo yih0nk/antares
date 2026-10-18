@@ -19,6 +19,7 @@ import {
   type Residual,
 } from "./api";
 import { Arm, compMaterial, ghostMaterial, realMaterial, type Playhead } from "./Arm";
+import { CameraView } from "./CameraView";
 import { CrossHeatmap, JointTrace, ResidualStrip, Sparkline } from "./Charts";
 import { AddDataset } from "./AddDataset";
 
@@ -464,6 +465,8 @@ export default function App() {
 
   const ghostLabel =
     ghost === DEFAULT ? "default sim" : ghost === LIVE ? "best fit so far" : `lock ${ghost}`;
+  // Camera fits live with a lock: the ghost's, or the dataset's first saved one.
+  const cameraLock = ghost !== DEFAULT && ghost !== LIVE ? ghost : dsLocks[0]?.name ?? null;
 
   const seek = (f: number) => {
     playhead.frame = f;
@@ -716,6 +719,16 @@ export default function App() {
             </div>
           )}
         </section>
+
+        <CameraView
+          dataset={dataset}
+          episode={episode}
+          frame={frame}
+          playing={playing}
+          lock={cameraLock}
+          busy={running}
+          onError={setError}
+        />
 
         <section>
           <div className="label">Lag compensation</div>

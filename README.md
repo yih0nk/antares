@@ -971,6 +971,66 @@ Locks fitted this way carry a `command_map`. Replay, the viewer, `cross`,
 back in raw units), `export` (in the sidecar) and the drift and DR refits
 (which hold the map fixed) all use it. Locks without one behave as before.
 
+## Cameras from the logs
+
+Every LeRobot dataset ships video from fixed cameras, and the joint angles
+are known at every frame. `antares camera-fit` solves for the camera pose
+that makes the sim arm overlap the real one, so the UI can draw the sim
+arm's outline over the real video and an exported MJCF carries a
+`<camera>` per fitted camera.
+
+```sh
+.venv/bin/pip install -e ".[video]"      # PyAV (AV1 via dav1d), OpenCV, SciPy
+.venv/bin/antares camera-fit lerobot/svla_so101_pickplace --camera up --lock svla_so101_pickplace
+.venv/bin/antares camera-list svla_so101_pickplace
+```
+
+How it works, with no OpenGL and no learned segmenter:
+
+1. **Frames.** Only the one video file an episode lives in is downloaded;
+   `meta/episodes` maps episode frames to timestamps in it. Decoded frames
+   are cached under `.cache/antares/frames/`.
+2. **Real silhouette.** The camera is static and the arm moves, so the
+   per-pixel median over frames spread across episodes is the background.
+   A Lab colour histogram of moving pixels against the background then
+   recovers what subtraction cannot see (the static base, the rest pose
+   that leaks into the median), restricted to regions the moving arm
+   touches in most frames so same-coloured clutter is dropped. The contrast
+   sign (black arm on a white table for the SO-101, orange on a dark table
+   for the SO-100) is learned from the frames.
+3. **Sim silhouette.** Each visual mesh is reduced to its convex hull once;
+   `Arm.fk` poses the hulls, a pinhole camera (MuJoCo convention) projects
+   them, and `cv2.fillConvexPoly` fills each one.
+4. **Fit.** CMA-ES maximises the mean IoU of the two silhouettes over 40
+   frames from 4 episodes, searched in look-at coordinates (target point,
+   distance, azimuth, elevation, roll, fov). 3000 random cameras on a
+   hemisphere over the arm are scored at 80x60 first, the 8 best distinct
+   ones get a short CMA-ES run at 160x120, and the best is refined at full
+   resolution. 12 frames from other episodes are scored as a held-out
+   check. About a minute per camera.
+
+The demo datasets, 40 fit frames / 12 held-out frames each:
+
+| dataset | camera | fit IoU | held-out IoU | notes |
+|---|---|---|---|---|
+| svla_so101_pickplace | `up` | 0.82 | 0.83 | clean; residual is hull slack and the real gripper reaching lower than the sim's |
+| svla_so101_pickplace | `side` | 0.58 | 0.72 | the arm leaves the top of the frame in many fit frames (per-frame IoU down to 0.08) |
+| svla_so100_pickplace | `top` | 0.63 | 0.60 | black servo and gripper parts vanish against the black table, so the real mask is the orange and white parts only |
+
+Fits are saved as `locks/<lock>.camera.json` (frames used, per-frame IoUs)
+and a compact copy in the lock's `cameras` field, which `antares export`
+writes into `<worldbody>` as `<camera name="up" pos=... quat=... fovy=.../>`.
+The API: `POST /api/camera/fit` (a job, kind `camera`), `GET /api/camera?lock=`,
+`GET /api/camera/cameras?dataset=`, and `GET /api/camera/overlay?dataset=&camera=&episode=&frame=&lock=`
+returns the real frame (JPEG data URL), the sim outline polygons, the
+segmented arm's polygon and their IoU. The UI's Camera section shows that
+overlay at the playhead whenever playback is paused.
+
+Caveats: silhouettes pin the viewing direction well but trade distance
+against field of view (a farther camera with a narrower fov looks nearly
+the same), so expect the position to be loose along the optical axis;
+wrist cameras are skipped; the sim is the SO-101 model for both datasets.
+
 ## Layout
 
 | Path | What |
@@ -1004,6 +1064,10 @@ back in raw units), `export` (in the sidecar) and the drift and DR refits
 | `examples/` | `randomize_env.py`: DR ranges in a training loop |
 
 | `antares/fleet.py` | Hub discovery, fleet scan, fleet statistics |
+| `antares/video.py` | Dataset video frames (episode -> file/timestamp, AV1 decode, frame cache) |
+| `antares/silhouette.py` | Real arm mask: median background, colour model, static-arm region |
+| `antares/project.py` | Sim arm silhouette: mesh hulls, pinhole camera, polygon fill |
+| `antares/camera.py` | Fixed-camera fit (CMA-ES over look-at coordinates), `locks/*.camera.json` |
 | `locks/` | Committed locks for the demo arms; `locks/fleet/` for the fleet scan |
 | `web/` | React + three.js viewer |
 

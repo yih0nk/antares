@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import base64
 import json
 import os
 import re
@@ -2139,6 +2140,244 @@ def diagnose_start(req: DiagnoseRequest) -> dict:
         "status_url": f"/api/jobs/{job.id}",
         "events_url": f"/api/jobs/{job.id}/events",
     }
+
+
+# ==========================================================================
+# Camera fits (antares.camera / antares.video / antares.project)
+#
+# Fit a dataset's fixed camera from its videos and the logged joint angles,
+# list the fits saved for a lock, and draw the sim arm's outline over a real
+# frame for the UI. Kept together here, after the other routes, so the
+# section merges cleanly.
+# ==========================================================================
+
+CAMERA_SUFFIX = ".camera.json"
+
+_cam_arm = None
+_cam_hulls = None
+_CAM_LOCK = threading.Lock()  # the camera Arm and hull cache are shared across requests
+_BACKGROUNDS: dict[tuple[str, str], Any] = {}
+_BACKGROUNDS_LOCK = threading.Lock()
+BACKGROUND_EPISODES = 6
+BACKGROUND_FRAMES = 60
+
+
+def _video_error(e: Exception) -> HTTPException:
+    """Map a missing video dependency / camera to a client-readable error."""
+    return HTTPException(status_code=400 if "camera" in str(e) else 501, detail=str(e))
+
+
+def _camera_arm():
+    """An Arm (and its hulls) for silhouette work, separate from the replay Arm."""
+    global _cam_arm, _cam_hulls
+    with _CAM_LOCK:
+        if _cam_arm is None:
+            from antares.project import arm_hulls
+            from antares.sim import Arm
+
+            _cam_arm = Arm()
+            _cam_hulls = arm_hulls(_cam_arm.model)
+        return _cam_arm, _cam_hulls
+
+
+def camera_background(ds: Dataset, camera: str):
+    """The per-camera background model, built once per process from frames
+    spread over a few episodes (a few seconds of decoding the first time)."""
+    key = (ds.repo_id, camera)
+    with _BACKGROUNDS_LOCK:
+        bgm = _BACKGROUNDS.get(key)
+    if bgm is not None:
+        return bgm
+    from antares import video
+    from antares.camera import spread_frames
+    from antares.silhouette import BackgroundModel
+
+    picks = spread_frames(ds.episodes, BACKGROUND_EPISODES, BACKGROUND_FRAMES)
+    by_ep: dict[int, list[int]] = {}
+    for ep, f in picks:
+        by_ep.setdefault(ep, []).append(f)
+    frames = np.concatenate([video.frames(ds.repo_id, camera, ep, idx, ds) for ep, idx in by_ep.items()])
+    bgm = BackgroundModel.fit(frames)
+    with _BACKGROUNDS_LOCK:
+        _BACKGROUNDS.setdefault(key, bgm)
+        return _BACKGROUNDS[key]
+
+
+def list_camera_infos(repo_id: str) -> list[dict]:
+    from antares import video
+
+    try:
+        return [c.to_dict() for c in video.list_cameras(repo_id)]
+    except Exception as e:  # noqa: BLE001 - loader errors go to the client
+        raise HTTPException(status_code=502, detail=f"could not read {repo_id}'s cameras: {e}")
+
+
+def load_camera_fit_dicts(lock_name: str) -> dict[str, dict]:
+    """Camera fits for a lock from ``<lock>.camera.json`` (falls back to the lock's ``cameras``)."""
+    from antares.camera import load_camera_fits
+
+    _lock_path(lock_name)  # validates the name
+    fits = {name: f.to_dict() for name, f in load_camera_fits(lock_name, LOCK_DIR).items()}
+    if not fits:
+        p = _lock_path(lock_name)
+        if p.is_file():
+            fits = dict(json.loads(p.read_text()).get("cameras") or {})
+    return fits
+
+
+def run_camera_fit(
+    ds: Dataset,
+    camera: str,
+    lock_name: str,
+    *,
+    n_frames: int = 40,
+    n_episodes: int = 4,
+    n_starts: int = 8,
+    seed: int = 0,
+    on_progress: Callable[[Any], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
+):
+    """Fit one camera and save it next to the lock. Returns ``(fit, path)``."""
+    from antares.camera import fit_camera, save_camera_fit
+    from antares.sim import Arm
+
+    _lock_path(lock_name)
+    # A fit runs for a minute; it gets its own Arm so overlay requests
+    # (which share ``_camera_arm``) are not blocked behind it.
+    fit = fit_camera(
+        ds,
+        camera,
+        n_frames=n_frames,
+        n_episodes=n_episodes,
+        n_starts=n_starts,
+        seed=seed,
+        arm=Arm(),
+        on_progress=on_progress,
+        should_stop=should_stop,
+    )
+    path = save_camera_fit(fit, lock_name, LOCK_DIR)
+    return fit, path
+
+
+def _camera_job_worker(job: Job, req: "CameraFitRequest") -> None:
+    try:
+        ds = get_dataset(req.dataset)
+
+        def on_progress(ev) -> None:
+            job.push({"type": "progress", **ev.to_dict()})
+
+        fit, path = run_camera_fit(
+            ds,
+            req.camera,
+            req.lock,
+            n_frames=req.n_frames,
+            n_episodes=req.n_episodes,
+            n_starts=req.n_starts,
+            seed=req.seed,
+            on_progress=on_progress,
+            should_stop=job.stop.is_set,
+        )
+        summary = {**fit.summary(), "lock": req.lock, "path": str(path)}
+        job.push({"type": "done", "fit": summary})
+        job.finish("done", result=summary)
+    except Exception as e:  # noqa: BLE001 - report to the client
+        job_fail(job, e)
+
+
+def camera_overlay(ds: Dataset, camera: str, episode: int, frame: int, lock_name: str | None, mask: bool = True) -> dict:
+    """The real frame with the sim arm's outlines for the lock's camera fit."""
+    from antares import video
+    from antares.project import Camera, iou, project_polygons, rasterize
+    from antares.silhouette import mask_polygons
+
+    ep = find_episode(ds, episode)
+    if not 0 <= frame < len(ep):
+        raise HTTPException(status_code=404, detail=f"frame {frame} not in episode {episode} ({len(ep)} frames)")
+    fit = None
+    if lock_name:
+        fits = load_camera_fit_dicts(lock_name)
+        fit = fits.get(video.camera_name(camera))
+    try:
+        rgb = video.frames(ds.repo_id, camera, ep.index, [frame], ds)[0]
+    except Exception as e:  # noqa: BLE001
+        raise _video_error(e)
+    out: dict[str, Any] = {
+        "dataset": ds.repo_id,
+        "camera": video.camera_name(camera),
+        "episode": ep.index,
+        "frame": frame,
+        "lock": lock_name,
+        "width": int(rgb.shape[1]),
+        "height": int(rgb.shape[0]),
+        "image": "data:image/jpeg;base64," + base64.b64encode(video.frame_jpeg(rgb)).decode(),
+        "sim_polygons": [],
+        "fit": None,
+        "iou": None,
+    }
+    real_mask = None
+    if mask:
+        bgm = camera_background(ds, camera)
+        real_mask = bgm.mask(rgb)
+        out["real_mask_polygon"] = mask_polygons(real_mask)
+    if fit is not None:
+        arm, hulls = _camera_arm()
+        cam = Camera.from_dict(fit)
+        with _CAM_LOCK:
+            pts = hulls.world_points(arm.fk(arm.unit_map.to_rad(ep.state[frame])))
+        polys = project_polygons(hulls, pts, cam)
+        out["sim_polygons"] = [np.round(p, 1).tolist() for p in polys if len(p) >= 3]
+        out["sim_bodies"] = [g.body_name for g, p in zip(hulls.geoms, polys) if len(p) >= 3]
+        out["fit"] = {k: fit.get(k) for k in ("fit_iou", "heldout_iou", "fovy", "pos", "quat", "created_at")}
+        if real_mask is not None:
+            out["iou"] = iou(rasterize(polys, cam.width, cam.height), real_mask)
+    return out
+
+
+class CameraFitRequest(BaseModel):
+    dataset: str
+    camera: str
+    lock: str
+    n_frames: int = Field(40, ge=4)
+    n_episodes: int = Field(4, ge=1)
+    n_starts: int = Field(8, ge=1)
+    seed: int = 0
+
+
+@app.get("/api/camera/cameras")
+def camera_cameras(dataset: str = Query(...)) -> list[dict]:
+    """The dataset's video streams, with ``fixed`` false for wrist cameras."""
+    return list_camera_infos(dataset)
+
+
+@app.post("/api/camera/fit")
+def camera_fit_start(req: CameraFitRequest) -> dict:
+    _lock_path(req.lock)  # validate early
+    job = start_job("camera", req.dataset, _camera_job_worker, req)
+    return {"job_id": job.id}
+
+
+@app.get("/api/camera")
+def camera_fits(lock: str = Query(...)) -> dict:
+    fits = load_camera_fit_dicts(lock)
+    return {"lock": lock, "cameras": {name: {k: v for k, v in f.items() if k not in ("fit_ious", "heldout_ious", "appearance")} for name, f in fits.items()}}
+
+
+@app.get("/api/camera/overlay")
+def camera_overlay_get(
+    dataset: str = Query(...),
+    camera: str = Query(...),
+    episode: int = Query(...),
+    frame: int = Query(0, ge=0),
+    lock: str | None = Query(None),
+    mask: bool = Query(True),
+) -> dict:
+    ds = get_dataset(dataset)
+    try:
+        return camera_overlay(ds, camera, episode, frame, lock, mask=mask)
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001 - decoding / segmentation errors
+        raise _video_error(e)
 
 
 # Built frontend, mounted after the API routes so `antares serve` alone demos.

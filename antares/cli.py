@@ -1222,6 +1222,84 @@ def cmd_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_camera_fit(args: argparse.Namespace) -> int:
+    from antares import server
+
+    try:
+        ds = server.get_dataset(args.repo_id)
+    except Exception as e:  # noqa: BLE001
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    cams = {c["name"]: c for c in server.list_camera_infos(args.repo_id)}
+    if args.camera not in cams:
+        print(f"error: {args.repo_id} has no camera {args.camera!r}; cameras: {sorted(cams)}", file=sys.stderr)
+        return 1
+    if not cams[args.camera]["fixed"]:
+        print(f"error: {args.camera} is a wrist camera; only fixed cameras can be fitted", file=sys.stderr)
+        return 1
+    lock = args.lock or server._slug(args.repo_id)
+    print(f"fitting camera {args.camera} of {args.repo_id} for lock {lock}: "
+          f"{args.frames} frames over {args.episodes} episodes, {args.starts} starts")
+    last_stage = [None]
+
+    def on_progress(ev) -> None:
+        if ev.stage != last_stage[0]:
+            last_stage[0] = ev.stage
+            if ev.stage == "sample":
+                print(f"  sampled {ev.stage_evaluation} cameras: best IoU {ev.stage_best_iou:.3f}  [{ev.elapsed_s:.0f}s]")
+            elif ev.stage == "start":
+                print(f"  starts: {ev.n_starts} x CMA-ES at low resolution")
+            elif ev.stage == "refine":
+                print(f"  refining start {ev.start} at full resolution")
+        if ev.stage in ("start", "refine") and 12 < ev.stage_evaluation and ev.stage_evaluation % 100 < 12:
+            print(f"    {ev.stage} {ev.start}: eval {ev.stage_evaluation} best IoU {ev.stage_best_iou:.3f} "
+                  f"(overall {ev.best_iou:.3f})  [{ev.elapsed_s:.0f}s]")
+
+    try:
+        fit, path = server.run_camera_fit(
+            ds, args.camera, lock, n_frames=args.frames, n_episodes=args.episodes,
+            n_starts=args.starts, seed=args.seed, on_progress=on_progress,
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    print(f"camera {fit.camera}: fit IoU {fit.fit_iou:.3f} on {len(fit.fit_frames)} frames, "
+          f"held-out IoU {fit.heldout_iou:.3f} on {len(fit.heldout_frames)} frames, "
+          f"{fit.n_evaluations} evaluations in {fit.elapsed_s:.0f}s"
+          + (" (cancelled)" if fit.cancelled else ""))
+    print(f"  pos {['%.3f' % v for v in fit.pos]} quat {['%.4f' % v for v in fit.quat]} fovy {fit.fovy:.1f} deg")
+    print(f"  starts reached IoU {', '.join('%.2f' % v for v in fit.start_ious)}; best was {fit.best_start}")
+    print(f"saved {path}")
+    return 0
+
+
+def cmd_camera_list(args: argparse.Namespace) -> int:
+    from antares import server
+
+    try:
+        fits = server.load_camera_fit_dicts(args.lock)
+    except Exception as e:  # noqa: BLE001
+        print(f"error: {getattr(e, 'detail', e)}", file=sys.stderr)
+        return 1
+    if not fits:
+        print(f"no camera fits for lock {args.lock} (run: antares camera-fit <dataset> --camera <name> --lock {args.lock})")
+        return 0
+    rows = []
+    for name, f in sorted(fits.items()):
+        rows.append([
+            name,
+            f.get("key", ""),
+            f"{f.get('width', '?')}x{f.get('height', '?')}",
+            _f(f.get("fit_iou")),
+            _f(f.get("heldout_iou")),
+            f"{f.get('fovy', float('nan')):.1f}",
+            " ".join(f"{v:.3f}" for v in f.get("pos", [])),
+            str(f.get("created_at", ""))[:19],
+        ])
+    print(_table(["camera", "key", "size", "fit IoU", "held-out IoU", "fovy", "pos (m)", "created"], rows))
+    return 0
+
+
 def _f(v, fmt: str = "{:.3f}") -> str:
     return "-" if v is None else fmt.format(v)
 
@@ -1681,6 +1759,20 @@ def build_parser() -> argparse.ArgumentParser:
     f = fsub.add_parser("list", help="print the fleet table from fleet.json")
     f.add_argument("--path", default=None, help="fleet report (default locks/fleet/fleet.json)")
     f.set_defaults(func=cmd_fleet_list)
+
+    p = sub.add_parser("camera-fit", help="fit a dataset's fixed camera from its videos and joint logs")
+    p.add_argument("repo_id", help="Hub dataset id or a LeRobot dataset directory on disk")
+    p.add_argument("--camera", required=True, help="camera name, e.g. up (observation.images.up)")
+    p.add_argument("--lock", default=None, help="lock to attach the camera to (default: dataset slug)")
+    p.add_argument("--episodes", type=int, default=4, help="episodes the fit frames are spread over")
+    p.add_argument("--frames", type=int, default=40, help="frames used in the fit")
+    p.add_argument("--starts", type=int, default=8, help="CMA-ES starts kept from the random sample")
+    p.add_argument("--seed", type=int, default=0)
+    p.set_defaults(func=cmd_camera_fit)
+
+    p = sub.add_parser("camera-list", help="list the camera fits saved for a lock")
+    p.add_argument("lock")
+    p.set_defaults(func=cmd_camera_list)
 
     return parser
 

@@ -206,6 +206,78 @@ function parseDetail(status: number, statusText: string, body: unknown): ApiErro
   return new ApiError(status, detail ?? `${status} ${statusText}`);
 }
 
+// ---- cameras (antares.camera): a dataset's fixed cameras fitted to the logs ----
+
+// GET /api/camera/cameras: the dataset's video streams.
+export type CameraInfo = {
+  name: string; // "up"
+  key: string; // "observation.images.up"
+  width: number;
+  height: number;
+  fps: number;
+  fixed: boolean; // false for wrist cameras, which cannot be fitted
+};
+
+// One fitted camera as saved in locks/<lock>.camera.json (per-frame arrays omitted).
+export type CameraFit = {
+  camera: string;
+  key: string;
+  dataset: string;
+  pos: number[];
+  rotvec: number[];
+  quat: number[]; // MuJoCo wxyz
+  fovy: number;
+  width: number;
+  height: number;
+  fit_iou: number;
+  heldout_iou: number;
+  fit_frames: number[][]; // [episode, frame]
+  heldout_frames: number[][];
+  n_starts: number;
+  best_start: number;
+  start_ious: number[];
+  n_evaluations: number;
+  elapsed_s: number;
+  cancelled: boolean;
+  created_at: string;
+};
+
+export type CameraProgressEvent = {
+  type: "progress";
+  stage: "sample" | "start" | "refine" | "heldout";
+  start: number; // index of the start being run (-1 while sampling)
+  n_starts: number;
+  evaluation: number;
+  stage_evaluation: number;
+  candidate_iou: number;
+  stage_best_iou: number;
+  best_iou: number;
+  elapsed_s: number;
+};
+
+export type CameraJobEvent =
+  | CameraProgressEvent
+  | { type: "done"; fit: CameraFit & { lock: string; path: string } }
+  | { type: "error"; message: string };
+
+// GET /api/camera/overlay: one real frame with the sim arm's outlines in the
+// fitted camera. Polygons are in pixel coordinates of the frame.
+export type CameraOverlay = {
+  dataset: string;
+  camera: string;
+  episode: number;
+  frame: number;
+  lock: string | null;
+  width: number;
+  height: number;
+  image: string; // data: URL (JPEG)
+  sim_polygons: number[][][]; // per visible geom, [[x, y], ...]
+  sim_bodies?: string[];
+  real_mask_polygon?: number[][][];
+  fit: { fit_iou: number; heldout_iou: number; fovy: number; pos: number[]; quat: number[]; created_at: string } | null;
+  iou: number | null;
+};
+
 async function json<T>(r: Response): Promise<T> {
   if (!r.ok) {
     let body: unknown = null;
@@ -305,6 +377,22 @@ export const api = {
     ).then((r) => json<CrossMatrix>(r)),
   // Zip of the lock as a standalone MJCF (model, sidecar, scene, meshes).
   exportZipUrl: (lock: string) => `/api/locks/${encodeURIComponent(lock)}/export.zip`,
+  // ---- cameras ----
+  cameras: (dataset: string) => fetch(`/api/camera/cameras?${q({ dataset })}`).then((r) => json<CameraInfo[]>(r)),
+  cameraFits: (lock: string) =>
+    fetch(`/api/camera?${q({ lock })}`).then((r) => json<{ lock: string; cameras: Record<string, CameraFit> }>(r)),
+  cameraFit: (dataset: string, camera: string, lock: string, nFrames = 40, nEpisodes = 4) =>
+    fetch("/api/camera/fit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dataset, camera, lock, n_frames: nFrames, n_episodes: nEpisodes }),
+    }).then((r) => json<{ job_id: string }>(r)),
+  cameraOverlay: (dataset: string, camera: string, episode: number, frame: number, lock: string | null) =>
+    fetch(
+      `/api/camera/overlay?${q(lock ? { dataset, camera, episode, frame, lock } : { dataset, camera, episode, frame })}`,
+    ).then((r) => json<CameraOverlay>(r)),
+  jobEvents: (jobId: string) => new EventSource(`/api/jobs/${jobId}/events`),
+  cancelJob: (jobId: string) => fetch(`/api/jobs/${jobId}/cancel`, { method: "POST" }).then((r) => json(r)),
 };
 
 // antares.lock.slug(dataset) plus a timestamp, so a run from the UI never
