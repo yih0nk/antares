@@ -299,6 +299,63 @@ tests in `tests/test_check.py` prove the gate bites: real episodes pass,
 the same episodes with 3 frames of extra lag or excursions scaled to 0.9
 (a weak servo) fail.
 
+### What changed? `--explain`
+
+A failed check says the arm no longer matches its sim. `--explain` also
+says *why*: it refits the lock on the fresh episodes as one change per
+parameter on top of it (a factor on `kp`, `kv`, `damping`, `armature`,
+`frictionloss`, a shift of whole frames on `latency_frames`), then tries
+each change *alone* on the lock. A change is named as the cause when it
+alone recovers at least 20% of what the full refit recovers. The refit uses
+every other episode and both are scored on the rest, so the gap is not
+overfitting.
+
+```sh
+# no arm handy? synthesize one with known wear, then check it
+.venv/bin/antares synth /tmp/worn --lock svla_so101_pickplace --wear latency_frames=1 --episodes 10
+.venv/bin/antares check /tmp/worn --lock svla_so101_pickplace --explain
+```
+
+```
+DRIFTED: /tmp/worn vs lock svla_so101_pickplace: 2.123 deg RMSE on 10 episodes (reference 0.736, limit 1.103); ...
+
+what changed (refit on episodes 0,2,4,6,8, scored on 1,3,5,7,9; lock alone 2.124 deg):
+param           change    alone (deg)  recovers
+--------------  --------  -----------  --------  --------
+kp              +0%       2.124        +0.000
+...
+latency_frames  +1 frame  0.232        +1.892    <- cause
+all together              0.232        +1.892
+lock svla_so101_pickplace on /tmp/worn: 2.124 deg, 0.232 deg after refitting the changes (100% of the excess recovered); likely cause: latency_frames +1 frame (alone recovers 1.89 deg)
+```
+
+With `--wear kp=0.6` instead it names `kp -40%`. When the refit recovers
+less than half of the excess error, the change is not one the sim's
+dynamics can express (a sensor offset, contacts, a harder task), and the
+diagnosis says that instead of guessing a parameter. The parameters trade
+off against each other, so read several named causes as "these moved
+together", not as independent measurements.
+
+`python examples/drift_demo.py` runs a ten-week wear story on the MuJoCo
+arm (gain fading 5% a week, friction building 20% a week, one more frame of
+lag from week 6). The check fails from week 6, and the named causes match
+the wear applied:
+
+```
+week  error (deg)  limit  verdict  named cause                                  actual wear
+0     0.231        1.103  ok       -                                            none
+2     0.489        1.103  ok       -                                            kp -10%, frictionloss +44%
+4     1.067        1.103  ok       -                                            kp -19%, frictionloss +107%
+6     3.643        1.103  DRIFTED  latency_frames +1 frame, frictionloss +224%  kp -26%, frictionloss +199%, latency_frames +1 frame
+8     4.754        1.103  DRIFTED  latency_frames +1 frame, frictionloss +299%  kp -34%, frictionloss +330%, latency_frames +1 frame
+10    6.312        1.103  DRIFTED  latency_frames +1 frame, frictionloss +291%  kp -40%, frictionloss +519%, latency_frames +1 frame
+```
+
+The weaker gain is real but small next to the lag and friction, so it is
+not named on its own. `POST /api/check` takes `"explain": true` and adds a
+`diagnosis` object to a drifted result; the GitHub Action takes
+`explain: "true"` and sets a `cause` output.
+
 ## Contact detection from the residual
 
 Once the sim reproduces the arm's free-space motion (the SO-101 lock
@@ -500,6 +557,8 @@ bimanual or non-SO arms (14).
 | `antares/dr.py` | Domain-randomization ranges derived from refits (`locks/*.dr.json`) |
 
 | `antares/check.py` | Pre-deploy drift gate (`antares check`, `/api/check`) |
+| `antares/diagnose.py` | Names the parameter change behind a drift (`check --explain`) |
+| `antares/synth.py` | Synthetic recordings of an arm with known wear (`antares synth`) |
 | `action.yml` | Composite GitHub Action running the gate in CI |
 
 | `antares/events.py` | Contact events from the real-sim residual |
