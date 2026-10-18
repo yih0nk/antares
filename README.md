@@ -376,6 +376,16 @@ alone recovers at least 20% of what the full refit recovers. The refit uses
 every other episode and both are scored on the rest, so the gap is not
 overfitting.
 
+Each change has to earn its size: the refit minimizes the error plus 0.2
+deg per unit of |ln factor| (a frame of lag is nearly free), then drops any
+change that lowers the error by less than 0.05 deg. Without that, on the
+real arm a large `kv` swing stood in for injected lag, and unmodified
+recordings showed a 0.14 deg "gain" from parameters pulling against each
+other. On the real SO-101 held-out episodes it now names injected lag of 1,
+2 and 3 frames exactly (every factor left at +0%), reports scaled-down
+motion as not explained, and reports "no change found" on the unmodified
+recordings.
+
 ```sh
 # no arm handy? synthesize one with known wear, then check it
 .venv/bin/antares synth /tmp/worn --lock svla_so101_pickplace --wear latency_frames=1 --episodes 10
@@ -395,7 +405,7 @@ all together              0.232        +1.892
 lock svla_so101_pickplace on /tmp/worn: 2.124 deg, 0.232 deg after refitting the changes (100% of the excess recovered); likely cause: latency_frames +1 frame (alone recovers 1.89 deg)
 ```
 
-With `--wear kp=0.6` instead it names `kp -40%`. When the refit recovers
+With `--wear kp=0.6` instead it names `kp -41%`. When the refit recovers
 less than half of the excess error, the change is not one the sim's
 dynamics can express (a sensor offset, contacts, a harder task), and the
 diagnosis says that instead of guessing a parameter. The parameters trade
@@ -404,21 +414,22 @@ together", not as independent measurements.
 
 `python examples/drift_demo.py` runs a ten-week wear story on the MuJoCo
 arm (gain fading 5% a week, friction building 20% a week, one more frame of
-lag from week 6). The check fails from week 6, and the named causes match
-the wear applied:
+lag from week 6). The check fails from week 6 and names the extra frame of
+lag with the gain or the friction alongside it. By week 10 the friction has
+grown past the x4 the search allows, and the lag reads one frame long to
+make up for it:
 
 ```
-week  error (deg)  limit  verdict  named cause                                  actual wear
-0     0.231        1.103  ok       -                                            none
-2     0.489        1.103  ok       -                                            kp -10%, frictionloss +44%
-4     1.067        1.103  ok       -                                            kp -19%, frictionloss +107%
-6     3.643        1.103  DRIFTED  latency_frames +1 frame, frictionloss +224%  kp -26%, frictionloss +199%, latency_frames +1 frame
-8     4.754        1.103  DRIFTED  latency_frames +1 frame, frictionloss +299%  kp -34%, frictionloss +330%, latency_frames +1 frame
-10    6.312        1.103  DRIFTED  latency_frames +1 frame, frictionloss +291%  kp -40%, frictionloss +519%, latency_frames +1 frame
+week  error (deg)  limit  verdict  named cause                                   actual wear
+0     0.231        1.103  ok       -                                             none
+2     0.489        1.103  ok       -                                             kp -10%, frictionloss +44%
+4     1.067        1.103  ok       -                                             kp -19%, frictionloss +107%
+6     3.643        1.103  DRIFTED  latency_frames +1 frame, kp -33%              kp -26%, frictionloss +199%, latency_frames +1 frame
+8     4.754        1.103  DRIFTED  latency_frames +1 frame, frictionloss +300%   kp -34%, frictionloss +330%, latency_frames +1 frame
+10    6.312        1.103  DRIFTED  latency_frames +2 frames, frictionloss +281%  kp -40%, frictionloss +519%, latency_frames +1 frame
 ```
 
-The weaker gain is real but small next to the lag and friction, so it is
-not named on its own. Causes are only named when the drift is explained,
+Causes are only named when the drift is explained,
 so the summary, the table and the Action's output agree; a lock without
 a held-out score of its own cannot be judged and says so. `POST
 /api/check` takes `"explain": true` and adds a `diagnosis` object to a
