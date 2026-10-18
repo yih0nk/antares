@@ -76,6 +76,91 @@ directory. From Python, `antares.export.export_mjcf(lock, path)` /
 `export_scene(lock, dir)`; `load_exported_arm(path)` builds an `Arm` from
 an export, and its replay matches `Arm(params=lock.params)` to 1e-9.
 
+#### Other simulators
+
+Most SO-101 training runs on Isaac Lab, ManiSkill or mjlab rather than raw
+MuJoCo. `--format` renders the same fitted parameters as that simulator's
+own actuator configuration, written into the export directory next to the
+MJCF (`antares/export_targets.py`):
+
+```sh
+.venv/bin/antares export svla_so101_pickplace --format all         # isaaclab + maniskill + mjlab + json
+.venv/bin/antares export svla_so101_pickplace --format isaaclab --fps 30
+```
+
+| `--format` | Files | What |
+|---|---|---|
+| `mjcf` (default) | the table above | unchanged |
+| `isaaclab` | `<name>_isaaclab.py`, `<name>_isaaclab.json` | `SO101_ACTUATOR_CFG` (an `ImplicitActuatorCfg`), `SO101_ARTICULATION_CFG` around a USD path placeholder, `CONTROL_HZ` / `COMMAND_DELAY_STEPS`, and `EventTerm`s for `randomize_actuator_gains` / `randomize_joint_parameters` when `locks/<name>.dr.json` exists |
+| `maniskill` | `<name>_maniskill.py`, `<name>_maniskill.json` | `PDJointPosControllerConfig` for the six joints, absolute and delta variants, `force_limit` from `forcerange` |
+| `mjlab` | `<name>_mjlab.py` | an `EntityCfg` loading the exported MJCF through `mujoco.MjSpec`, with `XmlActuatorCfg` wrapping its `<position>` actuators and the latency as `delay_min_lag` / `delay_max_lag` |
+| `json` | `<name>.params.json` | the sidecar plus every target's numbers, latency in seconds, pinned parameters and DR ranges |
+| `all` | all of the above | |
+
+Every file starts with the lock's provenance (dataset, `created_at`,
+held-out error before -> after, pinned parameters, seed spread) and the
+unit assumptions. Per-joint locks emit one value per joint (`{joint: value}`
+dicts for Isaac Lab, lists for ManiSkill); scalar locks one value shared by
+the six joints. A lock with a fitted command map (`--fit-sensor`) says so
+in every file and carries the map in the JSON. The generated Python
+imports the simulator inside a `try`, so the numbers stay importable
+without it. API: `GET /api/locks/<name>/export?format=isaaclab` returns
+the main file of a target (`mjcf`, the default, is still the XML; an unknown
+format is 422) and `GET /api/locks/<name>/export.zip?targets=all` adds every
+target to the zip.
+
+Isaac Lab (verified against 2.3.2): point `SO101_USD_PATH` at your SO-101
+USD (LeIsaac's `so101_follower.usd` uses these six joint names), then
+
+```python
+from svla_so101_pickplace_isaaclab import SO101_ARTICULATION_CFG, SO101_RANDOMIZE_GAINS, COMMAND_DELAY_STEPS
+
+robot = SO101_ARTICULATION_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")   # in your SceneCfg
+class EventsCfg:
+    gains = SO101_RANDOMIZE_GAINS                                           # data-derived DR, startup mode
+# in the action term / wrapper: a deque of COMMAND_DELAY_STEPS targets, pop the oldest each step
+```
+
+ManiSkill (3.0.1): the file defines `pd_joint_pos` / `pd_joint_delta_pos`
+with the lock's gains in place of the stock agent's `1e3 / 1e2 / 100`:
+
+```python
+from svla_so101_pickplace_maniskill import controller_configs
+
+class SO101(BaseAgent):
+    @property
+    def _controller_configs(self):
+        return controller_configs       # joint names must match your URDF
+```
+
+mjlab (1.6.0): the MJCF is the artefact; the snippet loads it and sets the
+delay:
+
+```python
+from svla_so101_pickplace_mjlab import SO101_ENTITY_CFG   # reads svla_so101_pickplace.xml next to it
+
+scene = SceneCfg(entities={"robot": SO101_ENTITY_CFG}, ...)
+```
+
+Unit mapping (MuJoCo hinge joints in radians; Isaac Lab stores drive gains
+per radian and converts to the USD per-degree convention itself, SAPIEN
+wraps PhysX articulations in radians):
+
+| fitted (MuJoCo) | Isaac Lab | ManiSkill | caveat |
+|---|---|---|---|
+| `kp` N·m/rad | `stiffness` | `stiffness` | one-to-one |
+| `kv` + `damping` N·m·s/rad | `damping` | `damping` | PhysX drives have one damping slot; both terms are −b·q̇ at zero target velocity, so the sum is the exact equivalent there (the JSON keeps both) |
+| `armature` kg·m² | `armature` (on the actuator cfg) | `JOINT_ARMATURE` constant | not settable from the ManiSkill controller config; unverified on SAPIEN 3 |
+| `frictionloss` N·m | `friction` | `friction=0.0` + `JOINT_FRICTIONLOSS_NM` | Isaac Lab's `friction` is an effort on Isaac Sim 5.0+ but a unitless coefficient on 4.5; SAPIEN's is a PhysX coefficient with no torque conversion, so the N·m value is emitted beside it |
+| `forcerange` N·m | `effort_limit_sim` | `force_limit` | one-to-one |
+| `latency_frames` | `COMMAND_DELAY_STEPS` at `CONTROL_HZ` | same | no simulator expresses it; mjlab takes it as `delay_min_lag` / `delay_max_lag` in physics steps of the MJCF's 0.005 s timestep |
+
+Latency is converted with the dataset's frame rate: `meta/info.json` from
+the local Hugging Face cache when the dataset has been loaded, else 30 fps
+(both demo datasets record at 30); `--fps` overrides it and each file
+records which it used. "Delay each command by N control steps at F Hz" is
+the whole instruction; a per-joint lock gives six N.
+
 ## Bring your own dataset
 
 The two demo datasets are pinned in the picker, but the point is *your*
@@ -1141,6 +1226,7 @@ wrist cameras are skipped; the sim is the SO-101 model for both datasets.
 | `antares/gap.py` | Tracking-error metrics |
 | `antares/lock.py` | Calibrated sim saved per robot as a lock file |
 | `antares/export.py` | Lock -> standalone MJCF, sidecar, scene, zip |
+| `antares/export_targets.py` | Lock -> Isaac Lab / ManiSkill / mjlab actuator configs and neutral JSON (`export --format`) |
 
 | `antares/drift.py` | Sliding-window refits and trend statistics over a session |
 

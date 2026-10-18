@@ -1257,6 +1257,7 @@ def cmd_export(args: argparse.Namespace) -> int:
 
     from antares import server
     from antares.export import SCENE_FILENAME, export_scene, sidecar_path
+    from antares.export_targets import TARGET_LABELS, TargetExportError, dataset_fps, render, resolve_targets
     from antares.lock import RobotLock
 
     try:
@@ -1264,6 +1265,11 @@ def cmd_export(args: argparse.Namespace) -> int:
     except HTTPException as e:
         print(f"error: {e.detail}", file=sys.stderr)
         return 1
+    try:
+        targets = resolve_targets(getattr(args, "format", "mjcf"))
+    except TargetExportError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
     out_dir = Path(args.output) if args.output else Path("export") / lock.name
     scene = export_scene(lock, out_dir, bundle_assets=not args.no_bundle)
     arm = out_dir / f"{lock.name}.xml"
@@ -1276,6 +1282,15 @@ def cmd_export(args: argparse.Namespace) -> int:
         print("  meshdir points at the antares package assets (absolute path)")
     else:
         print(f"  {'assets/':<40} STL meshes")
+    fps = getattr(args, "fps", None)
+    for target in targets:
+        export = render(lock, target, fps=fps, lock_dir=server.LOCK_DIR)
+        for path in export.write(out_dir):
+            twin = " (JSON twin)" if path.suffix == ".json" and target != "json" else ""
+            print(f"  {path.name:<40} {TARGET_LABELS[target]}{twin}")
+    if targets:
+        hz, source = dataset_fps(lock, fps)
+        print(f"latency: {p.latency_frames} frame(s) at {hz:g} Hz (fps {source}); apply as a command delay in your control loop")
     print(f"view: python -m mujoco.viewer --mjcf {scene}")
     return 0
 
@@ -1809,6 +1824,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-bundle",
         action="store_true",
         help="do not copy the STL meshes; point meshdir at the package assets instead",
+    )
+    p.add_argument(
+        "--format",
+        choices=["mjcf", "isaaclab", "maniskill", "mjlab", "json", "all"],  # antares.export_targets.FORMATS
+        default="mjcf",
+        help="also write that simulator's actuator config next to the MJCF (default: mjcf only; "
+        "all = isaaclab + maniskill + mjlab + json)",
+    )
+    p.add_argument(
+        "--fps",
+        type=float,
+        default=None,
+        help="dataset frame rate used to turn latency_frames into seconds "
+        "(default: the dataset's meta/info.json in the local HF cache, else 30)",
     )
     p.set_defaults(func=cmd_export)
 
