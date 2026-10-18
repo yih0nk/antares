@@ -15,7 +15,7 @@ import pytest
 
 from antares.calibrate import SimParams
 from antares.data import Episode
-from antares.sensor import FIT_JOINTS, fit_command_map
+from antares.sensor import FIT_JOINTS, calibrate_with_sensor, fit_command_map
 from antares.sim import GRIPPER_INDEX, JOINTS, CommandMap
 
 FPS = 30.0
@@ -82,3 +82,29 @@ def test_fit_command_map_bias_only():
 def test_fit_command_map_needs_episodes():
     with pytest.raises(ValueError):
         fit_command_map(TRUE_PARAMS, [], toy_simulate)
+
+
+def test_calibrate_with_sensor_beats_dynamics_only():
+    eps = make_episodes(6, seed=1)
+    train, eval_ = eps[:4], eps[4:]
+    events = []
+    out = calibrate_with_sensor(
+        train, eval_, simulate=toy_simulate, max_evaluations=60, on_progress=events.append
+    )
+    assert out.dynamics_only.eval_score < out.dynamics_only.baseline_eval_score
+    assert out.result.eval_score < 0.5 * out.dynamics_only.eval_score
+    # baseline of the combined result is still the default sim
+    assert out.result.baseline_eval_score == out.dynamics_only.baseline_eval_score
+    assert out.result.n_evaluations > out.dynamics_only.n_evaluations
+    evals = [e.evaluation for e in events]
+    assert evals == sorted(evals) and evals[-1] == out.result.n_evaluations
+    d = out.to_dict()
+    assert set(d) == {"result", "command_map", "dynamics_only"}
+    for j in FIT_JOINTS:
+        assert out.command_map.bias[j] == pytest.approx(TRUE_MAP.bias[j], abs=1.0)
+
+
+def test_calibrate_with_sensor_stops_early():
+    eps = make_episodes(3)
+    out = calibrate_with_sensor(eps[:2], eps[2:], simulate=toy_simulate, max_evaluations=30, should_stop=lambda: True)
+    assert out.result.n_evaluations == 0

@@ -24,11 +24,11 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
-from antares.calibrate import SimParams
+from antares.calibrate import CalibrationResult, ProgressEvent, SimParams, calibrate
 from antares.data import Episode
 from antares.sim import GRIPPER_INDEX, JOINTS, CommandMap
 
@@ -163,10 +163,118 @@ def fit_command_map(
     return CommandMapFit(_unpack(theta, base, joints, fit_gain), rms0, cur, n_sim)
 
 
+# --------------------------------------------------------------------------
+# Joint fit: dynamics + command map
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SensorCalibrationResult:
+    """Outcome of :func:`calibrate_with_sensor`.
+
+    ``result`` is the final fit, scored from the default sim (``baseline_*``)
+    to fitted dynamics plus command map (``train_score``/``eval_score``).
+    ``dynamics_only`` is the plain dynamics fit on the same split, the
+    "without" side of the comparison.
+    """
+
+    result: CalibrationResult
+    command_map: CommandMap
+    dynamics_only: CalibrationResult
+
+    def to_dict(self) -> dict:
+        return {
+            "result": self.result.to_dict(),
+            "command_map": self.command_map.to_dict(),
+            "dynamics_only": self.dynamics_only.to_dict(),
+        }
+
+
+def calibrate_with_sensor(
+    train: Sequence[Episode],
+    eval: Sequence[Episode],
+    simulate: SensorSimulateFn | None = None,
+    start: SimParams | None = None,
+    max_evaluations: int = 150,
+    rounds: int = 2,
+    fit_gain: bool = True,
+    seed: int = 0,
+    on_progress: Callable[[ProgressEvent], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
+) -> SensorCalibrationResult:
+    """Fit dynamics and command map together by alternation.
+
+    Round 0 is the ordinary dynamics fit with an identity command map (kept
+    as ``dynamics_only``). Each later round fits the command map with the
+    current dynamics fixed, then refits the dynamics from where they were,
+    under the new command map, with ``max_evaluations`` CMA-ES evaluations.
+    A final command-map fit follows the last round.
+    """
+    t0 = time.perf_counter()
+    train, eval = list(train), list(eval)
+    if simulate is None:
+        simulate = sensor_simulate()
+    stop = should_stop or (lambda: False)
+    offset = {"n": 0}
+
+    def progress(ev: ProgressEvent) -> None:
+        if on_progress is not None:
+            on_progress(replace(ev, evaluation=ev.evaluation + offset["n"]))
+
+    def with_map(cmap: CommandMap):
+        return lambda p, ep: simulate(p, cmap, ep)
+
+    ident = CommandMap.identity()
+    first = calibrate(
+        train, eval, simulate=with_map(ident), start=start, max_evaluations=max_evaluations,
+        seed=seed, on_progress=progress, should_stop=stop,
+    )
+    history = list(first.history)
+    n_evals = first.n_evaluations
+    params, cmap = first.params, ident
+
+    for k in range(1, rounds):
+        if stop():
+            break
+        cmap = fit_command_map(params, train, simulate, start=cmap, fit_gain=fit_gain).command_map
+        offset["n"] = n_evals
+        nxt = calibrate(
+            train, eval, simulate=with_map(cmap), start=params, max_evaluations=max_evaluations,
+            sigma0=0.15, seed=seed + k, on_progress=progress, should_stop=stop,
+        )
+        history += [(i + n_evals, s) for i, s in nxt.history[1:]]
+        n_evals += nxt.n_evaluations
+        params = nxt.params
+    cmap = fit_command_map(params, train, simulate, start=cmap, fit_gain=fit_gain).command_map
+
+    from antares.calibrate import _per_joint, _safe_score
+
+    sim = with_map(cmap)
+    train_report, train_score = _safe_score(params, train, sim)
+    if eval:
+        eval_report, eval_score = _safe_score(params, eval, sim)
+    else:
+        eval_report, eval_score = train_report, train_score
+
+    final = replace(
+        first,
+        params=params,
+        train_score=train_score,
+        eval_score=eval_score,
+        per_joint_after=_per_joint(eval_report),
+        history=history,
+        n_evaluations=n_evals,
+        elapsed_s=time.perf_counter() - t0,
+    )
+    return SensorCalibrationResult(result=final, command_map=cmap, dynamics_only=first)
+
+
 __all__ = [
     "FIT_JOINTS",
     "CommandMapFit",
+    "SensorCalibrationResult",
     "SensorSimulateFn",
+    "calibrate_with_sensor",
     "fit_command_map",
     "sensor_simulate",
 ]
