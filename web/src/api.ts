@@ -434,6 +434,160 @@ export type SceneView = {
   n_geoms: number;
 };
 
+// ---- policy (antares.policy / shadow / closedloop): a learned policy in the loop ----
+
+export type PolicyMode = "shadow" | "closedloop";
+
+// Chunk-prediction errors of a predictor on one split (antares.policy.action_errors).
+export type PolicyErrors = {
+  mse_units: number;
+  rmse_units: number;
+  rmse_deg: number; // RMS over the body joints, whole chunk
+  first_rmse_deg: number; // first action of the chunk only
+  gripper_rmse_units: number;
+  per_joint_deg: Record<string, number>;
+  n_windows: number;
+};
+
+export type PolicyMetrics = {
+  policy: { train: PolicyErrors; eval: PolicyErrors };
+  baselines: Record<"hold_state" | "repeat_command", { train: PolicyErrors; eval: PolicyErrors }>;
+  best_epoch: number;
+  epochs_run: number;
+  beats_hold_state: boolean;
+  beats_repeat_command: boolean;
+};
+
+// locks/<name>.policy.json: a saved policy and how it trained.
+export type PolicyInfo = {
+  name: string;
+  lock?: string;
+  dataset?: string;
+  k: number;
+  h: number;
+  features: { goal: boolean; time: boolean };
+  n_params: number;
+  train_episodes: number[];
+  eval_episodes: number[];
+  metrics: PolicyMetrics;
+  elapsed_s: number;
+  created_at: string;
+  exists: boolean;
+};
+
+export type PolicyTrainProgress = {
+  type: "progress";
+  epoch: number;
+  epochs: number;
+  train_mse: number; // normalized units
+  eval_mse: number;
+  best_eval_mse: number;
+  best_epoch: number;
+  elapsed_s: number;
+};
+
+export type PolicyTrainEvent = PolicyTrainProgress | { type: "done"; policy: PolicyInfo } | { type: "error"; message: string };
+
+export type ShadowVariantSummary = {
+  sim_vs_real_deg: number;
+  replay_vs_real_deg: number;
+  grasp_error_cm: number | null;
+  n_grasps: number;
+  // Only for the non-baseline sims: how far they are from the default sim's trajectory.
+  divergence_deg?: number;
+  grasp_divergence_cm?: number | null;
+  worst_frames?: { episode: number; frame: number; deg: number }[];
+};
+
+export type ShadowResult = {
+  mode: "shadow";
+  baseline: string;
+  lock: string;
+  policy: string;
+  variants: { name: string; label: string; lock: string | null }[];
+  summary: {
+    n_episodes: number;
+    n_frames: number;
+    action_error_deg: number;
+    variants: Record<string, ShadowVariantSummary>;
+  };
+  episodes: { episode: number; n_frames: number; action_error_deg: number; sim_vs_real_deg: Record<string, number>; divergence_deg: Record<string, number> }[];
+  episodes_evaluated: number[];
+  created_at: string;
+};
+
+export type ClosedLoopVariantSummary = {
+  trajectory_rms_deg: number;
+  approach_rms_deg: number | null;
+  grasp_error_cm: number | null;
+  min_tip_distance_cm: number | null;
+  close_frame_offset: number | null;
+  n_judged: number;
+  n_closed: number;
+  n_success: number;
+  success_rate: number | null;
+};
+
+export type ClosedLoopRun = {
+  variant: string;
+  episode: number;
+  trajectory_rms_deg: number;
+  approach_rms_deg: number | null;
+  grasp_error_cm: number | null;
+  success: boolean | null;
+  close_frame: number | null;
+  real_grasp_frame: number | null;
+};
+
+export type ClosedLoopResult = {
+  mode: "closedloop";
+  lock: string;
+  policy: string;
+  success_cm: number;
+  run_names: string[];
+  variants: { name: string; label: string; lock: string | null }[];
+  summary: { n_episodes: number; variants: Record<string, ClosedLoopVariantSummary> };
+  runs: ClosedLoopRun[];
+  episodes_evaluated: number[];
+  created_at: string;
+};
+
+// GET /api/policy/results?lock=: the saved evaluations of a lock's policy.
+export type PolicyResults = { lock: string; shadow: ShadowResult | null; closedloop: ClosedLoopResult | null };
+
+export type PolicyEvalEvent =
+  | { type: "progress"; mode: PolicyMode; i: number; n: number; episode: number }
+  | { type: "done"; mode: PolicyMode; lock: string; policy: string }
+  | { type: "error"; message: string };
+
+// GET /api/policy/viewer: one held-out episode under the policy in each sim,
+// with body poses for the viewer's ghosts (like /api/replay).
+export type PolicySim = {
+  q: number[][];
+  poses: number[][][];
+  sim_vs_real_deg?: number;
+  divergence_deg?: number;
+  trajectory_rms_deg?: number;
+  grasp_error_cm?: number | null;
+  success?: boolean | null;
+  close_frame?: number | null;
+};
+
+export type PolicyViewer = {
+  dataset: string;
+  lock: string;
+  policy: string;
+  mode: PolicyMode;
+  episode: number;
+  fps: number;
+  body_names: string[];
+  goal: number[] | null;
+  real_q: number[][];
+  real_poses: number[][][];
+  sims: Record<string, PolicySim>;
+  variants: { name: string; label: string }[];
+};
+
 async function json<T>(r: Response): Promise<T> {
   if (!r.ok) {
     let body: unknown = null;
@@ -576,6 +730,24 @@ export const api = {
     fetch(`/api/scene/view?${q({ dataset, camera, episode, frame, lock })}`).then((r) => json<SceneView>(r)),
   jobEvents: (jobId: string) => new EventSource(`/api/jobs/${jobId}/events`),
   cancelJob: (jobId: string) => fetch(`/api/jobs/${jobId}/cancel`, { method: "POST" }).then((r) => json(r)),
+  // ---- policy ----
+  policies: (lock: string) =>
+    fetch(`/api/policy?${q({ lock })}`).then((r) => json<{ lock: string; policies: PolicyInfo[] }>(r)),
+  policyTrain: (dataset: string, lock: string, epochs = 200) =>
+    fetch("/api/policy/train", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dataset, lock, epochs }),
+    }).then((r) => json<{ job_id: string }>(r)),
+  policyEvaluate: (dataset: string, lock: string, mode: PolicyMode, robots?: string[]) =>
+    fetch("/api/policy/evaluate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dataset, lock, mode, ...(robots ? { robots } : {}) }),
+    }).then((r) => json<{ job_id: string }>(r)),
+  policyResults: (lock: string) => fetch(`/api/policy/results?${q({ lock })}`).then((r) => json<PolicyResults>(r)),
+  policyViewer: (dataset: string, lock: string, episode: number, mode: PolicyMode, robots = "default,lock") =>
+    fetch(`/api/policy/viewer?${q({ dataset, lock, episode, mode, robots })}`).then((r) => json<PolicyViewer>(r)),
 };
 
 // antares.lock.slug(dataset) plus a timestamp, so a run from the UI never

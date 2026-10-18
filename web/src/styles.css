@@ -132,6 +132,14 @@ body {
   background: var(--comp);
 }
 
+.swatch.pol-default {
+  background: #aeb4c2;
+}
+
+.swatch.pol-lock {
+  background: #6fe07a;
+}
+
 .swatch.contact {
   background: var(--contact);
   opacity: 0.6;
@@ -526,6 +534,16 @@ body {
 
 .rms-note {
   grid-column: 1 / -1;
+}
+
+/* A second, smaller headline number (the policy section); the hero stays `.score`. */
+.subscore {
+  line-height: 1.35;
+}
+
+.subscore .big {
+  font-size: 22px;
+  color: #9fd8a8;
 }
 
 .params {

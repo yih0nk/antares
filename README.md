@@ -460,6 +460,196 @@ budgets in about a second and is what the tests exercise.
 .venv/bin/antares transfer report results/policy_transfer.json
 ```
 
+## A policy in the loop
+
+The transfer experiment above uses a hand-built reaching controller on a
+synthetic arm. This section puts a policy *learned from the real logs* into
+both simulators and measures how differently they judge it. If the stock
+sim and the calibrated sim disagree about what the same policy does, the
+stock sim would have misjudged it; the lock's held-out replay (0.74° vs
+6.0° on SO-101) says which of the two to believe. Everything runs on a
+laptop CPU in well under a minute per dataset; nothing is driven on
+hardware.
+
+**The policy** (`antares/policy.py`, `pip install -e ".[policy]"` for
+torch). A state-based chunked policy, ACT without the images: the last
+K=2 measured joint states in, the next H=10 commanded actions out, a 3x256
+MLP (151k parameters). It gets two more inputs that stand in for what the
+cameras would tell an image policy, because a pick-and-place policy that
+does not know where the object is cannot be run closed-loop at all: the
+episode's **grasp point** (the fingertip at the operator's first pick, read
+from the gripper command and FK exactly as `antares task` does) and
+nothing else (a clock was tried and made the policy worse held-out and in
+closed loop: it learns *when* the operator closed rather than *where*).
+Trained with MSE on the lock's 20 training episodes with 1 unit of Gaussian
+noise on the observed states (so the sim's own states in closed loop do not
+throw it), early-stopped on the lock's 10 held-out episodes, which it
+therefore never fits either; 3-5 s on a CPU. Two trivial baselines on the
+same windows say whether it learned anything: *hold state* (command the
+last measured state for the whole chunk) and *repeat command* (repeat the
+previous logged command, which a deployed policy does not even have).
+Held-out episodes, RMS over the body joints in degrees, chunk / first
+action of the chunk, and the raw MSE in dataset units²:
+
+| dataset | predictor | held-out chunk (deg) | held-out first action (deg) | held-out MSE (units²) | train chunk (deg) |
+|---|---|---|---|---|---|
+| SO-101 | **policy** | **5.47** | 3.61 | **24.4** | 4.26 |
+| SO-101 | hold state | 11.81 | 5.72 | 105.3 | 12.09 |
+| SO-101 | repeat command | 8.41 | **1.46** | 53.7 | 8.63 |
+| SO-100 | **policy** | **3.70** | 2.39 | **10.9** | 2.82 |
+| SO-100 | hold state | 5.80 | 2.62 | 28.5 | 5.80 |
+| SO-100 | repeat command | 4.30 | **0.76** | 14.9 | 4.31 |
+
+The policy beats both baselines over the chunk on both arms (seeds 0-2:
+5.47-5.63° on SO-101, 3.61-3.70° on SO-100). On the first action alone
+"repeat the last command" wins, as it must: commands are smooth at 30 fps
+and the policy does not see them. The phase is not moot, but the policy is
+a modest imitator (3.6° / 2.4° from the operator's commands), and that is
+the thing being judged below, not a strong one.
+
+**Shadow (open loop)** (`antares/shadow.py`). For each held-out episode the
+policy is fed the *real* observations frame by frame, its first action per
+frame is collected (receding horizon), and those commands are rolled
+through `Arm.rollout` from the real initial state in the default sim, the
+shared lock and the per-joint lock. Three distances come out: the policy's
+commands from the logged ones (imitation), each sim's trajectory from the
+real one, and the two sims' trajectories from *each other* under the same
+commands, which is how much the stock sim misjudges this policy. At the
+frames the operator closed the gripper, FK gives where each sim thought the
+fingertip was against where it really was.
+
+| dataset | sim | policy: sim vs real (deg) | vs stock sim (deg) | fingertip at grasp vs real (cm) | vs stock sim (cm) | logged commands: sim vs real (deg) |
+|---|---|---|---|---|---|---|
+| SO-101 | stock | 6.40 | – | 2.25 | – | 6.01 |
+| SO-101 | shared lock | **3.52** | **5.78** | **1.18** | 1.68 | 0.74 |
+| SO-101 | per-joint lock | 3.53 | 5.71 | 1.24 | 1.62 | 0.66 |
+| SO-100 | stock | 2.96 | – | 0.83 | – | 2.74 |
+| SO-100 | shared lock | **2.37** | **2.61** | 0.86 | 0.61 | 0.79 |
+| SO-100 | per-joint lock | 2.33 | 2.76 | 0.99 | 0.93 | 0.54 |
+
+Policy vs logged commands: 3.60° (SO-101), 2.38° (SO-100). Seeds 0-2 move
+the SO-101 divergence between 5.78 and 5.90°. Per joint on SO-101 the stock
+and the calibrated sim disagree by 7.7° on the shoulder pan, 6.5° on the
+shoulder lift, 5.1° on the elbow and the wrist roll, 3.8° on the wrist
+flex; the worst frames are the fast reaches (episode 19, frames 36-37:
+20.5° RMS between the two sims; episode 16, frame 86: 18.5°).
+
+**Closed loop** (`antares/closedloop.py`). The policy drives each sim from
+the real initial state: it observes the sim's joint state (through the
+lock's unit map, in dataset units), emits a chunk, the sim executes the
+first action with the lock's latency, repeat for the episode's length, with
+the same grasp point in every sim. The stock sim's zero latency is stepped
+as one frame (a command cannot act on the step that produced the state it
+was computed from); with the logged commands fed back regardless of the
+observation the loop reproduces `Arm.replay` to 1e-9, which pins its
+timing to the calibration's. Metrics, no objects: the trajectory against
+the real episode's (whole episode, and the *approach* up to the real grasp
+frame), the fingertip distance to the real grasp point at the frame the
+policy closes the gripper, and the share of the 10 held-out episodes where
+that distance is within 2 cm, a proxy success rate. `+shift` is the cheap
+lag compensation a chunk allows: send `chunk[L]` instead of `chunk[0]`
+(`compensate.shift_compensate` inside the chunk); it only exists where
+there is a latency to shift.
+
+| dataset | sim | trajectory RMS (deg) | approach RMS (deg) | fingertip at close vs real grasp (cm) | closest approach (cm) | within 2 cm | closed the gripper | close offset (frames) |
+|---|---|---|---|---|---|---|---|---|
+| SO-101 | stock | 43.8 | 38.8 | 9.6 | 4.1 | 2/10 | 9/10 | -84 |
+| SO-101 | shared lock | 42.1 | 33.2 | 10.0 | 3.8 | 3/10 | 8/10 | 0 |
+| SO-101 | per-joint lock | 43.1 | 32.8 | 7.3 | 2.7 | 4/10 | 8/10 | -13 |
+| SO-101 | shared lock + shift | 39.9 | 35.3 | **2.2** | **1.1** | **5/10** | 10/10 | -74 |
+| SO-101 | per-joint lock + shift | 41.8 | 34.7 | 4.5 | 1.7 | 6/10 | 10/10 | -59 |
+| SO-100 | stock | 59.5 | 53.9 | 21.0 | 9.7 | 0/10 | 4/10 | -139 |
+| SO-100 | shared lock | 40.8 | 41.3 | 23.4 | 10.5 | 0/10 | 2/10 | -46 |
+| SO-100 | per-joint lock | 38.0 | 39.6 | 18.1 | 11.8 | 0/10 | 2/10 | +51 |
+| SO-100 | shared lock + shift | 49.0 | 47.9 | 14.3 | 10.1 | 0/10 | 3/10 | -107 |
+| SO-100 | per-joint lock + shift | 48.5 | 45.0 | 20.5 | 11.5 | 0/10 | 2/10 | -93 |
+
+Across training seeds 0-2 the SO-101 successes are 2/4/2 (stock), 3/5/3
+(shared lock), 4/5/2 (per-joint), 5/7/4 (shared + shift), 6/4/2 (per-joint
++ shift). The committed numbers are seed 0.
+
+**The honest reading.**
+
+* *Open loop, the stock sim misjudges the policy by as much as it misjudges
+  the arm.* On SO-101 the two sims' pictures of what the policy does are
+  5.8° RMS apart, as large as the stock sim's own replay error (6.0°) and
+  larger than the policy's imitation error (3.6°): which simulator you
+  evaluate in moves the trajectory more than the policy's own mistakes
+  do. At the grasp instants the stock sim puts the fingertip 2.25 cm from
+  where the real jaws were, the calibrated sim 1.2 cm; the two sims are
+  1.7 cm apart there, about half the width of the cube being picked. On
+  the stiff SO-100 the same numbers are 2.6° and 0.6 cm: the stock sim is
+  less wrong about that arm, so it is less wrong about the policy.
+* *Closed loop, the stock sim gets the timing wrong, and the ranking is
+  the same direction but inside the noise.* In the stock sim the policy
+  closes the gripper 84 frames (2.8 s) early on average: the stiff,
+  lag-free servo arrives at the goal long before the real arm would, and
+  a state-conditioned policy closes when it gets there. In the calibrated
+  sim the close lands within a frame of the real one. The proxy success
+  itself is low everywhere (2/10 stock, 3/10 calibrated, 4/10 per-joint);
+  the calibrated sims rank at or above the stock one in every seed, but
+  the margin (one or two episodes) is within seed-to-seed variation, so
+  these runs do not show that calibration changes the success verdict of
+  this policy. The chunk shift does: sending `chunk[L]` lifts the
+  calibrated sim to 5/10 (4-7 across seeds) with the fingertip 1.1 cm from
+  the grasp point at its closest, and it is a compensation the stock sim
+  cannot even express, having no latency to shift.
+* *Whole-episode trajectory RMS is not a sim verdict here.* It is 40°+ in
+  every sim because the policy only knows the pick point: after the grasp
+  it has no place target and wanders, so most of that number is the place
+  phase. The approach RMS (up to the real grasp) is the comparable one:
+  38.8° stock vs 33.2° calibrated on SO-101.
+* *On SO-100 the sims agree that this policy does not work closed-loop*
+  (0/10 everywhere, the gripper closes in 2-4 of 10 episodes), even though
+  it is the better imitator. Calibration changes the trajectory (59.5° to
+  40.8°) but not the verdict; the task's bimodal grasps (table and
+  container) are more than a state-only policy with one goal point learns
+  from 20 episodes.
+* *What this is not.* A state-only policy handed the grasp point, judged
+  without objects or contact by a 2 cm proxy, and every difference is
+  sim-vs-sim. What makes the calibrated sim's verdict the one to trust is
+  the lock's held-out replay against the real arm, not anything in this
+  section.
+
+```sh
+.venv/bin/pip install -e ".[policy]"
+.venv/bin/antares policy train lerobot/svla_so101_pickplace --lock svla_so101_pickplace
+.venv/bin/antares policy evaluate lerobot/svla_so101_pickplace --lock svla_so101_pickplace --mode both
+```
+
+The policy is saved as `locks/<lock>.policy.pt` with a `.policy.json`
+sidecar (normalization, K, H, features, split, metrics), the evaluations as
+`locks/<lock>.policy.shadow.json` and `.policy.closedloop.json`. API:
+`POST /api/policy/train {dataset, lock, epochs?, seed?, name?}` and
+`POST /api/policy/evaluate {dataset, lock, policy?, mode: "shadow" |
+"closedloop", robots?: ["default", "lock", "perjoint", <lock name>...]}`
+are jobs streamed over `/api/jobs/<id>/events` (training progress per
+epoch with train/eval MSE; evaluation progress per episode with its row);
+`GET /api/policy?lock=` lists saved policies with their metrics,
+`GET /api/policy/results?lock=` the saved tables, and
+`GET /api/policy/viewer?dataset=&lock=&episode=&mode=` recomputes one
+held-out episode and returns `(T, nbody, 7)` poses per sim, like
+`/api/replay`. In the UI the Policy section trains and evaluates with
+progress, shows the stock-vs-calibrated table, and adds two ghosts to the
+viewer: the policy in the stock sim (grey) and in the calibrated sim
+(green) for the current held-out episode.
+
+**With a GPU.** `antares.policy.load_lerobot_policy("<hub id or dir>")`
+wraps any LeRobot `PreTrainedPolicy` (ACT, diffusion, SmolVLA) behind the
+same `Policy` interface (`lerobot` is not an Antares dependency; the
+wrapper is tested against a stub), dataset units in and out like the
+LeRobot runtime, so the shadow and closed-loop evaluators take it as is.
+What changes is the observation: an image policy needs its camera frames.
+In shadow mode the observations are real, so the dataset's own video
+frames (`antares.video.frames`) can go into `extra_inputs(ctx)`. In
+closed loop the frame has to be rendered from the sim, which is what the
+fitted camera and scene are for (see [Cameras from the logs](#cameras-from-the-logs)
+and [Scene from the logs](#scene-from-the-logs)): the exported `scene.xml`
+carries the table and the backdrops at the fitted camera pose, so
+MuJoCo's offscreen renderer through camera `up` or `side` produces the
+policy's input, or `antares.scene.sim_view` composites it without OpenGL.
+The grasp-point goal is not needed then; the images carry it.
+
 ## Per-joint calibration
 
 The shared fit gives all six servos the same gain, damping, armature,
@@ -1750,6 +1940,9 @@ went, not the table's extent; the grasp label is the command, not contact.
 | `antares/specificity.py` | Cross-arm verdict, identifiability, swap and same-arm checks |
 | `antares/synthetic.py` | Simulated arm datasets with known parameters |
 | `antares/transfer.py` | Sim-to-sim policy transfer experiment (`antares transfer`) |
+| `antares/policy.py` | State-based chunked policy trained on the logs; LeRobot checkpoint wrapper (`antares policy train`, `locks/*.policy.pt`) |
+| `antares/shadow.py` | Open-loop shadow evaluation: the policy's commands rolled through each sim |
+| `antares/closedloop.py` | Closed-loop evaluation: the policy drives each sim; grasp-point proxy success |
 | `results/` | Robot-specificity reports (`antares specificity`), policy transfer report (`policy_transfer.{json,md}`) |
 | `antares/cli.py` | The `antares` command line |
 | `antares/server.py` | FastAPI backend for the UI |
@@ -1775,7 +1968,8 @@ datasets, everything above works end to end from the CLI, the API and the
 viewer: replay, shared and per-joint calibration, sensor calibration, robot
 locks and MJCF export, drift scans and the pre-deploy gate with its cause
 diagnosis, data-derived DR ranges, contact events, sim-only lag
-compensation, the robot-specificity study and the fleet scan.
+compensation, the robot-specificity study, the fleet scan, and a learned
+state policy judged in the stock and the calibrated sim.
 
 Not yet measured on hardware: everything is judged against logged
 trajectories, so lag compensation and DR are validated in the sim only.
