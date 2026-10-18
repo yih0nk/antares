@@ -165,6 +165,7 @@ def test_release_found_from_the_jaw_opening(tip, unit_map):
     thr = dataset_thresholds([ep])
     (g,) = find_grasps(ep, thr, tip, unit_map, empty_level([ep], thr))
     assert g.held and g.release_frame == 80
+    assert type(g.release_frame) is int  # saved as JSON
     np.testing.assert_allclose(g.release_xyz, tip(unit_map.to_rad(np.array([*POSE_C, 0.0]))), atol=1e-9)
 
 

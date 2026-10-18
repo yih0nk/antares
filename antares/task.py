@@ -184,7 +184,7 @@ def find_grasps(
     settle = int(round(SETTLE_S * episode.fps))
     window = max(1, int(round(JAW_WINDOW_S * episode.fps)))
     out = []
-    for g in grasps:
+    for g in grasps.tolist():
         later = releases[releases > g]
         r = int(later[0]) if later.size else None
         end = r if r is not None else len(episode)
