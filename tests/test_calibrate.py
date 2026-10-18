@@ -453,3 +453,19 @@ def test_calibrate_with_real_arm_smoke():
     res = calibrate(eps[:1], eps[1:], max_evaluations=6, popsize=3, on_progress=events.append)
     assert res.n_evaluations == 6 and len(events) == 7
     assert math.isfinite(res.eval_score) and math.isfinite(res.baseline_eval_score)
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(not _sim_available(), reason="antares.sim not available yet")
+def test_default_simulate_holds_a_command_map():
+    from antares.calibrate import default_simulate
+    from antares.sim import CommandMap
+
+    T = 30
+    action = np.zeros((T, 6))
+    action[:, 1] = 20.0
+    ep = Episode(index=0, fps=30.0, joint_names=JOINTS, state=np.zeros((T, 6)), action=action)
+    shifted = CommandMap(gain=np.ones(6), bias=[0.0, 5.0, 0.0, 0.0, 0.0, 0.0])
+    _, plain = default_simulate()(SimParams(), ep)
+    _, mapped = default_simulate(shifted)(SimParams(), ep)
+    assert mapped[-1, 1] > plain[-1, 1]
