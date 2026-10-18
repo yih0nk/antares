@@ -946,7 +946,7 @@ def export_lock_zip(name: str, targets: list[str] | tuple[str, ...] = (), fps: f
     plus each extra export target's files (``antares.export_targets.TARGETS``)."""
     from antares.export import export_zip
 
-    return export_zip(load_lock(name), targets=targets, fps=fps)
+    return export_zip(load_lock(name), targets=targets, fps=fps, lock_dir=LOCK_DIR)
 
 
 def export_lock_target(name: str, target: str, fps: float | None = None):
@@ -2973,6 +2973,714 @@ def camera_overlay_get(
     except HTTPException:
         raise
     except Exception as e:  # noqa: BLE001 - decoding / segmentation errors
+        raise _video_error(e)
+
+
+# ==========================================================================
+# Scene (antares.scene)
+#
+# The static scene recovered from the logs: table height from the fingertips
+# at grasp instants, workspace, grasp/release points, and per fitted camera
+# the clean background with the table plane checked against it. The sim view
+# composites what that camera would see in the sim, without OpenGL.
+# ==========================================================================
+
+
+def load_scene_dict(lock_name: str) -> dict | None:
+    """``<lock>.scene.json`` for a lock, or None when no scene was fitted."""
+    from antares.scene import load_scene_fit
+
+    _lock_path(lock_name)  # validates the name
+    fit = load_scene_fit(lock_name, LOCK_DIR)
+    return fit.to_dict() if fit is not None else None
+
+
+def run_scene_fit(ds: Dataset, lock_name: str, cameras: list[str] | None = None):
+    """Fit the scene for ``lock_name`` from ``ds`` and save it (JSON, backdrops,
+    the lock's ``scene`` field). Returns ``(fit, path)``.
+
+    The arm carries the lock's parameters and robot; the cameras are the
+    lock's fitted ones (or ``cameras``, a subset by name), each with the
+    background model the overlay already uses.
+    """
+    from antares.project import Camera
+    from antares.scene import fit_scene, save_scene_fit
+    from antares.sim import Arm
+
+    lock = load_lock(lock_name)
+    arm = Arm(lock.params, robot=lock.robot)
+    fits = load_camera_fit_dicts(lock_name)
+    names = [c for c in (cameras or sorted(fits)) if c in fits]
+    cams = {name: Camera.from_dict(fits[name]) for name in names}
+    backgrounds = {}
+    for name in names:
+        try:
+            backgrounds[name] = camera_background(ds, name).bg
+        except Exception as e:  # noqa: BLE001 - a camera without video still leaves the table fit
+            raise _video_error(e)
+    fit = fit_scene(ds, arm, lock_name, cams, backgrounds)
+    path = save_scene_fit(fit, lock_name, LOCK_DIR, backgrounds)
+    return fit, path
+
+
+def scene_view(ds: Dataset, camera: str, episode: int, frame: int, lock_name: str) -> dict:
+    """Real frame | sim view of the same instant from the same camera."""
+    from antares import video
+    from antares.project import Camera, iou, rasterize
+    from antares.scene import load_backdrop, load_scene_fit, sim_view
+
+    ep = find_episode(ds, episode)
+    if not 0 <= frame < len(ep):
+        raise HTTPException(status_code=404, detail=f"frame {frame} not in episode {episode} ({len(ep)} frames)")
+    name = video.camera_name(camera)
+    fits = load_camera_fit_dicts(lock_name)
+    fit = fits.get(name)
+    if fit is None:
+        raise HTTPException(status_code=404, detail=f"lock {lock_name!r} has no camera fit for {name!r}")
+    scene = load_scene_fit(lock_name, LOCK_DIR)
+    if scene is None:
+        raise HTTPException(status_code=404, detail=f"lock {lock_name!r} has no scene fit; run scene-fit first")
+    backdrop = scene.backdrops.get(name)
+    if backdrop is None:
+        raise HTTPException(status_code=404, detail=f"the scene fit of {lock_name!r} has no backdrop for {name!r}")
+    try:
+        rgb = video.frames(ds.repo_id, camera, ep.index, [frame], ds)[0]
+        bg = load_backdrop(backdrop, LOCK_DIR)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:  # noqa: BLE001
+        raise _video_error(e)
+    cam = Camera.from_dict(fit)
+    arm, hulls = _camera_arm()
+    with _CAM_LOCK:
+        poses = arm.fk(arm.unit_map.to_rad(ep.state[frame]))
+    dark = int((fit.get("appearance") or {}).get("sign", -1)) < 0
+    table_poly = np.asarray(backdrop.plane_polygon, dtype=np.float64)
+    image, polys = sim_view(bg, cam, hulls, poses, table_poly, dark_arm=dark)
+    real_mask = camera_background(ds, camera).mask(rgb)
+    sim_mask = rasterize(polys, cam.width, cam.height)
+    return {
+        "dataset": ds.repo_id,
+        "camera": name,
+        "episode": ep.index,
+        "frame": frame,
+        "lock": lock_name,
+        "width": int(cam.width),
+        "height": int(cam.height),
+        "real_image": "data:image/jpeg;base64," + base64.b64encode(video.frame_jpeg(rgb)).decode(),
+        "sim_image": "data:image/jpeg;base64," + base64.b64encode(video.frame_jpeg(image)).decode(),
+        "iou": iou(sim_mask, real_mask),
+        "table_polygon": [list(p) for p in backdrop.plane_polygon],
+        "table_z": scene.table.z,
+        "n_geoms": len(polys),
+    }
+
+
+class SceneFitRequest(BaseModel):
+    dataset: str
+    lock: str
+    cameras: list[str] | None = None
+
+
+@app.post("/api/scene/fit")
+def scene_fit_post(req: SceneFitRequest) -> dict:
+    """Fit and save the scene for a lock (synchronous: FK over the grasp
+    instants plus the cameras' background models, a few seconds)."""
+    _lock_path(req.lock)
+    ds = get_dataset(req.dataset)
+    try:
+        fit, path = run_scene_fit(ds, req.lock, req.cameras)
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {**fit.to_dict(), "path": str(path)}
+
+
+@app.get("/api/scene")
+def scene_get(lock: str = Query(...)) -> dict:
+    return {"lock": lock, "scene": load_scene_dict(lock)}
+
+
+@app.get("/api/scene/view")
+def scene_view_get(
+    dataset: str = Query(...),
+    camera: str = Query(...),
+    episode: int = Query(...),
+    frame: int = Query(0, ge=0),
+    lock: str = Query(...),
+) -> dict:
+    ds = get_dataset(dataset)
+    try:
+        return scene_view(ds, camera, episode, frame, lock)
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001 - decoding / segmentation errors
+        raise _video_error(e)
+
+
+# ==========================================================================
+# Policy (antares.policy, antares.shadow, antares.closedloop)
+#
+# A state-based chunked policy trained on the lock's training episodes, then
+# judged on its held-out ones in the default sim and in the calibrated one:
+# open-loop "shadow" (the policy's commands on the real observations, rolled
+# through each sim) and closed-loop (the policy drives each sim). The gap
+# between the two sims' verdicts is how much the stock sim misjudges the
+# policy. Everything is sim-only; torch is the ``[policy]`` extra.
+# ==========================================================================
+
+POLICY_MODES = ("shadow", "closedloop")
+#: Keywords ``robots`` accepts besides saved lock names.
+POLICY_ROBOT_KEYS = ("default", "lock", "perjoint")
+POLICY_RESULT_SUFFIX = ".policy.{mode}.json"
+
+
+def _policy_error(e: Exception) -> HTTPException:
+    if isinstance(e, HTTPException):
+        return e
+    if isinstance(e, ImportError):
+        return HTTPException(status_code=501, detail=str(e))
+    if isinstance(e, FileNotFoundError):
+        return HTTPException(status_code=404, detail=str(e))
+    return HTTPException(status_code=400, detail=f"{type(e).__name__}: {e}")
+
+
+def _check_policy_mode(mode: str) -> str:
+    if mode not in POLICY_MODES:
+        raise HTTPException(status_code=400, detail=f"mode must be one of {list(POLICY_MODES)}, got {mode!r}")
+    return mode
+
+
+def policy_results_path(lock_name: str, mode: str) -> Path:
+    _lock_path(lock_name)  # validates the name
+    return Path(LOCK_DIR) / f"{lock_name}{POLICY_RESULT_SUFFIX.format(mode=_check_policy_mode(mode))}"
+
+
+def list_policy_dicts(lock: str | None = None) -> list[dict]:
+    """Saved policies' sidecars (``locks/*.policy.json``), newest first."""
+    from antares.policy import list_policies
+
+    if lock is not None:
+        _lock_path(lock)
+    return list_policies(LOCK_DIR, lock)
+
+
+def load_policy_results(lock_name: str, mode: str) -> dict | None:
+    p = policy_results_path(lock_name, mode)
+    if not p.is_file():
+        return None
+    try:
+        return json.loads(p.read_text())
+    except ValueError:
+        return None
+
+
+def policy_split(ds: Dataset, lock_dict: dict) -> tuple[list[Episode], list[Episode]]:
+    """The lock's train / held-out episodes of ``ds`` (400 when the lock has no split)."""
+    from antares.compensate import held_out_episodes
+
+    result = lock_dict.get("result") or {}
+    train_idx, eval_idx = result.get("train_episodes") or [], result.get("eval_episodes") or []
+    if not train_idx or not eval_idx:
+        raise HTTPException(status_code=400, detail="lock records no train/held-out split to train and evaluate on")
+    try:
+        return held_out_episodes(ds, train_idx), held_out_episodes(ds, eval_idx)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+def grasp_context_for(ds: Dataset, lock_dict: dict | None = None):
+    """Gripper thresholds, empty-jaw level and fingertip FK for ``ds`` on the lock's model."""
+    from antares.policy import GraspContext
+
+    robot = check_robot((lock_dict or {}).get("robot") or dataset_robot(ds))
+    return GraspContext.for_dataset(ds.episodes, robot)
+
+
+def run_policy_training(
+    ds: Dataset,
+    lock_dict: dict,
+    epochs: int = 200,
+    name: str | None = None,
+    seed: int = 0,
+    on_progress: Callable[[Any], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
+) -> dict:
+    """Train the chunked policy on the lock's training split, early-stop on its
+    held-out split, save it as ``locks/<name>.policy.pt`` (default: the lock's
+    name). Returns the policy's metadata (metrics included) plus the path."""
+    from antares.policy import save_policy, train_policy
+
+    train, eval = policy_split(ds, lock_dict)
+    name = name or str(lock_dict["name"])
+    _lock_path(name)  # same naming rules as locks
+    ctx = grasp_context_for(ds, lock_dict)
+    res = train_policy(
+        train,
+        eval,
+        epochs=epochs,
+        seed=seed,
+        ctx=ctx,
+        on_progress=on_progress,
+        should_stop=should_stop,
+        meta={"dataset": ds.repo_id, "lock": str(lock_dict["name"]), "robot": check_robot(lock_dict.get("robot"))},
+    )
+    path = save_policy(res.policy, name, LOCK_DIR)
+    return {**res.policy.meta, "path": str(path)}
+
+
+def _policy_train_worker(job: Job, req: "PolicyTrainRequest") -> None:
+    try:
+        ds = get_dataset(req.dataset)
+        lock_dict = load_lock_dict(req.lock)
+        summary = run_policy_training(
+            ds, lock_dict, epochs=req.epochs, name=req.name, seed=req.seed,
+            on_progress=lambda p: job.push(p.to_dict()), should_stop=job.stop.is_set,
+        )
+        job.push({"type": "done", "policy": summary})
+        job.finish("done", result=summary)
+    except Exception as e:  # noqa: BLE001 - reported through the job
+        job_fail(job, _policy_error(e))
+
+
+def resolve_policy_variants(lock_dict: dict, robots: Sequence[str] | None = None) -> tuple[list, list[str]]:
+    """The sims to judge the policy in. ``robots`` entries are ``default``,
+    ``lock`` (this lock), ``perjoint`` (``<lock>_perjoint`` when saved) or any
+    saved lock's name. Returns ``(variants, missing)``; a ``perjoint`` with
+    no such lock is reported in ``missing`` rather than failing."""
+    from antares.shadow import default_variant, variant_from_lock
+
+    robots = list(robots) if robots else list(POLICY_ROBOT_KEYS)
+    robot = check_robot(lock_dict.get("robot"))
+    variants, missing, seen = [], [], set()
+    for key in robots:
+        if key in seen:
+            continue
+        seen.add(key)
+        if key == "default":
+            variants.append(default_variant(robot))
+        elif key == "lock":
+            variants.append(variant_from_lock(lock_dict, "lock"))
+        elif key == "perjoint":
+            name = f"{lock_dict['name']}_perjoint"
+            if lock_dict.get("result", {}).get("space") == "per_joint":
+                continue  # the lock itself is per-joint; "lock" already covers it
+            if not _lock_path(name).is_file():
+                missing.append(name)
+                continue
+            variants.append(variant_from_lock(load_lock_dict(name), "perjoint"))
+        else:
+            variants.append(variant_from_lock(load_lock_dict(key), key))
+    if not variants:
+        raise HTTPException(status_code=400, detail="no sim variants to evaluate in")
+    return variants, missing
+
+
+def _policy_eval_episodes(ds: Dataset, lock_dict: dict, policy_meta: dict | None, episode: int | None = None) -> list[Episode]:
+    """The held-out episodes the policy never trained on: the lock's eval
+    split, narrowed to the policy's own if it records one; or one episode."""
+    from antares.compensate import held_out_episodes
+
+    _, eval = policy_split(ds, lock_dict)
+    pol_eval = set((policy_meta or {}).get("eval_episodes") or [])
+    if pol_eval:
+        eval = [e for e in eval if e.index in pol_eval] or eval
+    if episode is not None:
+        if episode not in {e.index for e in eval}:
+            raise HTTPException(status_code=400, detail=f"episode {episode} is not a held-out episode of {lock_dict['name']}")
+        return held_out_episodes(ds, [episode])
+    return eval
+
+
+def run_policy_evaluation(
+    ds: Dataset,
+    lock_dict: dict,
+    policy_name: str | None,
+    mode: str,
+    robots: Sequence[str] | None = None,
+    on_progress: Callable[[dict], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
+    save: bool = True,
+) -> dict:
+    """Shadow or closed-loop evaluation of a saved policy on the lock's held-out
+    episodes in every requested sim; saved as ``locks/<lock>.policy.<mode>.json``.
+    Per-episode tables, no trajectories (``policy_viewer`` renders those)."""
+    from antares.closedloop import closed_loop_episodes
+    from antares.lock import now_iso
+    from antares.policy import load_policy
+    from antares.shadow import shadow_episodes
+
+    _check_policy_mode(mode)
+    policy_name = policy_name or str(lock_dict["name"])
+    _lock_path(policy_name)
+    try:
+        policy = load_policy(policy_name, LOCK_DIR)
+    except (ImportError, FileNotFoundError) as e:
+        raise _policy_error(e)
+    episodes = _policy_eval_episodes(ds, lock_dict, policy.meta)
+    variants, missing = resolve_policy_variants(lock_dict, robots)
+    ctx = grasp_context_for(ds, lock_dict)
+    if mode == "shadow":
+        summary = shadow_episodes(
+            policy, episodes, variants, ctx,
+            on_progress=lambda i, n, se: on_progress and on_progress(
+                {"type": "progress", "mode": mode, "i": i, "n": n, "episode": se.episode, "row": se.to_dict()}
+            ),
+            should_stop=should_stop,
+        )
+    else:
+        summary = closed_loop_episodes(
+            policy, episodes, variants, ctx,
+            on_progress=lambda i, n, batch: on_progress and on_progress(
+                {"type": "progress", "mode": mode, "i": i, "n": n, "episode": batch[0].episode,
+                 "rows": [r.to_dict() for r in batch]}
+            ),
+            should_stop=should_stop,
+        )
+    out = summary.to_dict(include_arrays=False)
+    out.update(
+        dataset=ds.repo_id,
+        lock=str(lock_dict["name"]),
+        policy=policy_name,
+        policy_meta={k: policy.meta.get(k) for k in ("k", "h", "features", "created_at", "eval_episodes", "metrics")},
+        robots=list(robots) if robots else list(POLICY_ROBOT_KEYS),
+        missing_locks=missing,
+        episodes_evaluated=[e.index for e in episodes],
+        created_at=now_iso(),
+    )
+    if save:
+        p = policy_results_path(str(lock_dict["name"]), mode)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(out, indent=2, sort_keys=True) + "\n")
+        out["path"] = str(p)
+    return out
+
+
+def _policy_eval_worker(job: Job, req: "PolicyEvaluateRequest") -> None:
+    try:
+        ds = get_dataset(req.dataset)
+        lock_dict = load_lock_dict(req.lock)
+        out = run_policy_evaluation(
+            ds, lock_dict, req.policy, req.mode, req.robots, on_progress=job.push, should_stop=job.stop.is_set,
+        )
+        job.push({"type": "done", "mode": req.mode, "summary": out["summary"], "lock": out["lock"], "policy": out["policy"]})
+        job.finish("done", result=out)
+    except Exception as e:  # noqa: BLE001
+        job_fail(job, _policy_error(e))
+
+
+def policy_viewer(
+    ds: Dataset, lock_dict: dict, policy_name: str | None, mode: str, episode: int, robots: Sequence[str] | None = None
+) -> dict:
+    """One held-out episode under the policy in every sim, with body poses
+    ``(T,nbody,7)`` per sim for the viewer's ghosts (like ``/api/replay``).
+    Recomputed on request (a fraction of a second), so result files stay small."""
+    from antares.closedloop import closed_loop_episodes
+    from antares.policy import load_policy
+    from antares.shadow import shadow_episodes
+
+    _check_policy_mode(mode)
+    policy_name = policy_name or str(lock_dict["name"])
+    _lock_path(policy_name)
+    try:
+        policy = load_policy(policy_name, LOCK_DIR)
+    except (ImportError, FileNotFoundError) as e:
+        raise _policy_error(e)
+    eps = _policy_eval_episodes(ds, lock_dict, policy.meta, episode)
+    variants, missing = resolve_policy_variants(lock_dict, robots)
+    ctx = grasp_context_for(ds, lock_dict)
+    arm = variants[0].arm()
+    sims: dict[str, dict] = {}
+    try:
+        if mode == "shadow":
+            s = shadow_episodes(policy, eps, variants, ctx)
+            if not s.episodes:
+                raise HTTPException(status_code=400, detail=f"episode {episode} has no grasp point for the policy")
+            se = s.episodes[0]
+            real_q = se.real_q[se.baseline]
+            rows = {n: (se.sim_q[n], {"sim_vs_real_deg": float(se.gaps[n].overall_deg),
+                                      **({"divergence_deg": float(se.divergence[n].overall_deg)} if n in se.divergence else {})})
+                    for n in se.sim_q}
+            table = se.to_dict()
+            goal = se.goal
+        else:
+            s = closed_loop_episodes(policy, eps, variants, ctx)
+            if not s.runs:
+                raise HTTPException(status_code=400, detail=f"episode {episode} has no grasp point for the policy")
+            real_q = arm.real_q(eps[0])
+            rows = {r.variant: (r.sim_q, {k: v for k, v in r.to_dict().items() if k not in ("variant", "episode")}) for r in s.runs}
+            table = {"runs": [r.to_dict() for r in s.runs]}
+            goal = None if s.runs[0].real_grasp_xyz is None else np.asarray(s.runs[0].real_grasp_xyz)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    for name, (q, metrics) in rows.items():
+        sims[name] = {"q": _rounded(np.degrees(q)), "poses": _rounded(arm.fk(q)), **metrics}
+    return {
+        "dataset": ds.repo_id,
+        "lock": str(lock_dict["name"]),
+        "policy": policy_name,
+        "mode": mode,
+        "episode": int(eps[0].index),
+        "fps": float(eps[0].fps),
+        "robot": arm.robot_name,
+        "joints": list(arm.robot.canonical_joints),
+        "body_names": list(arm.body_names),
+        "goal": None if goal is None else [float(v) for v in goal],
+        "real_q": _rounded(np.degrees(real_q)),
+        "real_poses": _rounded(arm.fk(real_q)),
+        "sims": sims,
+        "variants": [v.to_dict() for v in variants],
+        "missing_locks": missing,
+        "table": table,
+        "validation": "sim-only",
+    }
+
+
+class PolicyTrainRequest(BaseModel):
+    dataset: str
+    lock: str
+    epochs: int = Field(200, ge=1, le=5000)
+    seed: int = 0
+    # Saved as locks/<name>.policy.pt; default: the lock's name.
+    name: str | None = None
+
+
+class PolicyEvaluateRequest(BaseModel):
+    dataset: str
+    lock: str
+    policy: str | None = None  # default: the policy named after the lock
+    mode: Literal["shadow", "closedloop"] = "shadow"
+    # "default", "lock", "perjoint" (= <lock>_perjoint when saved) or saved lock names.
+    robots: list[str] | None = None
+
+
+@app.post("/api/policy/train")
+def policy_train_start(req: PolicyTrainRequest) -> dict:
+    load_lock_dict(req.lock)  # 404 early
+    if req.name is not None:
+        _lock_path(req.name)
+    job = start_job("policy_train", req.dataset, _policy_train_worker, req)
+    return {"job_id": job.id}
+
+
+@app.get("/api/policy")
+def policy_list(lock: str | None = Query(None)) -> dict:
+    return {"lock": lock, "policies": list_policy_dicts(lock)}
+
+
+@app.post("/api/policy/evaluate")
+def policy_evaluate_start(req: PolicyEvaluateRequest) -> dict:
+    lock_dict = load_lock_dict(req.lock)
+    resolve_policy_variants(lock_dict, req.robots)  # unknown lock names fail now, not in the job
+    job = start_job("policy_eval", req.dataset, _policy_eval_worker, req)
+    return {"job_id": job.id}
+
+
+@app.get("/api/policy/results")
+def policy_results(lock: str = Query(...), mode: str | None = Query(None)) -> dict:
+    modes = [_check_policy_mode(mode)] if mode else list(POLICY_MODES)
+    return {"lock": lock, **{m: load_policy_results(lock, m) for m in modes}}
+
+
+@app.get("/api/policy/viewer")
+def policy_viewer_get(
+    dataset: str = Query(...),
+    lock: str = Query(...),
+    episode: int = Query(...),
+    mode: str = Query("shadow"),
+    policy: str | None = Query(None),
+    robots: str | None = Query(None, description="comma-separated: default,lock,perjoint or lock names"),
+) -> dict:
+    ds = get_dataset(dataset)
+    lock_dict = load_lock_dict(lock)
+    return policy_viewer(ds, lock_dict, policy, _check_policy_mode(mode), episode, _csv(robots) or None)
+
+
+# Objects (antares.objects / antares.payload)
+#
+# The manipulated object found in the video, tracked through every episode
+# (vision on the table plane, FK while held), its start/end pose
+# distribution against the task's FK picks, and the payload mass estimated
+# from the residual while it is carried. The fit is a job (progress per
+# episode); the per-frame track of one episode feeds the overlay and the
+# 3D viewer.
+# ==========================================================================
+
+_TRACKS: dict[tuple[str, str, int], Any] = {}
+_TRACKS_LOCK = threading.Lock()
+
+
+def load_objects_dict(lock_name: str) -> dict | None:
+    """``<lock>.objects.json`` for a lock, or None when no objects fit was run."""
+    from antares.objects import load_object_fit
+
+    _lock_path(lock_name)  # validates the name
+    fit = load_object_fit(lock_name, LOCK_DIR)
+    return fit.to_dict() if fit is not None else None
+
+
+def _objects_camera(lock_name: str, camera: str | None) -> tuple[str, dict]:
+    """The camera to track in: the one asked for, else the lock's best-fitted one."""
+    fits = load_camera_fit_dicts(lock_name)
+    if not fits:
+        raise HTTPException(status_code=400, detail=f"lock {lock_name!r} has no camera fit; run camera-fit first")
+    if camera is not None:
+        name = camera.removeprefix("observation.images.")
+        if name not in fits:
+            raise HTTPException(status_code=404, detail=f"lock {lock_name!r} has no camera fit for {name!r}; fitted: {sorted(fits)}")
+        return name, fits
+    best = max(fits, key=lambda n: float(fits[n].get("fit_iou") or 0.0))
+    return best, fits
+
+
+def run_objects_fit(
+    ds: Dataset,
+    lock_name: str,
+    camera: str | None = None,
+    *,
+    episodes: list[int] | None = None,
+    payload: bool = True,
+    on_progress: Callable[[dict], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
+):
+    """Track the object in ``ds`` for ``lock_name`` and save the fit (JSON,
+    tracks ``.npz``, the lock's ``objects`` field). Returns ``(fit, tracks, path)``.
+
+    Needs the lock's camera fit and scene fit (the table plane). With two
+    fitted cameras the cross-camera triangulation check runs too; with
+    ``payload`` the residual-based mass estimate is attached.
+    """
+    from antares.objects import cross_camera_check, fit_objects, save_object_fit
+    from antares.payload import estimate_payload
+    from antares.project import Camera
+    from antares.scene import load_scene_fit
+    from antares.sim import Arm
+
+    lock_name = resolve_lock_ref(lock_name)
+    lock = load_lock(lock_name)
+    scene = load_scene_fit(lock_name, LOCK_DIR)
+    if scene is None:
+        raise HTTPException(status_code=400, detail=f"lock {lock_name!r} has no scene fit (the table plane); run scene-fit first")
+    name, fits = _objects_camera(lock_name, camera)
+    cam = Camera.from_dict(fits[name])
+    try:
+        bgm = camera_background(ds, name)
+    except Exception as e:  # noqa: BLE001
+        raise _video_error(e)
+    arm = Arm(lock.params, robot=lock.robot)
+    bd = scene.backdrops.get(name)
+    fit, tracks = fit_objects(
+        ds, arm, lock_name, name, cam, bgm, scene.table.z,
+        object_half_height=scene.table.object_half_height,
+        table_rgb=bd.table_rgb if bd is not None else None,
+        episodes=episodes,
+        on_progress=on_progress,
+        should_stop=should_stop,
+    )
+    others = [n for n in fits if n != name]
+    if others and not (should_stop and should_stop()):
+        try:
+            cams = {n: Camera.from_dict(fits[n]) for n in (name, others[0])}
+            bgs = {n: camera_background(ds, n) for n in cams}
+            fit.cross_camera = cross_camera_check(ds, arm, cams, bgs, scene.table.z + scene.table.object_half_height, name)
+        except Exception as e:  # noqa: BLE001 - the check is optional
+            fit.cross_camera = {"n": 0, "note": f"{type(e).__name__}: {e}"}
+        if on_progress is not None:
+            on_progress({"stage": "cross", "cross_camera": fit.cross_camera})
+    if payload and not (should_stop and should_stop()):
+        picks = {t.episode: [(g, r) for g, r in t.picks if r < len(t.frames)] for t in tracks}
+        est = estimate_payload(ds, arm, lock_name, picks=picks, episodes=[t.episode for t in tracks], on_progress=on_progress, should_stop=should_stop)
+        fit.payload = est.to_dict()
+    path = save_object_fit(fit, lock_name, LOCK_DIR, tracks)
+    with _TRACKS_LOCK:
+        for t in tracks:
+            _TRACKS[(ds.repo_id, lock_name, t.episode)] = t
+    return fit, tracks, path
+
+
+def _objects_job_worker(job: Job, req: "ObjectsFitRequest") -> None:
+    try:
+        ds = get_dataset(req.dataset)
+
+        def on_progress(ev: dict) -> None:
+            job.push({"type": "progress", **ev})
+
+        fit, tracks, path = run_objects_fit(
+            ds, req.lock, req.camera, episodes=req.episodes, payload=req.payload,
+            on_progress=on_progress, should_stop=job.stop.is_set,
+        )
+        summary = {**{k: v for k, v in fit.to_dict().items() if k != "tracks"}, "path": str(path)}
+        job.push({"type": "done", "fit": summary})
+        job.finish("done", result=summary)
+    except Exception as e:  # noqa: BLE001 - report to the client
+        job_fail(job, e)
+
+
+def objects_track(ds: Dataset, episode: int, lock_name: str) -> dict:
+    """The per-frame object track of one episode: from the saved ``.npz``,
+    else tracked now (a few seconds) and kept in memory."""
+    from antares.objects import load_object_fit, load_track
+
+    lock_name = resolve_lock_ref(lock_name)
+    ep = find_episode(ds, episode)
+    fit = load_object_fit(lock_name, LOCK_DIR)
+    if fit is None:
+        raise HTTPException(status_code=404, detail=f"lock {lock_name!r} has no objects fit; run objects-fit first")
+    key = (ds.repo_id, lock_name, ep.index)
+    with _TRACKS_LOCK:
+        track = _TRACKS.get(key)
+    if track is None:
+        track = load_track(fit, ep.index, LOCK_DIR)
+    if track is None:
+        _, tracks, _ = run_objects_fit(ds, lock_name, fit.camera, episodes=[ep.index], payload=False)
+        track = next((t for t in tracks if t.episode == ep.index), None)
+        if track is None:
+            raise HTTPException(status_code=404, detail=f"episode {episode} could not be tracked")
+    with _TRACKS_LOCK:
+        _TRACKS[key] = track
+    return {
+        "dataset": ds.repo_id,
+        "lock": lock_name,
+        "camera": fit.camera,
+        "rgb": list(fit.prior.rgb),
+        "footprint_m": None if fit.footprint is None else list(fit.footprint),
+        "half_height": fit.object_half_height,
+        **track.to_dict(),
+    }
+
+
+class ObjectsFitRequest(BaseModel):
+    dataset: str
+    lock: str
+    camera: str | None = None
+    episodes: list[int] | None = None
+    payload: bool = True
+
+
+@app.post("/api/objects/fit")
+def objects_fit_start(req: ObjectsFitRequest) -> dict:
+    _lock_path(resolve_lock_ref(req.lock))  # validate early
+    job = start_job("objects", req.dataset, _objects_job_worker, req)
+    return {"job_id": job.id}
+
+
+@app.get("/api/objects")
+def objects_get(lock: str = Query(...)) -> dict:
+    d = load_objects_dict(lock)
+    if d is not None:
+        d = {k: v for k, v in d.items() if k != "tracks"} | {"tracks": [t for t in d["tracks"]]}
+    return {"lock": lock, "objects": d}
+
+
+@app.get("/api/objects/track")
+def objects_track_get(dataset: str = Query(...), episode: int = Query(...), lock: str = Query(...)) -> dict:
+    ds = get_dataset(dataset)
+    try:
+        return objects_track(ds, episode, lock)
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001 - decoding / tracking errors
         raise _video_error(e)
 
 
