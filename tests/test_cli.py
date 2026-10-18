@@ -1118,7 +1118,7 @@ def test_check_explain_evaluations_has_a_floor(monkeypatch, capsys):
     _patch_check(monkeypatch, _check_result(3.0))
     _patch_diagnose(monkeypatch, calls)
     assert cli.main(["check", "fake/robot", "--lock", "unit-a", "--explain", "--explain-evaluations", "0"]) == 2
-    assert "--explain-evaluations must be >= 10" in capsys.readouterr().err
+    assert "--explain-evaluations must be >= 20" in capsys.readouterr().err
     assert calls == []
 
 

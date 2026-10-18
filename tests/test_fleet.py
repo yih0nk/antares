@@ -392,6 +392,22 @@ def test_scan_rejects_wrong_joints_and_unusable_episodes(tmp_path):
     assert rep.robots[0].dataset == "b/y" and rep.robots[0].n_episodes == 12  # the two unusable episodes dropped
 
 
+def test_scan_rejects_logs_the_default_sim_already_matches(tmp_path):
+    from antares.sim import SimParams
+
+    real = make_dataset("a/x", seed=5)
+    simmed = make_dataset("b/simmed", seed=6, true=SimParams.default())  # "recorded" with the defaults
+    loads = {"a/x": real, "b/simmed": simmed}
+    events = []
+    rep = scan([cand("a/x"), cand("b/simmed")], max_evaluations=2, lock_dir=tmp_path, on_progress=events.append,
+               load=lambda rid: loads[rid], simulate=toy_simulate, cross_n=0)
+    assert [r.dataset for r in rep.robots] == ["a/x"]
+    assert [r["dataset"] for r in rep.rejected] == ["b/simmed"]
+    assert "likely recorded in a simulator" in rep.rejected[0]["reason"]
+    assert not (tmp_path / "b__simmed.lock.json").exists()
+    assert any(ev["type"] == "rejected" and ev["dataset"] == "b/simmed" for ev in events)
+
+
 def entry(dataset, n_episodes=50, fps=30.0, baseline=5.0, calibrated=2.0, **params):
     p = {"kp": 1000.0, "kv": 3.0, "damping": 0.5, "armature": 0.03, "frictionloss": 0.05, "latency_frames": 2}
     p.update(params)

@@ -1657,7 +1657,7 @@ def run_diagnose(
     lock: str | dict,
     *,
     last: int | None = None,
-    max_evaluations: int = 240,
+    max_evaluations: int = 300,
     seed: int = 0,
     should_stop: Callable[[], bool] | None = None,
     on_progress: Callable[[int, float], None] | None = None,
@@ -2506,7 +2506,7 @@ class CheckRequest(BaseModel):
     last: int | None = Field(None, ge=1)
     min_episodes: int = Field(5, ge=1)
     explain: bool = False
-    explain_evaluations: int = Field(240, ge=10, le=2000)
+    explain_evaluations: int = Field(300, ge=20, le=2000)
     notify_url: str | None = None
     notify_when: Literal["drifted", "failure", "always"] = "drifted"
     notify_format: Literal["auto", "slack", "json"] = "auto"
@@ -2705,7 +2705,7 @@ class DiagnoseRequest(BaseModel):
     dataset: str
     lock: str
     last: int | None = Field(None, ge=1)
-    max_evaluations: int = Field(240, ge=10, le=2000)
+    max_evaluations: int = Field(300, ge=20, le=2000)
     seed: int = 0
 
 

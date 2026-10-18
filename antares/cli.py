@@ -471,7 +471,7 @@ def cmd_dr(args: argparse.Namespace) -> int:
 EXIT_PASS = 0
 EXIT_DRIFT = 1
 EXIT_USAGE = 2  # bad arguments, missing lock/dataset, or too few episodes
-MIN_EXPLAIN_EVALUATIONS = 10  # as POST /api/check validates explain_evaluations
+MIN_EXPLAIN_EVALUATIONS = 20  # as POST /api/check validates explain_evaluations
 
 
 def _fmt(v, nd: int = 3) -> str:
@@ -1790,6 +1790,8 @@ def cmd_fleet_scan(args: argparse.Namespace) -> int:
             )
         elif t == "failed":
             print(f"    FAILED {ev['dataset']}: {ev['error']}", flush=True)
+        elif t == "rejected":
+            print(f"    rejected {ev['dataset']}: {ev['reason']}", flush=True)
         elif t == "skipped":
             print(f"    skipped {ev['dataset']}: {ev['reason']}", flush=True)
         elif t == "done":
@@ -1975,8 +1977,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true", help="print the CheckResult as JSON")
     p.add_argument("--explain", action="store_true",
                    help="on drift, refit and name the parameter change that explains it")
-    p.add_argument("--explain-evaluations", type=int, default=240, metavar="N",
-                   help="refit budget for --explain (default 240, at least 10)")
+    p.add_argument("--explain-evaluations", type=int, default=300, metavar="N",
+                   help="refit budget for --explain (default 300, at least 20)")
     p.add_argument("--notify", default=None, metavar="URL",
                    help="POST an alert to this webhook (default: $ANTARES_WEBHOOK_URL); "
                         "a failed POST only warns and leaves the exit code alone")
