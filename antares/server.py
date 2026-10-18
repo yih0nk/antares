@@ -3119,6 +3119,384 @@ def scene_view_get(
         raise _video_error(e)
 
 
+# ==========================================================================
+# Policy (antares.policy, antares.shadow, antares.closedloop)
+#
+# A state-based chunked policy trained on the lock's training episodes, then
+# judged on its held-out ones in the default sim and in the calibrated one:
+# open-loop "shadow" (the policy's commands on the real observations, rolled
+# through each sim) and closed-loop (the policy drives each sim). The gap
+# between the two sims' verdicts is how much the stock sim misjudges the
+# policy. Everything is sim-only; torch is the ``[policy]`` extra.
+# ==========================================================================
+
+POLICY_MODES = ("shadow", "closedloop")
+#: Keywords ``robots`` accepts besides saved lock names.
+POLICY_ROBOT_KEYS = ("default", "lock", "perjoint")
+POLICY_RESULT_SUFFIX = ".policy.{mode}.json"
+
+
+def _policy_error(e: Exception) -> HTTPException:
+    if isinstance(e, HTTPException):
+        return e
+    if isinstance(e, ImportError):
+        return HTTPException(status_code=501, detail=str(e))
+    if isinstance(e, FileNotFoundError):
+        return HTTPException(status_code=404, detail=str(e))
+    return HTTPException(status_code=400, detail=f"{type(e).__name__}: {e}")
+
+
+def _check_policy_mode(mode: str) -> str:
+    if mode not in POLICY_MODES:
+        raise HTTPException(status_code=400, detail=f"mode must be one of {list(POLICY_MODES)}, got {mode!r}")
+    return mode
+
+
+def policy_results_path(lock_name: str, mode: str) -> Path:
+    _lock_path(lock_name)  # validates the name
+    return Path(LOCK_DIR) / f"{lock_name}{POLICY_RESULT_SUFFIX.format(mode=_check_policy_mode(mode))}"
+
+
+def list_policy_dicts(lock: str | None = None) -> list[dict]:
+    """Saved policies' sidecars (``locks/*.policy.json``), newest first."""
+    from antares.policy import list_policies
+
+    if lock is not None:
+        _lock_path(lock)
+    return list_policies(LOCK_DIR, lock)
+
+
+def load_policy_results(lock_name: str, mode: str) -> dict | None:
+    p = policy_results_path(lock_name, mode)
+    if not p.is_file():
+        return None
+    try:
+        return json.loads(p.read_text())
+    except ValueError:
+        return None
+
+
+def policy_split(ds: Dataset, lock_dict: dict) -> tuple[list[Episode], list[Episode]]:
+    """The lock's train / held-out episodes of ``ds`` (400 when the lock has no split)."""
+    from antares.compensate import held_out_episodes
+
+    result = lock_dict.get("result") or {}
+    train_idx, eval_idx = result.get("train_episodes") or [], result.get("eval_episodes") or []
+    if not train_idx or not eval_idx:
+        raise HTTPException(status_code=400, detail="lock records no train/held-out split to train and evaluate on")
+    try:
+        return held_out_episodes(ds, train_idx), held_out_episodes(ds, eval_idx)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+def grasp_context_for(ds: Dataset, lock_dict: dict | None = None):
+    """Gripper thresholds, empty-jaw level and fingertip FK for ``ds`` on the lock's model."""
+    from antares.policy import GraspContext
+
+    robot = check_robot((lock_dict or {}).get("robot") or dataset_robot(ds))
+    return GraspContext.for_dataset(ds.episodes, robot)
+
+
+def run_policy_training(
+    ds: Dataset,
+    lock_dict: dict,
+    epochs: int = 200,
+    name: str | None = None,
+    seed: int = 0,
+    on_progress: Callable[[Any], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
+) -> dict:
+    """Train the chunked policy on the lock's training split, early-stop on its
+    held-out split, save it as ``locks/<name>.policy.pt`` (default: the lock's
+    name). Returns the policy's metadata (metrics included) plus the path."""
+    from antares.policy import save_policy, train_policy
+
+    train, eval = policy_split(ds, lock_dict)
+    name = name or str(lock_dict["name"])
+    _lock_path(name)  # same naming rules as locks
+    ctx = grasp_context_for(ds, lock_dict)
+    res = train_policy(
+        train,
+        eval,
+        epochs=epochs,
+        seed=seed,
+        ctx=ctx,
+        on_progress=on_progress,
+        should_stop=should_stop,
+        meta={"dataset": ds.repo_id, "lock": str(lock_dict["name"]), "robot": check_robot(lock_dict.get("robot"))},
+    )
+    path = save_policy(res.policy, name, LOCK_DIR)
+    return {**res.policy.meta, "path": str(path)}
+
+
+def _policy_train_worker(job: Job, req: "PolicyTrainRequest") -> None:
+    try:
+        ds = get_dataset(req.dataset)
+        lock_dict = load_lock_dict(req.lock)
+        summary = run_policy_training(
+            ds, lock_dict, epochs=req.epochs, name=req.name, seed=req.seed,
+            on_progress=lambda p: job.push(p.to_dict()), should_stop=job.stop.is_set,
+        )
+        job.push({"type": "done", "policy": summary})
+        job.finish("done", result=summary)
+    except Exception as e:  # noqa: BLE001 - reported through the job
+        job_fail(job, _policy_error(e))
+
+
+def resolve_policy_variants(lock_dict: dict, robots: Sequence[str] | None = None) -> tuple[list, list[str]]:
+    """The sims to judge the policy in. ``robots`` entries are ``default``,
+    ``lock`` (this lock), ``perjoint`` (``<lock>_perjoint`` when saved) or any
+    saved lock's name. Returns ``(variants, missing)``; a ``perjoint`` with
+    no such lock is reported in ``missing`` rather than failing."""
+    from antares.shadow import default_variant, variant_from_lock
+
+    robots = list(robots) if robots else list(POLICY_ROBOT_KEYS)
+    robot = check_robot(lock_dict.get("robot"))
+    variants, missing, seen = [], [], set()
+    for key in robots:
+        if key in seen:
+            continue
+        seen.add(key)
+        if key == "default":
+            variants.append(default_variant(robot))
+        elif key == "lock":
+            variants.append(variant_from_lock(lock_dict, "lock"))
+        elif key == "perjoint":
+            name = f"{lock_dict['name']}_perjoint"
+            if lock_dict.get("result", {}).get("space") == "per_joint":
+                continue  # the lock itself is per-joint; "lock" already covers it
+            if not _lock_path(name).is_file():
+                missing.append(name)
+                continue
+            variants.append(variant_from_lock(load_lock_dict(name), "perjoint"))
+        else:
+            variants.append(variant_from_lock(load_lock_dict(key), key))
+    if not variants:
+        raise HTTPException(status_code=400, detail="no sim variants to evaluate in")
+    return variants, missing
+
+
+def _policy_eval_episodes(ds: Dataset, lock_dict: dict, policy_meta: dict | None, episode: int | None = None) -> list[Episode]:
+    """The held-out episodes the policy never trained on: the lock's eval
+    split, narrowed to the policy's own if it records one; or one episode."""
+    from antares.compensate import held_out_episodes
+
+    _, eval = policy_split(ds, lock_dict)
+    pol_eval = set((policy_meta or {}).get("eval_episodes") or [])
+    if pol_eval:
+        eval = [e for e in eval if e.index in pol_eval] or eval
+    if episode is not None:
+        if episode not in {e.index for e in eval}:
+            raise HTTPException(status_code=400, detail=f"episode {episode} is not a held-out episode of {lock_dict['name']}")
+        return held_out_episodes(ds, [episode])
+    return eval
+
+
+def run_policy_evaluation(
+    ds: Dataset,
+    lock_dict: dict,
+    policy_name: str | None,
+    mode: str,
+    robots: Sequence[str] | None = None,
+    on_progress: Callable[[dict], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
+    save: bool = True,
+) -> dict:
+    """Shadow or closed-loop evaluation of a saved policy on the lock's held-out
+    episodes in every requested sim; saved as ``locks/<lock>.policy.<mode>.json``.
+    Per-episode tables, no trajectories (``policy_viewer`` renders those)."""
+    from antares.closedloop import closed_loop_episodes
+    from antares.lock import now_iso
+    from antares.policy import load_policy
+    from antares.shadow import shadow_episodes
+
+    _check_policy_mode(mode)
+    policy_name = policy_name or str(lock_dict["name"])
+    _lock_path(policy_name)
+    try:
+        policy = load_policy(policy_name, LOCK_DIR)
+    except (ImportError, FileNotFoundError) as e:
+        raise _policy_error(e)
+    episodes = _policy_eval_episodes(ds, lock_dict, policy.meta)
+    variants, missing = resolve_policy_variants(lock_dict, robots)
+    ctx = grasp_context_for(ds, lock_dict)
+    if mode == "shadow":
+        summary = shadow_episodes(
+            policy, episodes, variants, ctx,
+            on_progress=lambda i, n, se: on_progress and on_progress(
+                {"type": "progress", "mode": mode, "i": i, "n": n, "episode": se.episode, "row": se.to_dict()}
+            ),
+            should_stop=should_stop,
+        )
+    else:
+        summary = closed_loop_episodes(
+            policy, episodes, variants, ctx,
+            on_progress=lambda i, n, batch: on_progress and on_progress(
+                {"type": "progress", "mode": mode, "i": i, "n": n, "episode": batch[0].episode,
+                 "rows": [r.to_dict() for r in batch]}
+            ),
+            should_stop=should_stop,
+        )
+    out = summary.to_dict(include_arrays=False)
+    out.update(
+        dataset=ds.repo_id,
+        lock=str(lock_dict["name"]),
+        policy=policy_name,
+        policy_meta={k: policy.meta.get(k) for k in ("k", "h", "features", "created_at", "eval_episodes", "metrics")},
+        robots=list(robots) if robots else list(POLICY_ROBOT_KEYS),
+        missing_locks=missing,
+        episodes_evaluated=[e.index for e in episodes],
+        created_at=now_iso(),
+    )
+    if save:
+        p = policy_results_path(str(lock_dict["name"]), mode)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(out, indent=2, sort_keys=True) + "\n")
+        out["path"] = str(p)
+    return out
+
+
+def _policy_eval_worker(job: Job, req: "PolicyEvaluateRequest") -> None:
+    try:
+        ds = get_dataset(req.dataset)
+        lock_dict = load_lock_dict(req.lock)
+        out = run_policy_evaluation(
+            ds, lock_dict, req.policy, req.mode, req.robots, on_progress=job.push, should_stop=job.stop.is_set,
+        )
+        job.push({"type": "done", "mode": req.mode, "summary": out["summary"], "lock": out["lock"], "policy": out["policy"]})
+        job.finish("done", result=out)
+    except Exception as e:  # noqa: BLE001
+        job_fail(job, _policy_error(e))
+
+
+def policy_viewer(
+    ds: Dataset, lock_dict: dict, policy_name: str | None, mode: str, episode: int, robots: Sequence[str] | None = None
+) -> dict:
+    """One held-out episode under the policy in every sim, with body poses
+    ``(T,nbody,7)`` per sim for the viewer's ghosts (like ``/api/replay``).
+    Recomputed on request (a fraction of a second), so result files stay small."""
+    from antares.closedloop import closed_loop_episodes
+    from antares.policy import load_policy
+    from antares.shadow import shadow_episodes
+
+    _check_policy_mode(mode)
+    policy_name = policy_name or str(lock_dict["name"])
+    _lock_path(policy_name)
+    try:
+        policy = load_policy(policy_name, LOCK_DIR)
+    except (ImportError, FileNotFoundError) as e:
+        raise _policy_error(e)
+    eps = _policy_eval_episodes(ds, lock_dict, policy.meta, episode)
+    variants, missing = resolve_policy_variants(lock_dict, robots)
+    ctx = grasp_context_for(ds, lock_dict)
+    arm = variants[0].arm()
+    sims: dict[str, dict] = {}
+    try:
+        if mode == "shadow":
+            s = shadow_episodes(policy, eps, variants, ctx)
+            if not s.episodes:
+                raise HTTPException(status_code=400, detail=f"episode {episode} has no grasp point for the policy")
+            se = s.episodes[0]
+            real_q = se.real_q[se.baseline]
+            rows = {n: (se.sim_q[n], {"sim_vs_real_deg": float(se.gaps[n].overall_deg),
+                                      **({"divergence_deg": float(se.divergence[n].overall_deg)} if n in se.divergence else {})})
+                    for n in se.sim_q}
+            table = se.to_dict()
+            goal = se.goal
+        else:
+            s = closed_loop_episodes(policy, eps, variants, ctx)
+            if not s.runs:
+                raise HTTPException(status_code=400, detail=f"episode {episode} has no grasp point for the policy")
+            real_q = arm.real_q(eps[0])
+            rows = {r.variant: (r.sim_q, {k: v for k, v in r.to_dict().items() if k not in ("variant", "episode")}) for r in s.runs}
+            table = {"runs": [r.to_dict() for r in s.runs]}
+            goal = None if s.runs[0].real_grasp_xyz is None else np.asarray(s.runs[0].real_grasp_xyz)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    for name, (q, metrics) in rows.items():
+        sims[name] = {"q": _rounded(np.degrees(q)), "poses": _rounded(arm.fk(q)), **metrics}
+    return {
+        "dataset": ds.repo_id,
+        "lock": str(lock_dict["name"]),
+        "policy": policy_name,
+        "mode": mode,
+        "episode": int(eps[0].index),
+        "fps": float(eps[0].fps),
+        "robot": arm.robot_name,
+        "joints": list(arm.robot.canonical_joints),
+        "body_names": list(arm.body_names),
+        "goal": None if goal is None else [float(v) for v in goal],
+        "real_q": _rounded(np.degrees(real_q)),
+        "real_poses": _rounded(arm.fk(real_q)),
+        "sims": sims,
+        "variants": [v.to_dict() for v in variants],
+        "missing_locks": missing,
+        "table": table,
+        "validation": "sim-only",
+    }
+
+
+class PolicyTrainRequest(BaseModel):
+    dataset: str
+    lock: str
+    epochs: int = Field(200, ge=1, le=5000)
+    seed: int = 0
+    # Saved as locks/<name>.policy.pt; default: the lock's name.
+    name: str | None = None
+
+
+class PolicyEvaluateRequest(BaseModel):
+    dataset: str
+    lock: str
+    policy: str | None = None  # default: the policy named after the lock
+    mode: Literal["shadow", "closedloop"] = "shadow"
+    # "default", "lock", "perjoint" (= <lock>_perjoint when saved) or saved lock names.
+    robots: list[str] | None = None
+
+
+@app.post("/api/policy/train")
+def policy_train_start(req: PolicyTrainRequest) -> dict:
+    load_lock_dict(req.lock)  # 404 early
+    if req.name is not None:
+        _lock_path(req.name)
+    job = start_job("policy_train", req.dataset, _policy_train_worker, req)
+    return {"job_id": job.id}
+
+
+@app.get("/api/policy")
+def policy_list(lock: str | None = Query(None)) -> dict:
+    return {"lock": lock, "policies": list_policy_dicts(lock)}
+
+
+@app.post("/api/policy/evaluate")
+def policy_evaluate_start(req: PolicyEvaluateRequest) -> dict:
+    lock_dict = load_lock_dict(req.lock)
+    resolve_policy_variants(lock_dict, req.robots)  # unknown lock names fail now, not in the job
+    job = start_job("policy_eval", req.dataset, _policy_eval_worker, req)
+    return {"job_id": job.id}
+
+
+@app.get("/api/policy/results")
+def policy_results(lock: str = Query(...), mode: str | None = Query(None)) -> dict:
+    modes = [_check_policy_mode(mode)] if mode else list(POLICY_MODES)
+    return {"lock": lock, **{m: load_policy_results(lock, m) for m in modes}}
+
+
+@app.get("/api/policy/viewer")
+def policy_viewer_get(
+    dataset: str = Query(...),
+    lock: str = Query(...),
+    episode: int = Query(...),
+    mode: str = Query("shadow"),
+    policy: str | None = Query(None),
+    robots: str | None = Query(None, description="comma-separated: default,lock,perjoint or lock names"),
+) -> dict:
+    ds = get_dataset(dataset)
+    lock_dict = load_lock_dict(lock)
+    return policy_viewer(ds, lock_dict, policy, _check_policy_mode(mode), episode, _csv(robots) or None)
+
+
 # Built frontend, mounted after the API routes so `antares serve` alone demos.
 if WEB_DIST.is_dir():
     app.mount("/", StaticFiles(directory=str(WEB_DIST), html=True), name="web")
