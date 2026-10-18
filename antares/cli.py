@@ -210,6 +210,8 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
         stages += " per round, fitting the sensor calibration"
     if args.calibration:
         stages += ", unit map from the arm's LeRobot calibration"
+    if args.servo != "position":
+        stages += f", {args.servo} servo model"
     print(f"calibrating {ds.repo_id}: {args.n_train} train / {args.n_eval} eval episodes, {stages}")
     last = {"n": 0, "stage": None, "seed": None}
 
@@ -250,6 +252,7 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
         calibration_path=args.calibration,
         robot_id=args.robot_id,
         robot_type=args.robot_type,
+        servo=args.servo,
     )
     r = result.to_dict()
     only = lock.get("dynamics_only")
@@ -477,6 +480,8 @@ MIN_EXPLAIN_EVALUATIONS = 20  # as POST /api/check validates explain_evaluations
 
 
 def _fmt(v, nd: int = 3) -> str:
+    if isinstance(v, str):
+        return v
     return "-" if v is None else f"{v:.{nd}f}"
 
 
@@ -2142,6 +2147,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--fit-deadband",
         action="store_true",
         help="also fit the servo deadband (firmware deadzone + gear backlash), per joint with --per-joint",
+    )
+    p.add_argument(
+        "--servo",
+        choices=("position", "sts3215"),
+        default="position",
+        help="actuator model: MuJoCo's position actuator (default) or the STS3215's firmware and "
+        "motor with BAM's bench-identified constants, fitting gain ratio, friction, inertia, "
+        "rate limit and latency instead of kp/kv",
     )
     p.add_argument(
         "--fit-sensor",
