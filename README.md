@@ -771,7 +771,6 @@ episodes (held-out episodes in parentheses):
 
 Read these with care. On the SO-101 the residual does concentrate around
 grasps, but weakly (1.1x chance), and the perfect recall comes from
-
 events that are long: the sim deviates by 3-5 deg on the elbow for the
 whole stretch where the arm is out over the table, from before the grasp
 until after the release, so one event covers both. On the SO-100 the
@@ -826,7 +825,6 @@ does, with more iterations than on the stiffer SO-100.
 Feasibility (also sim-only): the compensated commands stay within the
 actuator range, exceed the original commands' range by at most 0.8°, and
 their peak velocity is 1.04× (SO-101) and 1.11× (SO-100) the fastest
-
 joint motion seen in the real data; the tool flags any joint above 1.5×.
 Frames sitting on the control limit are reported for the raw and the
 compensated commands side by side, because a desired trajectory that
@@ -907,7 +905,7 @@ caught by the default-sim rule above), too few episodes (7) and merges (3).
   closes only 6 % of its gap and is left at 6.3 deg, mostly in
   `wrist_roll` (13.7 deg), which smells like a joint-offset problem rather
   than servo dynamics. `OkzRIKU/so101-turn-up-drone` closes 25 %.
-  `dongdong123123/so101_stack_cubes` fits an armature 65x below the fleet
+  `dongdong123123/so101_stack_cubes` fits an armature 58x below the fleet
   median, at the bottom of the search range. Score outliers are kept out
   of the cross matrix so one unexplained arm does not dominate it.
 
@@ -1061,7 +1059,6 @@ wrist cameras are skipped; the sim is the SO-101 model for both datasets.
 | `antares/validate.py` | Dataset checks shared by upload, `inspect` and the fleet scan |
 | `antares/robots.py` | Registry of simulator models (`so101`, `so100`) |
 | `antares/sim.py` | MuJoCo model, unit mapping, replay and rollout |
-
 | `antares/calibrate.py` | CMA-ES parameter fit |
 | `antares/sensor.py` | Per-joint command offset/scale fit |
 | `antares/gap.py` | Tracking-error metrics |

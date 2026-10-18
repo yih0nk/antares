@@ -519,7 +519,7 @@ def scan(
     Afterwards :func:`finalize` adds the fleet statistics, outliers and a
     partial cross matrix over up to ``cross_n`` robots (0 disables it).
     """
-    from antares.calibrate import calibrate, split_episodes
+    from antares.calibrate import calibrate, score, split_episodes
     from antares.lock import RobotLock, pinned_params, seed_info
     from antares.sim import SimParams
 
@@ -576,51 +576,52 @@ def scan(
                         }
                     )
 
-            result = calibrate(
-                train,
-                eval_,
-                simulate=simulate,
-                start=SimParams.default(),
-                max_evaluations=max_evaluations,
-                seed=seed,
-                on_progress=on_fit,
-            )
-            if result.baseline_eval_score < MIN_BASELINE_DEG:
+            # One cheap held-out score of the defaults decides whether this is a
+            # physical arm at all, before any fit budget is spent on it.
+            default_eval = float(score(SimParams.default(), eval_ or train, simulate).overall_deg)
+            if default_eval < MIN_BASELINE_DEG:
                 reason = (
-                    f"the default sim already tracks it to {result.baseline_eval_score:.2f} deg "
+                    f"the default sim already tracks it to {default_eval:.2f} deg "
                     f"(< {MIN_BASELINE_DEG}); likely recorded in a simulator, not a physical arm"
                 )
                 report.rejected.append({"dataset": cand.repo_id, "reason": reason})
                 emit({"type": "rejected", "dataset": cand.repo_id, "reason": reason})
-                report.elapsed_s = time.monotonic() - t0
-                report.save(report_path)
-                continue
-            name = lock_name(cand.repo_id)
-            lock = RobotLock.create(ds.repo_id, ds.robot_type, train, result, name=name)
-            lock.save(lock_dir / f"{name}{LOCK_SUFFIX}")
-            entry = RobotEntry(
-                dataset=ds.repo_id,
-                robot_type=ds.robot_type,
-                n_episodes=len(episodes),
-                fps=float(ds.fps),
-                n_train=len(train),
-                n_eval=len(eval_),
-                baseline_eval=float(result.baseline_eval_score),
-                calibrated_eval=float(result.eval_score),
-                improvement=float(result.improvement),
-                params=result.params.to_dict(),
-                lock=name,
-                per_joint_before=dict(result.per_joint_before),
-                per_joint_after=dict(result.per_joint_after),
-                n_evaluations=int(result.n_evaluations),
-                elapsed_s=time.monotonic() - t_robot,
-                frames_per_episode=float(np.mean([len(e) for e in episodes])) if episodes else 0.0,
-                data_bytes=cand.data_bytes,
-                downloads=cand.downloads,
-                pinned=pinned_params(result) if seed_info(result) is not None else None,
-            )
-            report.robots.append(entry)
-            emit({"type": "robot", "dataset": cand.repo_id, "entry": entry.to_dict()})
+            else:
+                result = calibrate(
+                    train,
+                    eval_,
+                    simulate=simulate,
+                    start=SimParams.default(),
+                    max_evaluations=max_evaluations,
+                    seed=seed,
+                    on_progress=on_fit,
+                )
+                name = lock_name(cand.repo_id)
+                lock = RobotLock.create(ds.repo_id, ds.robot_type, train, result, name=name)
+                lock.save(lock_dir / f"{name}{LOCK_SUFFIX}")
+                entry = RobotEntry(
+                    dataset=ds.repo_id,
+                    robot_type=ds.robot_type,
+                    n_episodes=len(episodes),
+                    fps=float(ds.fps),
+                    n_train=len(train),
+                    n_eval=len(eval_),
+                    baseline_eval=float(result.baseline_eval_score),
+                    calibrated_eval=float(result.eval_score),
+                    improvement=float(result.improvement),
+                    params=result.params.to_dict(),
+                    lock=name,
+                    per_joint_before=dict(result.per_joint_before),
+                    per_joint_after=dict(result.per_joint_after),
+                    n_evaluations=int(result.n_evaluations),
+                    elapsed_s=time.monotonic() - t_robot,
+                    frames_per_episode=float(np.mean([len(e) for e in episodes])) if episodes else 0.0,
+                    data_bytes=cand.data_bytes,
+                    downloads=cand.downloads,
+                    pinned=pinned_params(result) if seed_info(result) is not None else None,
+                )
+                report.robots.append(entry)
+                emit({"type": "robot", "dataset": cand.repo_id, "entry": entry.to_dict()})
         except Exception as e:  # noqa: BLE001 - one bad dataset must not end the scan
             msg = f"{type(e).__name__}: {e}"
             report.failures.append({"dataset": cand.repo_id, "error": msg})

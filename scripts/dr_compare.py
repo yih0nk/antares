@@ -14,16 +14,15 @@ import argparse
 
 import numpy as np
 
+from antares.calibrate import default_simulate, score as score_report
 from antares.data import load_dataset
 from antares.dr import DR_SUFFIX, DRRanges, ParamRange, sample, uniform_ranges
-from antares.gap import tracking_error
 from antares.lock import LOCK_DIR, LOCK_SUFFIX, RobotLock
-from antares.sim import Arm, SimParams
+from antares.sim import CommandMap, SimParams
 
 
-def score(arm: Arm, params: SimParams, episodes) -> float:
-    arm.apply(params)
-    return tracking_error([arm.real_q(e) for e in episodes], [arm.replay(e) for e in episodes]).overall_deg
+def score(simulate, params: SimParams, episodes) -> float:
+    return float(score_report(params, episodes, simulate).overall_deg)
 
 
 def main() -> None:
@@ -38,7 +37,11 @@ def main() -> None:
     ds = load_dataset(lock.dataset)
     by_index = {e.index: e for e in ds.episodes}
     episodes = [by_index[i] for i in lock.result.eval_episodes]
-    arm = Arm()
+    if not episodes:
+        raise SystemExit(f"{lock.name} was fitted without held-out episodes; nothing to score")
+    # The lock's own simulator: its robot model and its sensor calibration held fixed.
+    cmap = CommandMap.from_dict(lock.command_map) if lock.command_map else None
+    simulate = default_simulate(cmap, robot=lock.robot)
 
     pm30 = uniform_ranges(lock.params, 0.3)
     fixed = dict(pm30.ranges)
@@ -47,17 +50,17 @@ def main() -> None:
     pm30_fixed = DRRanges(name="pm30_fixed_latency", nominal=pm30.nominal, ranges=fixed)
 
     print(f"{lock.name}: {len(episodes)} held-out episodes, {args.n} samples per range")
-    print(f"MJCF defaults: {score(arm, SimParams.default(), episodes):.2f} deg")
+    print(f"MJCF defaults: {score(simulate, SimParams.default(), episodes):.2f} deg")
     print("| parameters | mean | median | min .. max |")
     print("|---|---|---|---|")
-    print(f"| (a) lock nominal | {score(arm, lock.params, episodes):.2f} | | |")
+    print(f"| (a) lock nominal | {score(simulate, lock.params, episodes):.2f} | | |")
     for label, ranges in (
         ("(b) data-derived ranges", derived),
         ("(c) hand-picked +-30%", pm30),
         ("(c') +-30%, latency fixed at nominal", pm30_fixed),
     ):
         rng = np.random.default_rng(args.seed)
-        s = np.array([score(arm, p, episodes) for p in sample(ranges, rng, args.n)])
+        s = np.array([score(simulate, p, episodes) for p in sample(ranges, rng, args.n)])
         print(f"| {label} | {s.mean():.2f} | {np.median(s):.2f} | {s.min():.2f} .. {s.max():.2f} |")
 
 
