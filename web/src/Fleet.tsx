@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type KeyboardEvent } from "react";
 import { api, type Dashboard, type DashboardRobot, type LockHistory, type ParamValue } from "./api";
 import { HistorySpark, type HistoryPoint } from "./Charts";
+import { CheckPanel } from "./CheckPanel";
 import { Badge, Button, Icon, InlineNotice, LegendItem, LineKey, type Tone } from "./ui";
 
 // One screen for a fleet: every saved lock as a row with its calibration
@@ -306,7 +307,7 @@ export function FleetView({ initialOpen = null }: { initialOpen?: string | null 
       isOpen && (
         <tr key={`${r.name}:detail`} className="fleet-detail">
           <td colSpan={columns.length}>
-            <RobotDetail robot={r} history={histories[r.name]} />
+            <RobotDetail robot={r} history={histories[r.name]} onChecked={() => { load(); fetchHistory(r.name); }} />
           </td>
         </tr>
       ),
@@ -528,7 +529,7 @@ function LockCells({ r, showPinned }: { r: DashboardRobot; showPinned: boolean }
   );
 }
 
-function RobotDetail({ robot: r, history }: { robot: DashboardRobot; history: HistoryState | undefined }) {
+function RobotDetail({ robot: r, history, onChecked }: { robot: DashboardRobot; history: HistoryState | undefined; onChecked: () => void }) {
   const entries = history && typeof history !== "string" ? history.entries : [];
   const points: HistoryPoint[] = entries
     .filter((e) => e.score != null && isFinite(e.score))
@@ -555,7 +556,7 @@ function RobotDetail({ robot: r, history }: { robot: DashboardRobot; history: Hi
           <span className="section-hint">History unavailable.</span>
         ) : !points.length ? (
           <span className="section-hint">
-            Never checked · <code>antares check &lt;dataset&gt; --lock {checkRef}</code>
+            Never checked. Run one below, or from a shell: <code>antares check &lt;dataset&gt; --lock {checkRef}</code>
           </span>
         ) : (
           <>
@@ -571,6 +572,7 @@ function RobotDetail({ robot: r, history }: { robot: DashboardRobot; history: Hi
             </div>
           </>
         )}
+        <CheckPanel lock={checkRef} lockDataset={r.dataset} lockRobot={r.robot} onChecked={onChecked} />
       </section>
 
       <section>
