@@ -204,3 +204,26 @@ def test_camera_clip_serves_the_episode_mp4(client, monkeypatch, tmp_path):
 
     monkeypatch.setattr(video, "episode_clip", missing)
     assert client.get("/api/camera/clip", params={"dataset": "fake/ds", "camera": "side", "episode": 0}).status_code == 400
+
+
+def test_camera_fits_for_dataset_take_the_best_fit_over_its_locks(client, tmp_path):
+    def lock(name, dataset, created):
+        (tmp_path / f"{name}.lock.json").write_text(json.dumps({"name": name, "dataset": dataset, "created_at": created}))
+
+    def fits(name, **cams):
+        (tmp_path / f"{name}.camera.json").write_text(json.dumps({"lock": name, "cameras": cams}))
+
+    lock("fresh", "fake/ds", "2026-10-18T09:00:00Z")  # newest, no camera fit
+    lock("base", "fake/ds", "2026-10-17T00:00:00Z")
+    lock("perjoint", "fake/ds", "2026-10-17T01:00:00Z")
+    lock("other", "other/ds", "2026-10-18T10:00:00Z")
+    fits("base", up={**FIT, "heldout_iou": 0.6}, side={**FIT, "camera": "side", "heldout_iou": 0.5})
+    fits("perjoint", up={**FIT, "heldout_iou": 0.8})
+    fits("other", up={**FIT, "dataset": "other/ds", "heldout_iou": 0.99}, front={**FIT, "dataset": "other/ds"})
+
+    cams = client.get("/api/camera/dataset", params={"dataset": "fake/ds"}).json()["cameras"]
+    assert set(cams) == {"up", "side"}
+    assert cams["up"]["lock"] == "perjoint" and cams["up"]["heldout_iou"] == 0.8
+    assert cams["side"]["lock"] == "base"
+    assert "fit_ious" not in cams["up"] and "appearance" not in cams["up"]
+    assert client.get("/api/camera/dataset", params={"dataset": "nobody/ds"}).json()["cameras"] == {}

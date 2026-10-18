@@ -3090,6 +3090,48 @@ def camera_fits(lock: str = Query(...)) -> dict:
     return {"lock": lock, "cameras": {name: {k: v for k, v in f.items() if k not in ("fit_ious", "heldout_ious", "appearance")} for name, f in fits.items()}}
 
 
+def dataset_camera_fit_dicts(dataset: str) -> dict[str, dict]:
+    """The best saved fit of each of ``dataset``'s cameras over all its locks.
+
+    A camera's pose belongs to the recording, not to the dynamics a lock
+    fitted, so a fit saved under one lock lines up the video for any lock
+    of the same dataset (the per-joint, sensor or a freshly calibrated one).
+    Each fit carries the ``lock`` it was saved under.
+    """
+    best: dict[str, dict] = {}
+    for lock in list_lock_dicts():
+        if lock.get("dataset") != dataset or not lock.get("name"):
+            continue
+        try:
+            fits = load_camera_fit_dicts(str(lock["name"]))
+        except HTTPException:
+            continue
+        for name, fit in fits.items():
+            if fit.get("dataset") not in (None, "", dataset) or fit.get("cancelled"):
+                continue
+            if name not in best or _heldout(fit) > _heldout(best[name]):
+                best[name] = {**_fit_summary(fit), "lock": str(lock["name"])}
+    return best
+
+
+def _heldout(fit: dict) -> float:
+    try:
+        v = float(fit.get("heldout_iou"))
+    except (TypeError, ValueError):
+        return -1.0
+    return v if np.isfinite(v) else -1.0
+
+
+def _fit_summary(fit: dict) -> dict:
+    return {k: v for k, v in fit.items() if k not in ("fit_ious", "heldout_ious", "appearance")}
+
+
+@app.get("/api/camera/dataset")
+def camera_fits_for_dataset(dataset: str = Query(...)) -> dict:
+    """Best saved camera fit per camera of a dataset, whichever lock holds it."""
+    return {"dataset": dataset, "cameras": dataset_camera_fit_dicts(dataset)}
+
+
 @app.get("/api/camera/overlay")
 def camera_overlay_get(
     dataset: str = Query(...),
