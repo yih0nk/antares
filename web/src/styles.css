@@ -1621,3 +1621,65 @@ body {
 .scene-stats .mono {
   font-size: 13px;
 }
+
+/* Hand tuning: one slider per parameter, the applied value beside it. */
+.tune-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas:
+    "name val"
+    "slider slider";
+  align-items: center;
+  column-gap: 8px;
+  font-size: 12px;
+}
+
+.tune-name {
+  grid-area: name;
+}
+
+.tune-row input[type="range"] {
+  grid-area: slider;
+}
+
+.tune-val {
+  grid-area: val;
+}
+
+.tune-row input[type="range"] {
+  width: 100%;
+  min-width: 0;
+  accent-color: var(--sim);
+}
+
+.tune-val {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 11px;
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tune-val.changed {
+  color: var(--text);
+}
+
+.tune-val:not(.changed) {
+  color: var(--muted);
+}
+
+button.link {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--sim);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+button.link:disabled {
+  color: var(--muted);
+  cursor: default;
+}

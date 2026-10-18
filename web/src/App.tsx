@@ -47,6 +47,21 @@ import { ARM_JOINTS, JointArm } from "./JointArm";
 
 const DEFAULT = "default";
 const LIVE = "live";
+// Parameters set by hand in the tuning panel.
+const MANUAL = "manual";
+// What the tuning panel offers: a log-scale multiplier on the starting value
+// (per-joint values keep their shape), or whole frames added to the latency.
+const TUNE_KEYS: { key: NumericParamKey; kind: "scale" | "frames"; hint: string }[] = [
+  { key: "kp", kind: "scale", hint: "servo stiffness: how hard it pulls toward the target" },
+  { key: "kv", kind: "scale", hint: "velocity gain: how much it resists moving fast" },
+  { key: "damping", kind: "scale", hint: "joint damping: drag that slows motion" },
+  { key: "armature", kind: "scale", hint: "motor inertia felt at the joint" },
+  { key: "frictionloss", kind: "scale", hint: "dry friction: torque needed to start moving" },
+  { key: "gravity_scale", kind: "scale", hint: "how much of the links' weight gravity pulls on" },
+  { key: "latency_frames", kind: "frames", hint: "frames between a command and the servo acting on it" },
+];
+const TUNE_LOG_RANGE = 2; // the multiplier spans 10^-2 to 10^2
+const TUNE_FRAMES = 6;
 const PARAM_KEYS: NumericParamKey[] = ["kp", "kv", "damping", "armature", "frictionloss", "latency_frames", "forcerange", "gravity_scale", "deadband"];
 // Terms a lock omits at their defaults; the row shows only when the lock carries one.
 const OPTIONAL_DEFAULTS: Partial<Record<NumericParamKey, number>> = { gravity_scale: 1, deadband: 0 };
@@ -113,6 +128,21 @@ function fmtParam(k: NumericParamKey, v: ParamValue) {
   const lo = Math.min(...v);
   const hi = Math.max(...v);
   return lo === hi ? fmtScalar(k, lo) : `${fmtScalar(k, lo)}–${fmtScalar(k, hi)}`;
+}
+
+const fmtMult = (m: number) => (m >= 10 ? m.toFixed(0) : m >= 1 ? m.toFixed(1) : m.toFixed(2));
+
+// The tuning panel's sliders applied to the parameters it started from.
+function applyTune(base: Params, adj: Partial<Record<NumericParamKey, number>>): Params {
+  const out: Params = { ...base };
+  for (const { key, kind } of TUNE_KEYS) {
+    const a = adj[key] ?? 0;
+    const v = base[key] ?? (key === "gravity_scale" ? 1 : undefined);
+    if (v == null) continue;
+    const f = kind === "frames" ? (x: number) => Math.max(0, Math.round(x + a)) : (x: number) => x * 10 ** a;
+    out[key] = Array.isArray(v) ? v.map(f) : f(v);
+  }
+  return out;
 }
 
 function sameParam(a: ParamValue, b: ParamValue) {
@@ -336,6 +366,11 @@ export default function App() {
   // Per-joint error as rows, or drawn on a sketch of the arm (default or ghost).
   const [jointView, setJointView] = useState<"rows" | "arm">("rows");
   const [armOf, setArmOf] = useState<"ghost" | "default">("ghost");
+  // Hand tuning: the parameters it started from, what it started from, and
+  // each slider's setting (log10 multiplier, or frames for latency).
+  const [tuneBase, setTuneBase] = useState<Params | null>(null);
+  const [tuneFrom, setTuneFrom] = useState("");
+  const [tuneAdj, setTuneAdj] = useState<Partial<Record<NumericParamKey, number>>>({});
   // A second episode shown side by side with the first; null when off.
   const [compare, setCompare] = useState<number | null>(null);
   const [compareBase, setCompareBase] = useState<Replay | null>(null);
@@ -503,7 +538,7 @@ export default function App() {
   // while one is in flight the newest wanted one waits (the live fit lands a
   // new best every few events), and a reply for an older episode or ghost is
   // dropped.
-  const liveParams = ghost === LIVE ? replay?.params ?? null : null;
+  const liveParams = ghost === LIVE || ghost === MANUAL ? replay?.params ?? null : null;
   const [compareBusy, setCompareBusy] = useState(false);
   const compareKey = useRef("");
   const compareWanted = useRef<{ key: string; episode: number; run: () => Promise<Replay> } | null>(null);
@@ -531,13 +566,13 @@ export default function App() {
   }, [dataset, compare, ghost]);
   useEffect(() => {
     if (!dataset || compare == null || ghost === DEFAULT) return;
-    if (ghost === LIVE && !liveParams) return;
+    if ((ghost === LIVE || ghost === MANUAL) && !liveParams) return;
     const ep = compare;
     const key = compareKey.current;
     compareWanted.current = {
       key,
       episode: ep,
-      run: () => (ghost === LIVE && liveParams ? api.replayParams(dataset, ep, liveParams) : api.replay(dataset, ep, ghost)),
+      run: () => ((ghost === LIVE || ghost === MANUAL) && liveParams ? api.replayParams(dataset, ep, liveParams) : api.replay(dataset, ep, ghost)),
     };
     pumpCompare();
   }, [dataset, compare, ghost, liveParams, pumpCompare]);
@@ -545,7 +580,7 @@ export default function App() {
 
   // ---- ghost replay for a saved lock ----------------------------------------
   useEffect(() => {
-    if (!dataset || episode == null || ghost === LIVE) return;
+    if (!dataset || episode == null || ghost === LIVE || ghost === MANUAL) return;
     if (ghost === DEFAULT) {
       setReplay(baseline);
       return;
@@ -568,7 +603,7 @@ export default function App() {
   // The strip follows whatever lock the ghost is showing; the live fit has no
   // saved baseline to z-score against, so it keeps the last strip.
   useEffect(() => {
-    if (!dataset || episode == null || ghost === LIVE) return;
+    if (!dataset || episode == null || ghost === LIVE || ghost === MANUAL) return;
     let live = true;
     setResidual(null);
     api.residual(dataset, episode, ghost === DEFAULT ? null : ghost).then(
@@ -584,7 +619,7 @@ export default function App() {
   // ILC runs in the calibrated sim for the ghost's parameters; a few hundred
   // ms per episode, so it is fetched only while the toggle is on.
   useEffect(() => {
-    if (!showComp || !dataset || episode == null || ghost === LIVE) return;
+    if (!showComp || !dataset || episode == null || ghost === LIVE || ghost === MANUAL) return;
     let live = true;
     setComp(null);
     setCompBusy(true);
@@ -635,6 +670,37 @@ export default function App() {
   useEffect(() => {
     if (ghost === LIVE) pumpLive(); // also re-runs the latest best on a new episode
   }, [ghost, dataset, episode, pumpLive]);
+
+  // ---- hand-tuned ghost: replay whenever a slider settles -------------------
+  const tuned = useMemo(() => (tuneBase ? applyTune(tuneBase, tuneAdj) : null), [tuneBase, tuneAdj]);
+  const tunedKey = tuned ? JSON.stringify(tuned) : "";
+  useEffect(() => {
+    if (ghost !== MANUAL || !tuned || !dataset || episode == null) return;
+    let live = true;
+    const t = setTimeout(() => {
+      setReplayBusy(true);
+      api
+        .replayParams(dataset, episode, tuned)
+        .then(
+          (r) => live && setReplay(r),
+          (e) => live && setError(`Replay with your parameters failed: ${e.message}`),
+        )
+        .finally(() => live && setReplayBusy(false));
+    }, 200);
+    return () => {
+      live = false;
+      clearTimeout(t);
+    };
+    // tunedKey stands for tuned's contents
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ghost, dataset, episode, tunedKey]);
+
+  const startTuning = () => {
+    setTuneBase(replay?.params ?? baseline?.params ?? null);
+    setTuneFrom(ghostLabel);
+    setTuneAdj({});
+    setGhost(MANUAL);
+  };
 
   // ---- calibration -----------------------------------------------------------
   const sourceRef = useRef<EventSource | null>(null);
@@ -769,14 +835,17 @@ export default function App() {
   }, [residual]);
   const hotSpans = useMemo(() => residual?.events.map((e) => [e.start, e.end]) ?? null, [residual]);
   const inEvent = residual?.events.find((e) => frame >= e.start && frame < e.end);
-  const compPoses = showComp && ghost !== LIVE && comp ? comp.sim_comp_poses : null;
+  const compPoses = showComp && ghost !== LIVE && ghost !== MANUAL && comp ? comp.sim_comp_poses : null;
 
   // The arm sketch is drawn for the SO-100/101 joint layout only.
   const canSketch = ARM_JOINTS.every((j) => jointNames.includes(j)) && jointNames.length === ARM_JOINTS.length;
   const ghostLabel =
-    ghost === DEFAULT ? "default sim" : ghost === LIVE ? "best fit so far" : `lock ${ghost}`;
+    ghost === DEFAULT ? "default sim"
+    : ghost === LIVE ? "best fit so far"
+    : ghost === MANUAL ? "your parameters"
+    : `lock ${ghost}`;
   // Camera fits live with a lock: the ghost's, or the dataset's first saved one.
-  const cameraLock = ghost !== DEFAULT && ghost !== LIVE ? ghost : dsLocks[0]?.name ?? null;
+  const cameraLock = ghost !== DEFAULT && ghost !== LIVE && ghost !== MANUAL ? ghost : dsLocks[0]?.name ?? null;
 
   const compareFrames = compareBase?.real_poses.length ?? 0;
   // ---- scene fit saved for the camera lock -----------------------------------
@@ -1073,7 +1142,7 @@ export default function App() {
               {replayBusy && <span className="dot" />}
             </span>
           )}
-          {showComp && ghost !== LIVE && show !== "real" && (
+          {showComp && ghost !== LIVE && ghost !== MANUAL && show !== "real" && (
             <span>
               <i className="swatch comp" /> sim with lag-compensated commands (sim-validated only)
               {compBusy && <span className="dot" />}
@@ -1195,8 +1264,16 @@ export default function App() {
                 {l.name}
               </button>
             ))}
+            <button
+              className={ghost === MANUAL ? "on" : ""}
+              onClick={() => (ghost === MANUAL ? undefined : startTuning())}
+              disabled={running || !baseline}
+              title="Set the parameters yourself and watch the ghost replay with them"
+            >
+              Tune by hand
+            </button>
           </div>
-          {ghost !== DEFAULT && ghost !== LIVE && (
+          {ghost !== DEFAULT && ghost !== LIVE && ghost !== MANUAL && (
             <div className="export">
               <a className="cta secondary" href={api.exportZipUrl(ghost)} download={`${ghost}.zip`}>
                 Download MJCF
@@ -1205,6 +1282,56 @@ export default function App() {
             </div>
           )}
         </section>
+
+        {ghost === MANUAL && tuneBase && tuned && (
+          <section className="tune">
+            <div className="row">
+              <div className="label">Tune by hand</div>
+              <button className="link" onClick={() => setTuneAdj({})} disabled={!Object.keys(tuneAdj).length}>
+                reset
+              </button>
+            </div>
+            <div className="muted small">
+              Starting from {tuneFrom}. Drag a slider and the ghost replays this episode with the new value
+              {servoOf(tuneBase) !== "position" && "; this lock uses the servo model, so kp and kv are derived and left out"}.
+            </div>
+            {TUNE_KEYS.map(({ key, kind, hint }) => {
+              if (servoOf(tuneBase) !== "position" && LINEARIZED_KEYS.has(key)) return null;
+              const a = tuneAdj[key] ?? 0;
+              const v = tuned[key];
+              if (v == null) return null;
+              return (
+                <label key={key} className="tune-row" title={hint}>
+                  <span className="tune-name">{key}</span>
+                  <input
+                    type="range"
+                    min={kind === "frames" ? -TUNE_FRAMES : -TUNE_LOG_RANGE}
+                    max={kind === "frames" ? TUNE_FRAMES : TUNE_LOG_RANGE}
+                    step={kind === "frames" ? 1 : 0.02}
+                    value={a}
+                    onChange={(e) => setTuneAdj((t) => ({ ...t, [key]: Number(e.target.value) }))}
+                    onDoubleClick={() => setTuneAdj((t) => ({ ...t, [key]: 0 }))}
+                  />
+                  <span className={`tune-val ${a ? "changed" : ""}`}>
+                    {fmtParam(key, v)}
+                    <span className="muted">
+                      {kind === "frames" ? (a ? ` ${a > 0 ? "+" : ""}${a}` : "") : a ? ` ×${fmtMult(10 ** a)}` : ""}
+                    </span>
+                  </span>
+                </label>
+              );
+            })}
+            <button
+              className="cta secondary"
+              onClick={() => {
+                seek(0);
+                setPlaying(true);
+              }}
+            >
+              Replay from the start
+            </button>
+          </section>
+        )}
 
         <section>
           <div className="row">
