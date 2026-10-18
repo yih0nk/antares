@@ -183,7 +183,7 @@ ranges, `GET /api/dr/{name}` returns one.
 
 The shared fit gives all six servos the same gain, damping, armature,
 friction and latency. That leaves the elbow as the worst joint on both demo
-arms (SO-101 held-out: 2.03° vs under 1° for the others), which makes
+arms (SO-101 held-out: 1.12° vs 0.81° or less for the others), which makes
 sense: each STS3215 carries a different load, from the shoulder lifting the
 whole arm to the wrist lifting almost nothing.
 
@@ -215,22 +215,27 @@ result records a per-stage summary.
 Held-out tracking RMSE in degrees, `split_episodes(…, 20, 10, seed=0)`,
 gripper excluded from the overall score. The per-joint locks are
 `locks/*_perjoint.lock.json`; their shared stage reproduces the shipped
-shared locks exactly.
+shared locks exactly (all four refit with the `kp` floor at 10).
 
 | | SO-101 default | SO-101 shared | SO-101 per-joint | SO-100 default | SO-100 shared | SO-100 per-joint |
 |---|---|---|---|---|---|---|
-| **overall** | 6.007 | 1.054 | **0.812** | 2.744 | 0.791 | **0.530** |
-| shoulder_pan | 8.049 | 0.349 | 0.363 | 3.224 | 0.433 | 0.320 |
-| shoulder_lift | 6.832 | 0.968 | 1.034 | 3.540 | 0.829 | 0.709 |
-| elbow_flex | 5.355 | 2.031 | **1.316** | 2.516 | 1.322 | **0.601** |
-| wrist_flex | 3.797 | 0.476 | 0.455 | 1.955 | 0.432 | 0.408 |
-| wrist_roll | 5.085 | 0.387 | 0.390 | 2.136 | 0.567 | 0.520 |
+| **overall** | 6.007 | 0.736 | **0.656** | 2.744 | 0.787 | **0.538** |
+| shoulder_pan | 8.049 | 0.522 | 0.446 | 3.224 | 0.356 | 0.336 |
+| shoulder_lift | 6.832 | 0.813 | 0.736 | 3.540 | 0.840 | 0.662 |
+| elbow_flex | 5.355 | 1.121 | **1.061** | 2.516 | 1.329 | **0.703** |
+| wrist_flex | 3.797 | 0.548 | 0.371 | 1.955 | 0.436 | 0.361 |
+| wrist_roll | 5.085 | 0.463 | 0.383 | 2.136 | 0.557 | 0.522 |
 | evaluations | – | 200 | 200 + 1200 | – | 150 | 150 + 1200 |
-| per-joint sigma0 | – | – | 0.1 | – | – | 0.05 |
+
+With the lower `kp` floor the shared fit already reaches most of what the
+per-joint stage used to add on SO-101 (0.736 shared now against 0.812
+per-joint before); the per-joint stage still pays off most on the SO-100
+elbow.
 
 The per-joint stage is sensitive to its step size and budget. Held-out
 score after refining each shared optimum, CMA-ES's default population
-of 15, seed 0:
+of 15, seed 0 (measured on the earlier shared locks, fit with the `kp`
+floor at 50, so the absolute numbers are higher than the table above):
 
 | sigma0 | SO-101, 600 evals | SO-101, 1200 | SO-100, 600 | SO-100, 1200 |
 |---|---|---|---|---|
