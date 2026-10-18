@@ -1231,6 +1231,61 @@ def test_check_rejects_bad_input(client, fakes):
                                            "threshold_deg": -1}).status_code == 422
 
 
+def test_check_notifies_a_webhook_server_side(client, fakes, monkeypatch):
+    import antares.notify as notify
+
+    write_lock(fakes, "unit-a", kp=50.0)
+    sent = []
+    monkeypatch.setattr(notify, "send", lambda url, payload, timeout=10.0: sent.append((url, payload)) or 200)
+    slack_url = "https://hooks.slack.com/services/T0/B0/xyz"
+
+    out = client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a"}).json()
+    assert out["notified"] is None and out["notify_error"] is None
+
+    # ok is quiet by default
+    out = client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a", "notify_url": slack_url}).json()
+    assert out["verdict"] == "ok" and out["notified"] is False and out["notify_error"] is None
+    assert sent == []
+
+    # drifted posts, as Slack blocks for a hooks.slack.com URL
+    out = client.post("/api/check", json={"dataset": FAKE_DS2, "lock": "unit-a", "notify_url": slack_url}).json()
+    assert out["verdict"] == "drifted" and out["notified"] is True and out["notify_error"] is None
+    ((url, payload),) = sent
+    assert url == slack_url
+    assert payload["blocks"][0]["type"] == "header"
+    assert payload["text"].startswith(f"DRIFTED unit-a on {FAKE_DS2}: ")
+
+    # any other host gets the generic envelope; notify_when widens the policy
+    out = client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a",
+                                          "notify_url": "https://example.com/hook",
+                                          "notify_when": "always"}).json()
+    assert out["notified"] is True
+    payload = sent[1][1]
+    assert payload["event"] == "antares.check" and payload["verdict"] == "ok"
+    assert payload["result"]["lock"] == "unit-a" and payload["result"]["verdict"] == "ok"
+    out = client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a", "last": 2,
+                                          "notify_url": "https://example.com/hook",
+                                          "notify_when": "failure", "notify_format": "slack"}).json()
+    assert out["verdict"] == "insufficient_data" and out["notified"] is True
+    assert "blocks" in sent[2][1] and sent[2][1]["text"].startswith("NO DATA unit-a")
+
+    # a dead webhook never changes the verdict or the status code
+    def boom(url, payload, timeout=10.0):
+        raise notify.NotifyError("webhook returned HTTP 500: invalid_payload")
+
+    monkeypatch.setattr(notify, "send", boom)
+    r = client.post("/api/check", json={"dataset": FAKE_DS2, "lock": "unit-a", "notify_url": "https://example.com/hook"})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["verdict"] == "drifted" and out["passed"] is False
+    assert out["notified"] is False and out["notify_error"] == "webhook returned HTTP 500: invalid_payload"
+
+    assert client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a", "notify_url": slack_url,
+                                           "notify_when": "sometimes"}).status_code == 422
+    assert client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a", "notify_url": slack_url,
+                                           "notify_format": "xml"}).status_code == 422
+
+
 def test_check_holds_arm_lock(client, fakes):
     write_lock(fakes, "unit-a", kp=50.0)
     arm = server._ARMS["so101"]
