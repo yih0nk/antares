@@ -31,7 +31,9 @@ import numpy as np
 
 from antares.calibrate import (
     DIMS,
+    SERVO_SPACE,
     SPACE,
+    SearchSpace,
     SimulateFn,
     _safe_score,
     calibrate,
@@ -98,6 +100,19 @@ def summarize_cross(matrix: Mapping[str, Any], lock_datasets: Mapping[str, str])
 #: frames, so it has no derivative; :func:`latency_profile` covers it.
 CONTINUOUS: tuple[str, ...] = tuple(n for n in DIMS if SPACE[n][2] != "int")
 
+
+def bounds_for(params) -> dict[str, tuple[float, float, str]]:
+    """The search space a lock was fitted in: :data:`SERVO_SPACE` for a
+    servo-model lock (its kp/kv are derived from the servo gain and cannot
+    move on their own), :data:`SPACE` otherwise."""
+    return SERVO_SPACE if getattr(params, "uses_servo_model", False) else SPACE
+
+
+def continuous_names(params) -> tuple[str, ...]:
+    """The non-integer dimensions of ``params``' search space."""
+    b = bounds_for(params)
+    return tuple(n for n in b if b[n][2] != "int")
+
 def _unscored(simulate: SimulateFn) -> tuple[int, ...]:
     """Gripper columns of the robot ``simulate`` runs (index 5 on the SO
     arms), from the same names the calibrator scores with."""
@@ -133,27 +148,31 @@ def jacobian(
     episodes: Sequence[Episode],
     simulate: SimulateFn,
     step: float = 0.01,
-    names: Sequence[str] = CONTINUOUS,
+    names: Sequence[str] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Residuals at ``params`` and their Jacobian in the calibrator's unit space.
 
-    Columns follow ``names``; a unit step is the whole search range of that
-    parameter (for log-scaled ones, the full span in decades). Central
-    differences of size ``step``, one-sided where the box would clip.
-    Returns ``(r0, J)`` with ``J`` of shape ``(len(r0), len(names))``.
+    Columns follow ``names`` (default :func:`continuous_names`); a unit step
+    is the whole search range of that parameter (for log-scaled ones, the
+    full span in decades) in the space the lock was fitted in
+    (:func:`bounds_for`). Central differences of size ``step``, one-sided
+    where the box would clip. Returns ``(r0, J)`` with ``J`` of shape
+    ``(len(r0), len(names))``.
     """
     _require_shared(params)
-    x0 = encode(params)
+    names = continuous_names(params) if names is None else tuple(names)
+    space = SearchSpace(bounds_for(params), per_joint=False)
+    x0 = space.encode(params)
     r0 = residuals(params, episodes, simulate)
     J = np.empty((r0.size, len(names)), dtype=np.float64)
     for k, name in enumerate(names):
-        i = DIMS.index(name)
+        i = space.fields.index(name)
         hi = min(x0[i] + step, 1.0)
         lo = max(x0[i] - step, 0.0)
         xh, xl = x0.copy(), x0.copy()
         xh[i], xl[i] = hi, lo
-        rh = residuals(decode(xh, base=params), episodes, simulate) if hi > x0[i] else r0
-        rl = residuals(decode(xl, base=params), episodes, simulate) if lo < x0[i] else r0
+        rh = residuals(space.decode(xh, params), episodes, simulate) if hi > x0[i] else r0
+        rl = residuals(space.decode(xl, params), episodes, simulate) if lo < x0[i] else r0
         J[:, k] = (rh - rl) / (hi - lo)
     return r0, J
 
@@ -173,9 +192,9 @@ def _tradeoff(fixed: float, free: float) -> float:
     return free / fixed
 
 
-def _factor(name: str, delta_unit: float) -> float:
+def _factor(name: str, delta_unit: float, bounds=SPACE) -> float:
     """Multiplicative change a unit-space step means for a log-scaled param."""
-    lo, hi, _ = SPACE[name]
+    lo, hi, _ = bounds[name]
     decades = delta_unit * (math.log10(hi) - math.log10(lo))
     if not math.isfinite(decades) or decades > 300:
         return math.inf
@@ -241,7 +260,7 @@ def identifiability(
     simulate: SimulateFn,
     delta_deg: float = 0.1,
     step: float = 0.01,
-    names: Sequence[str] = CONTINUOUS,
+    names: Sequence[str] | None = None,
 ) -> Identifiability:
     """Gauss-Newton identifiability of ``params`` on ``episodes``.
 
@@ -253,7 +272,8 @@ def identifiability(
     tolerances. This assumes ``params`` is at (or near) a minimum and is
     only as good as the linearization over that range.
     """
-    names = tuple(names)
+    names = continuous_names(params) if names is None else tuple(names)
+    bounds = bounds_for(params)
     r0, J = jacobian(params, episodes, simulate, step=step, names=names)
     n = r0.size
     rms = float(np.sqrt(np.mean(r0**2)))
@@ -284,8 +304,8 @@ def identifiability(
         delta_deg=float(delta_deg),
         tolerance_fixed=tol_fixed,
         tolerance_free=tol_free,
-        factor_fixed={k: _factor(k, t) for k, t in tol_fixed.items()},
-        factor_free={k: _factor(k, t) for k, t in tol_free.items()},
+        factor_fixed={k: _factor(k, t, bounds) for k, t in tol_fixed.items()},
+        factor_free={k: _factor(k, t, bounds) for k, t in tol_free.items()},
         tradeoff={k: _tradeoff(tol_fixed[k], tol_free[k]) for k in names},
         correlation=corr.tolist(),
         eigenvalues=w.tolist(),
