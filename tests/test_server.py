@@ -1505,6 +1505,17 @@ def test_post_replay_accepts_command_map(client, fakes):
     mapped = client.post("/api/replay", json={**body, "command_map": SHIFT_MAP}).json()
     assert mapped["command_map"] == SHIFT_MAP
     assert mapped["gap"]["overall_deg"] < plain["gap"]["overall_deg"]
+    # naming a lock keeps its command map: hand-tuned params start from the
+    # lock's own physics, not the identity map
+    write_lock(fakes, "unit-b", kp=50.0, dataset=FAKE_DS2, command_map=SHIFT_MAP)
+    from_lock = client.post("/api/replay", json={**body, "lock": "unit-b"}).json()
+    assert from_lock["command_map"] == SHIFT_MAP and from_lock["lock"] is None
+    assert from_lock["gap"]["overall_deg"] == mapped["gap"]["overall_deg"]
+    # an explicit command_map still wins over the lock's
+    ident = {"gain": [1.0] * 6, "bias": [0.0] * 6}
+    override = client.post("/api/replay", json={**body, "lock": "unit-b", "command_map": ident}).json()
+    assert override["gap"]["overall_deg"] == plain["gap"]["overall_deg"]
+    assert client.post("/api/replay", json={**body, "lock": "ghost"}).status_code == 404
     bad = client.post("/api/replay", json={**body, "command_map": {"gain": [1.0] * 6}})
     assert bad.status_code == 400
     # the map exactly as a sensor-fitted lock stores it, "mode" and all

@@ -2089,6 +2089,10 @@ class ReplayRequest(BaseModel):
     # Optional {"gain": [6], "bias": [6]}, as a lock stores it (extra keys such
     # as its "mode" are ignored); omitted means identity.
     command_map: dict[str, Any] | None = None
+    # A saved lock whose command map and calibration unit map the replay
+    # keeps (e.g. params tuned by hand from that lock); an explicit
+    # ``command_map`` still wins.
+    lock: str | None = None
     # Sim model override (registry name); default: the dataset's family.
     robot: str | None = None
     # Factors to fit (names, or "+x"/"-y" edits of the defaults); see
@@ -2101,9 +2105,14 @@ class ReplayRequest(BaseModel):
 def replay_with_params(req: ReplayRequest) -> dict:
     """Replay with explicit params, e.g. the best fit so far of a running job."""
     ds = get_dataset(req.dataset)
+    lock_d = load_lock_dict(req.lock) if req.lock else None
+    unit_map = unit_map_from_lock(lock_d) if lock_d else None
     try:
         params = params_from_dict(req.params)
-        cmap = command_map_from_lock({"command_map": req.command_map})
+        if req.command_map is None and lock_d is not None:
+            cmap = command_map_from_lock(lock_d)
+        else:
+            cmap = command_map_from_lock({"command_map": req.command_map})
     except (TypeError, ValueError, KeyError) as e:
         raise HTTPException(status_code=400, detail=f"bad params: {e}")
     if cmap is not None and cmap.gain.shape != (len(ds.joint_names),):
@@ -2111,7 +2120,7 @@ def replay_with_params(req: ReplayRequest) -> dict:
             status_code=400,
             detail=f"bad params: command_map needs {len(ds.joint_names)} gains and biases, got {cmap.gain.shape}",
         )
-    out = replay_episode(ds, req.episode, params, cmap, robot=req.robot)
+    out = replay_episode(ds, req.episode, params, cmap, robot=req.robot, unit_map=unit_map)
     out["lock"] = None
     return out
 

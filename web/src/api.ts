@@ -780,11 +780,13 @@ export const api = {
     fetch(`/api/replay?${q(lock ? { dataset, episode, lock } : { dataset, episode })}`).then((r) =>
       json<Replay>(r),
     ),
-  replayParams: (dataset: string, episode: number, params: Params) =>
+  // `lock` keeps that saved lock's command map and calibration unit map, so
+  // parameters tuned from a lock replay with the lock's own physics.
+  replayParams: (dataset: string, episode: number, params: Params, lock: string | null = null) =>
     fetch("/api/replay", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ dataset, episode, params }),
+      body: JSON.stringify(lock ? { dataset, episode, params, lock } : { dataset, episode, params }),
     }).then((r) => json<Replay>(r)),
   // `perJoint` adds the per-joint refinement stage after the shared fit.
   // `factors` (null: the defaults) picks what the shared fit accounts for;

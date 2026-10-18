@@ -38,6 +38,7 @@ import { CrossHeatmap, JointTrace, ResidualStrip, Sparkline } from "./Charts";
 import { AddDataset } from "./AddDataset";
 import { Factors } from "./Factors";
 import { FleetView } from "./Fleet";
+import { ARM_JOINTS, JointArm } from "./JointArm";
 
 // Layout: 3D viewer (real arm + ghost sim arm) on the left, gap panel on
 // the right, episode timeline along the bottom. The ghost is the simulator
@@ -46,6 +47,21 @@ import { FleetView } from "./Fleet";
 
 const DEFAULT = "default";
 const LIVE = "live";
+// Parameters set by hand in the tuning panel.
+const MANUAL = "manual";
+// What the tuning panel offers: a log-scale multiplier on the starting value
+// (per-joint values keep their shape), or whole frames added to the latency.
+const TUNE_KEYS: { key: NumericParamKey; kind: "scale" | "frames"; hint: string }[] = [
+  { key: "kp", kind: "scale", hint: "servo stiffness: how hard it pulls toward the target" },
+  { key: "kv", kind: "scale", hint: "velocity gain: how much it resists moving fast" },
+  { key: "damping", kind: "scale", hint: "joint damping: drag that slows motion" },
+  { key: "armature", kind: "scale", hint: "motor inertia felt at the joint" },
+  { key: "frictionloss", kind: "scale", hint: "dry friction: torque needed to start moving" },
+  { key: "gravity_scale", kind: "scale", hint: "how much of the links' weight gravity pulls on" },
+  { key: "latency_frames", kind: "frames", hint: "frames between a command and the servo acting on it" },
+];
+const TUNE_LOG_RANGE = 2; // the multiplier spans 10^-2 to 10^2
+const TUNE_FRAMES = 6;
 const PARAM_KEYS: NumericParamKey[] = ["kp", "kv", "damping", "armature", "frictionloss", "latency_frames", "forcerange", "gravity_scale", "deadband"];
 // Terms a lock omits at their defaults; the row shows only when the lock carries one.
 const OPTIONAL_DEFAULTS: Partial<Record<NumericParamKey, number>> = { gravity_scale: 1, deadband: 0 };
@@ -112,6 +128,22 @@ function fmtParam(k: NumericParamKey, v: ParamValue) {
   const lo = Math.min(...v);
   const hi = Math.max(...v);
   return lo === hi ? fmtScalar(k, lo) : `${fmtScalar(k, lo)}–${fmtScalar(k, hi)}`;
+}
+
+const fmtMult = (m: number) => (m >= 10 ? m.toFixed(0) : m >= 1 ? m.toFixed(1) : m.toFixed(2));
+
+// The tuning panel's sliders applied to the parameters it started from.
+function applyTune(base: Params, adj: Partial<Record<NumericParamKey, number>>): Params {
+  const out: Params = { ...base };
+  for (const { key, kind } of TUNE_KEYS) {
+    const a = adj[key] ?? 0;
+    // A lock without a gravity term gets one only once its slider moves.
+    const v = base[key] ?? (key === "gravity_scale" && a !== 0 ? 1 : undefined);
+    if (v == null) continue;
+    const f = kind === "frames" ? (x: number) => Math.max(0, Math.round(x + a)) : (x: number) => x * 10 ** a;
+    out[key] = Array.isArray(v) ? v.map(f) : f(v);
+  }
+  return out;
 }
 
 function sameParam(a: ParamValue, b: ParamValue) {
@@ -332,6 +364,17 @@ export default function App() {
   const [playing, setPlaying] = useState(true);
   const [speed, setSpeed] = useState(1);
   const [show, setShow] = useState<Show>("both");
+  // Per-joint error as rows, or drawn on a sketch of the arm (default or ghost).
+  const [jointView, setJointView] = useState<"rows" | "arm">("rows");
+  const [armOf, setArmOf] = useState<"ghost" | "default">("ghost");
+  // Hand tuning: the parameters it started from, what it started from, and
+  // each slider's setting (log10 multiplier, or frames for latency).
+  const [tuneBase, setTuneBase] = useState<Params | null>(null);
+  const [tuneFrom, setTuneFrom] = useState("");
+  // The saved lock the tuning started from (its command map and unit map
+  // stay with the tuned parameters), or null for the default/live sim.
+  const [tuneLock, setTuneLock] = useState<string | null>(null);
+  const [tuneAdj, setTuneAdj] = useState<Partial<Record<NumericParamKey, number>>>({});
   // A second episode shown side by side with the first; null when off.
   const [compare, setCompare] = useState<number | null>(null);
   const [compareBase, setCompareBase] = useState<Replay | null>(null);
@@ -499,7 +542,8 @@ export default function App() {
   // while one is in flight the newest wanted one waits (the live fit lands a
   // new best every few events), and a reply for an older episode or ghost is
   // dropped.
-  const liveParams = ghost === LIVE ? replay?.params ?? null : null;
+  const tuned = useMemo(() => (tuneBase ? applyTune(tuneBase, tuneAdj) : null), [tuneBase, tuneAdj]);
+  const liveParams = ghost === MANUAL ? tuned : ghost === LIVE ? replay?.params ?? null : null;
   const [compareBusy, setCompareBusy] = useState(false);
   const compareKey = useRef("");
   const compareWanted = useRef<{ key: string; episode: number; run: () => Promise<Replay> } | null>(null);
@@ -527,21 +571,24 @@ export default function App() {
   }, [dataset, compare, ghost]);
   useEffect(() => {
     if (!dataset || compare == null || ghost === DEFAULT) return;
-    if (ghost === LIVE && !liveParams) return;
+    if ((ghost === LIVE || ghost === MANUAL) && !liveParams) return;
     const ep = compare;
     const key = compareKey.current;
     compareWanted.current = {
       key,
       episode: ep,
-      run: () => (ghost === LIVE && liveParams ? api.replayParams(dataset, ep, liveParams) : api.replay(dataset, ep, ghost)),
+      run: () =>
+        (ghost === LIVE || ghost === MANUAL) && liveParams
+          ? api.replayParams(dataset, ep, liveParams, ghost === MANUAL ? tuneLock : null)
+          : api.replay(dataset, ep, ghost),
     };
     pumpCompare();
-  }, [dataset, compare, ghost, liveParams, pumpCompare]);
+  }, [dataset, compare, ghost, liveParams, tuneLock, pumpCompare]);
   const shownCompare = ghost === DEFAULT ? compareBase : compareReplay;
 
   // ---- ghost replay for a saved lock ----------------------------------------
   useEffect(() => {
-    if (!dataset || episode == null || ghost === LIVE) return;
+    if (!dataset || episode == null || ghost === LIVE || ghost === MANUAL) return;
     if (ghost === DEFAULT) {
       setReplay(baseline);
       return;
@@ -564,7 +611,7 @@ export default function App() {
   // The strip follows whatever lock the ghost is showing; the live fit has no
   // saved baseline to z-score against, so it keeps the last strip.
   useEffect(() => {
-    if (!dataset || episode == null || ghost === LIVE) return;
+    if (!dataset || episode == null || ghost === LIVE || ghost === MANUAL) return;
     let live = true;
     setResidual(null);
     api.residual(dataset, episode, ghost === DEFAULT ? null : ghost).then(
@@ -580,7 +627,7 @@ export default function App() {
   // ILC runs in the calibrated sim for the ghost's parameters; a few hundred
   // ms per episode, so it is fetched only while the toggle is on.
   useEffect(() => {
-    if (!showComp || !dataset || episode == null || ghost === LIVE) return;
+    if (!showComp || !dataset || episode == null || ghost === LIVE || ghost === MANUAL) return;
     let live = true;
     setComp(null);
     setCompBusy(true);
@@ -599,29 +646,37 @@ export default function App() {
   // ---- live ghost while calibrating: replay the best params so far ----------
   // One request in flight at a time; when it lands, the newest best (if it
   // changed meanwhile) goes next. Each landing eases the ghost to the new fit.
+  // The same pump serves the hand-tuned ghost: `liveLock` is the lock the
+  // tuned params started from (its maps travel with the request) and
+  // `liveReport` says whether a failed replay is shown (hand tuning) or
+  // stays quiet (a transient failure during a fit).
   const liveWanted = useRef<Params | null>(null);
   const liveInFlight = useRef(false);
   const liveKey = useRef("");
+  const liveLock = useRef<string | null>(null);
+  const liveReport = useRef(false);
   const where = useRef({ dataset, episode });
   where.current = { dataset, episode };
   const pumpLive = useCallback(() => {
     const { dataset: ds, episode: ep } = where.current;
     if (liveInFlight.current || !liveWanted.current || ep == null) return;
     const params = liveWanted.current;
-    const key = `${ds}#${ep}#${JSON.stringify(params)}`;
+    const lock = liveLock.current;
+    const key = `${ds}#${ep}#${lock ?? ""}#${JSON.stringify(params)}`;
     if (key === liveKey.current) return;
     liveInFlight.current = true;
     liveKey.current = key;
     setReplayBusy(true);
     api
-      .replayParams(ds, ep, params)
+      .replayParams(ds, ep, params, lock)
       .then(
         (r) => {
           if (where.current.dataset === ds && where.current.episode === ep) setReplay(r);
         },
-        () => {},
+        (e) => liveReport.current && setError(`Replay with your parameters failed: ${(e as Error).message}`),
       )
       .finally(() => {
+        // Cleared whatever the ghost is now, so the busy dot never sticks.
         liveInFlight.current = false;
         setReplayBusy(false);
         pumpLive();
@@ -629,8 +684,40 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (ghost !== MANUAL) {
+      liveLock.current = null;
+      liveReport.current = false;
+    }
     if (ghost === LIVE) pumpLive(); // also re-runs the latest best on a new episode
   }, [ghost, dataset, episode, pumpLive]);
+
+  // ---- hand-tuned ghost: replay whenever a slider settles -------------------
+  // Through the same one-in-flight pump as the live fit: a dragged slider
+  // never queues more than one request on the server, and the newest value
+  // goes next when the current replay lands.
+  const tunedKey = tuned ? JSON.stringify(tuned) : "";
+  useEffect(() => {
+    if (ghost !== MANUAL || !tuned || !dataset || episode == null) return;
+    const t = setTimeout(() => {
+      liveWanted.current = tuned;
+      pumpLive();
+    }, 200);
+    return () => clearTimeout(t);
+    // tunedKey stands for tuned's contents
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ghost, dataset, episode, tunedKey, pumpLive]);
+
+  const startTuning = () => {
+    const fromLock = ghost !== DEFAULT && ghost !== LIVE && ghost !== MANUAL ? ghost : null;
+    setTuneBase(replay?.params ?? baseline?.params ?? null);
+    setTuneFrom(ghostLabel);
+    setTuneLock(fromLock);
+    setTuneAdj({});
+    liveLock.current = fromLock;
+    liveReport.current = true;
+    liveKey.current = ""; // the lock's own replay came from GET /api/replay; replay the base once
+    setGhost(MANUAL);
+  };
 
   // ---- calibration -----------------------------------------------------------
   const sourceRef = useRef<EventSource | null>(null);
@@ -765,12 +852,17 @@ export default function App() {
   }, [residual]);
   const hotSpans = useMemo(() => residual?.events.map((e) => [e.start, e.end]) ?? null, [residual]);
   const inEvent = residual?.events.find((e) => frame >= e.start && frame < e.end);
-  const compPoses = showComp && ghost !== LIVE && comp ? comp.sim_comp_poses : null;
+  const compPoses = showComp && ghost !== LIVE && ghost !== MANUAL && comp ? comp.sim_comp_poses : null;
 
+  // The arm sketch is drawn for the SO-100/101 joint layout only.
+  const canSketch = ARM_JOINTS.every((j) => jointNames.includes(j)) && jointNames.length === ARM_JOINTS.length;
   const ghostLabel =
-    ghost === DEFAULT ? "default sim" : ghost === LIVE ? "best fit so far" : `lock ${ghost}`;
+    ghost === DEFAULT ? "default sim"
+    : ghost === LIVE ? "best fit so far"
+    : ghost === MANUAL ? "your parameters"
+    : `lock ${ghost}`;
   // Camera fits live with a lock: the ghost's, or the dataset's first saved one.
-  const cameraLock = ghost !== DEFAULT && ghost !== LIVE ? ghost : dsLocks[0]?.name ?? null;
+  const cameraLock = ghost !== DEFAULT && ghost !== LIVE && ghost !== MANUAL ? ghost : dsLocks[0]?.name ?? null;
 
   const compareFrames = compareBase?.real_poses.length ?? 0;
   // ---- scene fit saved for the camera lock -----------------------------------
@@ -1067,7 +1159,7 @@ export default function App() {
               {replayBusy && <span className="dot" />}
             </span>
           )}
-          {showComp && ghost !== LIVE && show !== "real" && (
+          {showComp && ghost !== LIVE && ghost !== MANUAL && show !== "real" && (
             <span>
               <i className="swatch comp" /> sim with lag-compensated commands (sim-validated only)
               {compBusy && <span className="dot" />}
@@ -1189,8 +1281,16 @@ export default function App() {
                 {l.name}
               </button>
             ))}
+            <button
+              className={ghost === MANUAL ? "on" : ""}
+              onClick={() => (ghost === MANUAL ? undefined : startTuning())}
+              disabled={running || !baseline}
+              title="Set the parameters yourself and watch the ghost replay with them"
+            >
+              Tune by hand
+            </button>
           </div>
-          {ghost !== DEFAULT && ghost !== LIVE && (
+          {ghost !== DEFAULT && ghost !== LIVE && ghost !== MANUAL && (
             <div className="export">
               <a className="cta secondary" href={api.exportZipUrl(ghost)} download={`${ghost}.zip`}>
                 Download MJCF
@@ -1200,29 +1300,130 @@ export default function App() {
           )}
         </section>
 
-        <section>
-          <div className="label">Per joint</div>
-          <div className="bars">
-            {jointNames.map((j) => {
-              const b = baseGap?.per_joint_deg[j];
-              const g = ghostGap?.per_joint_deg[j];
+        {ghost === MANUAL && tuneBase && tuned && (
+          <section className="tune">
+            <div className="row">
+              <div className="label">Tune by hand</div>
+              <button className="link" onClick={() => setTuneAdj({})} disabled={!Object.keys(tuneAdj).length}>
+                reset
+              </button>
+            </div>
+            <div className="muted small">
+              Starting from {tuneFrom}. Drag a slider and the ghost replays this episode with the new value
+              {servoOf(tuneBase) !== "position" && "; this lock uses the servo model, so kp and kv are derived and left out"}.
+            </div>
+            {TUNE_KEYS.map(({ key, kind, hint }) => {
+              if (servoOf(tuneBase) !== "position" && LINEARIZED_KEYS.has(key)) return null;
+              const a = tuneAdj[key] ?? 0;
+              const v = tuned[key] ?? (key === "gravity_scale" ? 1 : null);
+              if (v == null) return null;
               return (
-                <button
-                  key={j}
-                  className={`bar-row ${j === jointNames[jIndex] ? "sel" : ""} ${scored.has(j) ? "" : "unscored"}`}
-                  onClick={() => setJoint(j)}
-                  title={scored.has(j) ? "" : "not scored (gripper contact isn't simulated)"}
-                >
-                  <span className="bar-name">{j}</span>
-                  <span className="bar-track">
-                    {ghost !== DEFAULT && b != null && <span className="bar base" style={{ width: `${(b / maxJointErr) * 100}%` }} />}
-                    {g != null && <span className="bar ghost" style={{ width: `${(g / maxJointErr) * 100}%` }} />}
+                <label key={key} className="tune-row" title={hint}>
+                  <span className="tune-name">{key}</span>
+                  <input
+                    type="range"
+                    min={kind === "frames" ? -TUNE_FRAMES : -TUNE_LOG_RANGE}
+                    max={kind === "frames" ? TUNE_FRAMES : TUNE_LOG_RANGE}
+                    step={kind === "frames" ? 1 : 0.02}
+                    value={a}
+                    onChange={(e) => setTuneAdj((t) => ({ ...t, [key]: Number(e.target.value) }))}
+                    onDoubleClick={() => setTuneAdj((t) => ({ ...t, [key]: 0 }))}
+                  />
+                  <span className={`tune-val ${a ? "changed" : ""}`}>
+                    {fmtParam(key, v)}
+                    <span className="muted">
+                      {kind === "frames" ? (a ? ` ${a > 0 ? "+" : ""}${a}` : "") : a ? ` ×${fmtMult(10 ** a)}` : ""}
+                    </span>
                   </span>
-                  <span className="bar-val">{deg(g, 1)}</span>
-                </button>
+                </label>
               );
             })}
+            <button
+              className="cta secondary"
+              onClick={() => {
+                seek(0);
+                setPlaying(true);
+              }}
+            >
+              Replay from the start
+            </button>
+          </section>
+        )}
+
+        <section>
+          <div className="row">
+            <div className="label">Per joint</div>
+            {canSketch && (
+              <div className="segmented small-seg">
+                <button className={jointView === "rows" ? "on" : ""} onClick={() => setJointView("rows")}>
+                  rows
+                </button>
+                <button className={jointView === "arm" ? "on" : ""} onClick={() => setJointView("arm")}>
+                  on the arm
+                </button>
+              </div>
+            )}
           </div>
+          {canSketch && jointView === "arm" ? (
+            <>
+              {ghost !== DEFAULT && (
+                <div className="segmented small-seg">
+                  <button className={armOf === "default" ? "on" : ""} onClick={() => setArmOf("default")}>
+                    default sim
+                  </button>
+                  <button className={armOf === "ghost" ? "on" : ""} onClick={() => setArmOf("ghost")}>
+                    {ghostLabel}
+                  </button>
+                </div>
+              )}
+              <JointArm
+                errors={(ghost !== DEFAULT && armOf === "default" ? baseGap : ghostGap)?.per_joint_deg ?? {}}
+                selected={jointNames[jIndex] ?? ""}
+                onSelect={setJoint}
+              />
+            </>
+          ) : (
+            <div className="bars">
+              {jointNames.map((j) => {
+                const b = baseGap?.per_joint_deg[j];
+                const g = ghostGap?.per_joint_deg[j];
+                // Default error (grey dot) to the ghost's error (blue dot); the
+                // default ghost has nothing to compare, so it shows one dot.
+                const compared = ghost !== DEFAULT && b != null && g != null;
+                const pos = (v: number) => `${Math.min(100, (v / maxJointErr) * 100)}%`;
+                const pct = compared && b > 0 ? Math.round(((g - b) / b) * 100) : null;
+                return (
+                  <button
+                    key={j}
+                    className={`db-row ${j === jointNames[jIndex] ? "sel" : ""} ${scored.has(j) ? "" : "unscored"}`}
+                    onClick={() => setJoint(j)}
+                    title={scored.has(j) ? "" : "not scored (gripper contact isn't simulated)"}
+                  >
+                    <span className="bar-name">{j}</span>
+                    <span className="db-track">
+                      {compared && (
+                        <span
+                          className="db-span"
+                          style={{ left: pos(Math.min(b, g)), width: `calc(${pos(Math.max(b, g))} - ${pos(Math.min(b, g))})` }}
+                        />
+                      )}
+                      {compared && <span className="db-dot base" style={{ left: pos(b) }} title={`default ${deg(b, 2)}`} />}
+                      {g != null && <span className="db-dot ghost" style={{ left: pos(g) }} title={`${ghostLabel} ${deg(g, 2)}`} />}
+                    </span>
+                    <span className="bar-val">{deg(g, 1)}</span>
+                    <span className={`db-change ${pct == null || pct === 0 ? "" : pct < 0 ? "good" : "bad"}`}>
+                      {pct == null ? "" : pct === 0 ? "0%" : `${pct < 0 ? "−" : "+"}${Math.abs(pct)}%`}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          {ghost !== DEFAULT && !(canSketch && jointView === "arm") && (
+            <div className="muted small">
+              <i className="db-dot base inline" /> default <i className="db-dot ghost inline" /> {ghostLabel}
+            </div>
+          )}
         </section>
 
         <section className="calib">
