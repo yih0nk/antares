@@ -484,16 +484,17 @@ episodes (held-out episodes in parentheses):
 
 | | SO-101 lock | SO-100 lock |
 |---|---|---|
-| grasps / events | 68 / 92 | 89 / 213 |
-| recall (grasps with an event in +-15 frames) | 100% (100%) | 57% (59%) |
-| precision (events in a grasp window) | 61% (55%) | 33% (34%) |
-| events far from any gripper transition | 21% | 44% |
-| residual energy inside grasp windows | 23% (22%) | 11% (10%) |
+| grasps / events | 68 / 112 | 89 / 196 |
+| recall (grasps with an event in +-15 frames) | 100% (100%) | 54% (71%) |
+| precision (events in a grasp window) | 53% (61%) | 33% (41%) |
+| events far from any gripper transition | 33% | 44% |
+| residual energy inside grasp windows | 20% (19%) | 11% (10%) |
 | frames inside grasp windows (chance) | 18% (16%) | 14% (14%) |
-| lift | 1.29x (1.37x) | 0.79x (0.74x) |
+| lift | 1.12x (1.17x) | 0.78x (0.75x) |
 
 Read these with care. On the SO-101 the residual does concentrate around
-grasps, but weakly (1.3x chance), and the perfect recall comes from
+grasps, but weakly (1.1x chance), and the perfect recall comes from
+
 events that are long: the sim deviates by 3-5 deg on the elbow for the
 whole stretch where the arm is out over the table, from before the grasp
 until after the release, so one event covers both. On the SO-100 the
