@@ -112,13 +112,19 @@ class Grasp:
 
 
 def dataset_thresholds(episodes: Sequence[Episode]) -> GripperThresholds:
-    """Gripper thresholds fitted on every episode's command at once.
+    """Gripper thresholds fitted on every episode's command at once, around the midpoint.
 
     One pair for the whole dataset, so a short episode that never opens the
-    gripper far does not get thresholds of its own.
+    gripper far does not get thresholds of its own. The contact detector's
+    thresholds sit at 1/3 and 2/3 between the open and closed clusters;
+    operators often close the leader only part way on an object (SO-100
+    logs hold a cube at commands 3-11 with the closed cluster near 0), so
+    here the band is narrowed to the middle sixth: 5/12 and 7/12.
     """
     cmd = np.concatenate([np.asarray(e.action[:, GRIPPER_INDEX], dtype=np.float64) for e in episodes])
-    return gripper_thresholds(cmd)
+    t = gripper_thresholds(cmd)
+    mid, half = 0.5 * (t.closed_below + t.open_above), (t.open_above - t.closed_below) / 4.0
+    return GripperThresholds(closed_below=mid - half, open_above=mid + half)
 
 
 def find_grasps(

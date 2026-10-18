@@ -124,3 +124,15 @@ def test_sample_needs_a_held_grasp():
     td = TaskDistribution.from_episodes([pick_place_episode(0, held_jaw=SHUT)], name="toy")
     with pytest.raises(ValueError):
         td.sample(1)
+
+
+def test_thresholds_catch_a_shallow_close(tip, unit_map):
+    deep = pick_place_episode(0)
+    # Same motion, but the leader is only closed to 30 on the cube.
+    shallow = pick_place_episode(1)
+    act = shallow.action.copy()
+    act[act[:, 5] == SHUT, 5] = 30.0
+    shallow = Episode(1, FPS, JOINTS, shallow.state, act)
+    thr = dataset_thresholds([deep, shallow])
+    assert thr.closed_below > 30.0
+    assert len(find_grasps(shallow, thr, tip, unit_map)) == 1
