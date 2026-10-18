@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 
@@ -55,6 +56,10 @@ def _params_table(params: dict, joints: list[str] | None = None) -> str:
 
 def cmd_serve(args: argparse.Namespace) -> int:
     import uvicorn
+
+    if args.offline:
+        # An environment variable, so a --reload worker process inherits it.
+        os.environ["ANTARES_OFFLINE"] = "1"
 
     uvicorn.run(
         "antares.server:app", host=args.host, port=args.port, reload=args.reload
@@ -2528,6 +2533,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--reload", action="store_true", help="auto-reload on code changes")
+    p.add_argument(
+        "--offline",
+        action="store_true",
+        help="never contact the Hugging Face Hub; read datasets and videos from the local cache only",
+    )
     p.set_defaults(func=cmd_serve)
 
     dataset_help = "Hub dataset id, upload/<name>, or a LeRobot dataset directory on disk"

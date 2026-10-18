@@ -75,3 +75,16 @@ def test_snapshot_falls_back_to_the_cache(monkeypatch):
     assert hub.snapshot("a/b", allow_patterns=["x"]) == "/cache/a/b"
     assert calls == [False, True]
 
+
+def test_serve_offline_sets_the_environment(monkeypatch):
+    import uvicorn
+
+    from antares import cli
+
+    monkeypatch.delenv("ANTARES_OFFLINE", raising=False)
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: None)
+    cli.main(["serve", "--offline"])
+    import os
+
+    assert os.environ["ANTARES_OFFLINE"] == "1"
+    monkeypatch.delenv("ANTARES_OFFLINE")
