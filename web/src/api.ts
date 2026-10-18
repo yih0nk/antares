@@ -423,6 +423,8 @@ export type CameraProgressEvent = {
 
 export type CameraJobEvent =
   | CameraProgressEvent
+  // A second pass that holds the field of view near an already fitted camera's.
+  | { type: "pass"; pass: number; sibling: string }
   | { type: "done"; fit: CameraFit & { lock: string; path: string } }
   | { type: "error"; message: string };
 
