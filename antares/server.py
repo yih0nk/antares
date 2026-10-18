@@ -953,6 +953,41 @@ def run_check(
         raise HTTPException(status_code=400, detail=str(e))
 
 
+def run_diagnose(
+    ds: Dataset,
+    lock: str | dict,
+    *,
+    last: int | None = None,
+    max_evaluations: int = 120,
+    seed: int = 0,
+):
+    """Name what changed since ``lock`` was fitted, from the same episodes
+    :func:`run_check` scores; returns an :class:`antares.diagnose.Diagnosis`."""
+    from antares.check import select_episodes
+    from antares.diagnose import diagnose
+
+    lock_d = lock if isinstance(lock, dict) else load_lock_dict(lock)
+    arm = get_arm()
+
+    def simulate(params, ep):
+        arm.apply(params)
+        return np.asarray(arm.real_q(ep)), np.asarray(arm.replay(ep))
+
+    try:
+        eps = select_episodes(ds.episodes, last)
+        with _ARM_LOCK:
+            return diagnose(
+                eps,
+                lock_d,
+                simulate=simulate,
+                max_evaluations=max_evaluations,
+                seed=seed,
+                dataset=ds.repo_id,
+            )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 # Lag compensation (sim-only validation)
 # --------------------------------------------------------------------------
 
