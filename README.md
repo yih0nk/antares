@@ -270,46 +270,46 @@ move before the training error rises 0.1°, alone and with the others
 refit), the latency profile, and the error along the path to the other
 lock. `antares cross` also prints the verdict and takes `--json`.
 
-What the two demo arms show (held-out error, full tables in
-[`results/robot_specificity.md`](results/robot_specificity.md)):
+What the two demo arms show with the current shared locks (held-out
+error, full tables in [`results/robot_specificity.md`](results/robot_specificity.md)):
 
 | | SO-101 data | SO-100 data |
 |---|---|---|
-| own lock | 1.05° | 0.79° |
-| same arm, refit on other episodes | 1.05° | 0.79° |
-| other seeds, same episodes | 1.00°, 1.01° | 0.74°, 0.78° |
-| own fit, other arm's kp/kv pinned | 1.05° | **0.73°** |
-| other arm's lock | 1.14° (1.08×) | 0.85° (1.07×) |
+| own lock | **0.74°** | 0.79° |
+| other seeds, same episodes | 0.91°, 1.06° | **0.57°**, 0.66° |
+| same arm, refit on other episodes | 1.05° | 0.80° |
+| own fit, other arm's kp/kv pinned | 1.09° | 0.65° |
+| other arm's lock | 1.27° (1.73×) | 0.96° (1.22×) |
 
-* **The behaviour is arm-specific, the parameters are not.** Each arm's
-  own lock wins by 7-8%, and a refit on fresh episodes of the same arm
-  lands exactly on the lock's score, so the gap is about the arm, not the
-  episodes. But a different CMA-ES seed alone moves the score by up to 6%,
-  so the margin is only just above the fit's own noise.
-* **kp 94 vs 1246 is not a difference between the arms.** Pinning SO-100's
-  fit to SO-101's `kp`/`kv` scores *better* than SO-100's own lock (0.73°
-  vs 0.79°), and the reverse ties. Across seeds the fitted `kp` spans 2x
-  on SO-101 and 22x on SO-100, `frictionloss` up to 100x, at equal error.
-* **The error surface is rugged, not a smooth valley.** The linearized
-  table says SO-100's lock is tightly pinned (every parameter within
-  about ×1.3-1.6, condition number 3), yet other seeds sit at ×20 away
-  with the same error, and the path between the two locks rises over a
-  ridge (0.79° to 0.98° and back down to 0.85°). Read the
-  linearized tolerances as local only. On SO-101 the gain pair `kp`/`kv` is the clearest
-  trade-off (×9 free vs ×2 alone), matching the DR caveat above.
+* **The arms are distinguishable.** Each arm's own lock beats the other
+  arm's, and the best fit found for each arm beats the other arm's lock by
+  about 1.7× on both (0.74° vs 1.27°, 0.57° vs 0.96°).
+* **A single fit is not reliable.** The same episodes with another CMA-ES
+  seed score up to 1.4× worse on SO-101, and two seeds beat SO-100's own
+  lock (0.57° vs 0.79°). Which basin a 150-200 evaluation run lands in
+  matters as much as which arm it is fitting, so the cross margins above
+  carry that noise. Keeping the best of several seeds would make a lock,
+  and every check built on it, much more repeatable.
+* **The stiffness gap is not a difference between the arms.** The locks
+  sit at kp 10.5 (SO-101) and 1427 (SO-100), but SO-100's two better
+  seeds land at kp 13-14, and pinning SO-100's fit to SO-101's `kp`/`kv`
+  scores 0.65°, better than its own lock. Across seeds `kp` and `kv`
+  spread 25-125× at similar error.
+* **The linearized table is local only.** It finds SO-100's lock tightly
+  pinned (every parameter within ×1.4-1.6, condition number 3), yet better
+  fits sit 100× away. On SO-101 it shows `damping` unconstrained and
+  traded off against `kv` (×8800 with the others refit, ×1.9 alone).
 * **Latency is the best-pinned parameter**: one frame either side of the
-  lock costs 0.2-0.8° with everything else held fixed.
+  lock costs 0.3-0.9° with everything else held fixed.
 
 The synthetic study ([`results/synthetic/robot_specificity.md`](results/synthetic/robot_specificity.md))
-gives each simulated arm one real lock's parameters as its truth. There
-the own lock wins by 1.3-1.5×, far more than the real arms' 1.07-1.08×,
-so the real arms are much more alike than their two locks suggest. The
-150-evaluation fit also falls well short of the truth (0.54° vs 0.34°,
-and SO-100's latency comes back as 4 frames instead of 3), and its seeds
-scatter as widely as on the real data. Some of the spread is the
-optimizer, not the data, so stronger claims need larger budgets or
-several restarts per lock. The fleet scan's cross matrix over many arms
-is the larger version of this test.
+gives each simulated arm one real lock's parameters as its truth (kp 10.5
+vs 1427). There the own lock wins by 2.2× and 5.4×, but the fit still
+misses the truth (SO-100-like arm: kp 182 vs 1427 at 0.40° against
+0.35°), and the seeds on one arm range from 0.55° to 1.91°. So the
+optimizer spread above is a property of the fit, not of the real data.
+The fleet scan's cross matrix over many arms is the larger version of
+this test.
 
 ## Gate deploys on your robot's drift
 
