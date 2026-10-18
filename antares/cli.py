@@ -407,6 +407,27 @@ def _episode_list(indices: list[int]) -> str:
     return f"{indices[0]}..{indices[-1]} ({len(indices)})"
 
 
+def _notify_check(args: argparse.Namespace, webhook: str, res=None, error: str | None = None) -> None:
+    """Post the check's alert to ``webhook``. A dead webhook only warns on
+    stderr; it never changes the exit code."""
+    from antares import notify
+
+    out = sys.stderr if args.json else None  # keep --json stdout pure under --notify-dry-run
+    kw = dict(when=args.notify_when, fmt=args.notify_format, dry_run=args.notify_dry_run, out=out)
+    try:
+        if res is not None:
+            sent = notify.notify(res, webhook, **kw)
+        else:
+            sent = notify.notify_error(error or "check could not run", webhook,
+                                       lock=str(args.lock), dataset=args.dataset, **kw)
+    except Exception as e:  # noqa: BLE001 - NotifyError, a bad URL, anything: the verdict stands
+        print(f"warning: alert not sent: {e}", file=sys.stderr)
+        return
+    if sent:
+        verb = "rendered" if args.notify_dry_run else "sent"
+        print(f"alert {verb} ({notify.resolve_format(webhook, args.notify_format)} webhook)", file=sys.stderr)
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     import json
     import os
@@ -417,6 +438,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     if os.path.isfile(args.lock):
         with open(args.lock) as f:
             lock = json.load(f)
+    webhook = args.notify or os.environ.get("ANTARES_WEBHOOK_URL") or None
     if args.explain and args.explain_evaluations < MIN_EXPLAIN_EVALUATIONS:
         print(f"error: --explain-evaluations must be >= {MIN_EXPLAIN_EVALUATIONS}", file=sys.stderr)
         return EXIT_USAGE
@@ -432,6 +454,8 @@ def cmd_check(args: argparse.Namespace) -> int:
         )
     except Exception as e:  # noqa: BLE001 - HTTPException or loader error
         print(f"error: {_detail(e)}", file=sys.stderr)
+        if webhook:
+            _notify_check(args, webhook, error=_detail(e))
         return EXIT_USAGE
 
     diagnosis = None
@@ -474,11 +498,37 @@ def cmd_check(args: argparse.Namespace) -> int:
             print(_diagnosis_table(diagnosis))
             print(diagnosis.summary())
 
+    if webhook:
+        _notify_check(args, webhook, res=res)
+
     if res.verdict == "ok":
         return EXIT_PASS
     if res.verdict == "drifted":
         return EXIT_DRIFT
     return EXIT_USAGE
+
+
+def cmd_notify_test(args: argparse.Namespace) -> int:
+    import os
+    from urllib.parse import urlsplit
+
+    from antares import notify
+
+    url = args.url or os.environ.get("ANTARES_WEBHOOK_URL")
+    if not url:
+        print("error: pass --url or set ANTARES_WEBHOOK_URL", file=sys.stderr)
+        return EXIT_USAGE
+    res = notify.example_result(name=args.lock, dataset=args.dataset)
+    try:
+        notify.notify(res, url, when="always", fmt=args.format, title=args.title, dry_run=args.dry_run)
+    except Exception as e:  # noqa: BLE001 - NotifyError or a bad URL/format
+        print(f"error: alert not sent: {e}", file=sys.stderr)
+        return EXIT_DRIFT
+    fmt = notify.resolve_format(url, args.format)
+    verb = "rendered" if args.dry_run else "sent"
+    # The URL is a secret; name only the host.
+    print(f"{verb} a synthetic OK alert as {fmt} to {urlsplit(url).hostname}")
+    return EXIT_PASS
 
 
 def _frac(v) -> str:
@@ -1231,7 +1281,26 @@ def build_parser() -> argparse.ArgumentParser:
                    help="on drift, refit and name the parameter change that explains it")
     p.add_argument("--explain-evaluations", type=int, default=240, metavar="N",
                    help="refit budget for --explain (default 240, at least 10)")
+    p.add_argument("--notify", default=None, metavar="URL",
+                   help="POST an alert to this webhook (default: $ANTARES_WEBHOOK_URL); "
+                        "a failed POST only warns and leaves the exit code alone")
+    p.add_argument("--notify-when", choices=["drifted", "failure", "always"], default="drifted",
+                   help="alert on: drifted, failure (drifted or too few episodes) or always (default drifted)")
+    p.add_argument("--notify-format", choices=["auto", "slack", "json"], default="auto",
+                   help="payload: slack blocks, generic json, or auto from the host (default auto)")
+    p.add_argument("--notify-dry-run", action="store_true",
+                   help="print the alert payload instead of posting it")
     p.set_defaults(func=cmd_check)
+
+    p = sub.add_parser("notify-test", help="post a synthetic OK alert to confirm a webhook works")
+    p.add_argument("--url", default=None, help="webhook URL (default: $ANTARES_WEBHOOK_URL)")
+    p.add_argument("--format", choices=["auto", "slack", "json"], default="auto",
+                   help="payload: slack blocks, generic json, or auto from the host (default auto)")
+    p.add_argument("--title", default="Antares webhook test", help="alert title / Slack header")
+    p.add_argument("--lock", default="example", help="lock name shown in the message")
+    p.add_argument("--dataset", default="your-org/so101_arm_a", help="dataset shown in the message")
+    p.add_argument("--dry-run", action="store_true", help="print the payload instead of posting it")
+    p.set_defaults(func=cmd_notify_test)
 
 
     p = sub.add_parser("events", help="detect contact events from the real-sim residual")
