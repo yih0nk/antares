@@ -779,9 +779,13 @@ export default function App() {
     };
     src.onerror = () => {
       // EventSource reconnects on its own; a closed stream after "done" is fine.
+      // After Stop the status is "cancelled" and still counts as running, so
+      // a stream lost then must also end it, or the panel stays on "Stopping…".
       if (src.readyState === EventSource.CLOSED) {
         setCalib((c) =>
-          c && c.jobId === jobId && c.status === "running" ? { ...c, status: "error", error: "lost the progress stream" } : c,
+          c && c.jobId === jobId && (c.status === "running" || c.status === "cancelled")
+            ? { ...c, status: "error", error: "lost the progress stream" }
+            : c,
         );
       }
     };
