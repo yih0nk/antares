@@ -294,7 +294,7 @@ def get_baseline(ds: Dataset, lock_name: str | None):
     thr = gripper_thresholds(np.concatenate([ep.action[:, g] for ep in ds.episodes]))
     eps = baseline_episodes(ds, lock)
     arm = get_arm()
-    with _ARM_LOCK:
+    with _ARM_LOCK, _command_map(arm, command_map_from_lock(lock) if lock else None):
         arm.apply(params)
         bl = residual_baseline(eps, arm, thr)
     out = (bl, thr, params)
@@ -307,8 +307,9 @@ def _episode_residual(ds: Dataset, ep: Episode, lock_name: str | None, z: float,
     from antares.events import detect_events, residuals, validate_episode
 
     bl, thr, params = get_baseline(ds, lock_name)
+    cmap = command_map_from_lock(load_lock_dict(lock_name)) if lock_name else None
     arm = get_arm()
-    with _ARM_LOCK:
+    with _ARM_LOCK, _command_map(arm, cmap):
         arm.apply(params)
         real_q = np.asarray(arm.real_q(ep))
         sim_q = np.asarray(arm.replay(ep))

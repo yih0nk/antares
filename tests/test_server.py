@@ -1411,3 +1411,14 @@ def test_check_uses_lock_command_map(client, fakes):
     plain = client.post("/api/check", json={"dataset": FAKE_DS2, "lock": "unit-b-plain"}).json()
     assert mapped["score"] < 0.5 * plain["score"]
     assert mapped["passed"] is True and plain["passed"] is False
+
+
+def test_residual_uses_lock_command_map(client, pick):
+    elbow_up = {"gain": [1.0] * 6, "bias": [0.0, 0.0, 2.0, 0.0, 0.0, 0.0]}
+    write_lock(pick, "unit-a", kp=50.0, dataset=PICK_DS)
+    write_lock(pick, "unit-a-mapped", kp=50.0, dataset=PICK_DS, command_map=elbow_up)
+    q = {"dataset": PICK_DS, "episode": 1}
+    plain = np.asarray(client.get("/api/residual", params={**q, "lock": "unit-a"}).json()["residual"])
+    mapped = np.asarray(client.get("/api/residual", params={**q, "lock": "unit-a-mapped"}).json()["residual"])
+    np.testing.assert_allclose(mapped[:, 2], plain[:, 2] - 2.0, atol=1e-3)
+    np.testing.assert_allclose(mapped[:, :2], plain[:, :2], atol=1e-9)
