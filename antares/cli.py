@@ -385,7 +385,8 @@ def cmd_drift(args: argparse.Namespace) -> int:
         on_progress=on_progress,
     )
     s = scan.to_dict()
-    param_names = list(s["lock_params"])
+    # numeric, shared parameters only: not the servo model's name, nor per-joint lists
+    param_names = [k for k, v in s["lock_params"].items() if isinstance(v, (int, float))]
     rows = []
     for w in s["windows"]:
         p = w["params"]
