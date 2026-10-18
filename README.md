@@ -459,6 +459,53 @@ tests in `tests/test_check.py` prove the gate bites: real episodes pass,
 the same episodes with 3 frames of extra lag or excursions scaled to 0.9
 (a weak servo) fail.
 
+### Record then check, one command
+
+A technician at the arm should not have to assemble a `lerobot-record`
+command and then a `check` command. `antares record-check` does both:
+
+```sh
+.venv/bin/antares record-check --lock so101_arm_a \
+    --robot-port /dev/tty.usbmodem585A0076841 --robot-id arm_a \
+    --teleop-port /dev/tty.usbmodem58760431551
+```
+
+```
+recording 5 episode(s) -> recordings/arm_a/20261017-093005
+  lerobot-record --robot.type=so101_follower --robot.port=/dev/tty.usbmodem585A0076841 --robot.id=arm_a ... --dataset.push_to_hub=false
+... LeRobot's own prompts and keyboard controls (n: next, r: re-record, q: quit) ...
+OK: recordings/arm_a/20261017-093005 vs lock so101_arm_a: 1.067 deg RMSE on 5 episodes (reference 1.054, limit 1.582)
+PASS arm_a: 1.067 deg (limit 1.582)
+```
+
+It runs `lerobot-record` with the technician's terminal attached (follower
+`--robot-type so101_follower`, leader `--teleop-type so101_leader`,
+`--teleop-id <robot-id>_leader` by default; `--robot-id` must be the id the
+arm was calibrated under in LeRobot), writes the episodes to `--root`
+(default `recordings/<robot-id>/<YYYYMMDD-HHMMSS>`, so runs never overwrite
+each other) and never pushes to the Hub. It then runs exactly what `antares
+check <root> --lock <name>` runs, so `--threshold`, `--ratio`,
+`--min-episodes` and `--json` mean the same thing, and ends with one banner
+line, `PASS <robot-id>: ...` or `FAIL <robot-id>: ...`. Exit codes are the
+check's (`0` pass, `1` drifted, `2` usage or too few episodes) plus `3`
+when recording itself failed. `--episodes` defaults to 5 to satisfy the
+check's `--min-episodes 5` and is raised with a warning when set lower.
+
+Other knobs: `--episode-time S` / `--reset-time S` (LeRobot's
+`episode_time_s` / `reset_time_s`, 60 s each by default), `--task "..."`,
+`--extra=--robot.cameras=...` to pass any other `lerobot-record` flag
+through verbatim, `--dry-run` to print the two commands and exit 0, and
+`--skip-record` to check a directory a previous run already recorded.
+
+Prerequisite: LeRobot with its recording scripts and Feetech motor support,
+`pip install 'lerobot[core_scripts,feetech]'`. LeRobot needs Python >= 3.12
+and Antares runs on 3.11, so they usually sit in separate environments;
+point `--recorder /path/to/env/bin/lerobot-record` at LeRobot's when it is
+not on `PATH`. The recorded directory is an ordinary LeRobot dataset
+(`meta/info.json`, `data/*.parquet`): keep it as the record of that day's
+check, run `antares check` or `--explain` on it again later, or upload it
+with `hf upload <user>/<name> recordings/arm_a/20261017-093005 --repo-type dataset`.
+
 ### What changed? `--explain`
 
 A failed check says the arm no longer matches its sim. `--explain` also
