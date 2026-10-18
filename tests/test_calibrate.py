@@ -150,7 +150,8 @@ def test_decode_rejects_wrong_dim():
 def test_search_spaces():
     assert SHARED.name == "shared" and SHARED.dims == DIMS and SHARED.n_dims == 6
     assert PER_JOINT.name == "per_joint"
-    assert set(PER_JOINT_SPACE) == set(SimParams.field_names())  # every field, incl. forcerange
+    # every per-joint field, incl. forcerange; gravity_scale is shared-only
+    assert set(PER_JOINT_SPACE) == set(SimParams.field_names()) - {"gravity_scale"}
     assert PER_JOINT.n_dims == 7 * 6 == len(PER_JOINT.dims)
     assert PER_JOINT.dims[:2] == ("kp.shoulder_pan", "kp.shoulder_lift")
     assert PER_JOINT.dims[-1] == "forcerange.gripper"
@@ -164,7 +165,7 @@ def test_per_joint_encode_decode_round_trip():
     x = PER_JOINT.encode(TRUE_PER_JOINT)
     assert x.shape == (42,) and np.all(x >= 0) and np.all(x <= 1)
     back = PER_JOINT.decode(x)
-    assert back.has_per_joint and all(back.is_per_joint(n) for n in SimParams.field_names())
+    assert back.has_per_joint and all(back.is_per_joint(n) for n in PER_JOINT.fields)
     assert back.latency_frames == (2, 2, 4, 2, 2, 2)
     for name in SimParams.field_names():
         np.testing.assert_allclose(back.per_joint(name), TRUE_PER_JOINT.per_joint(name), rtol=1e-9)
@@ -453,3 +454,30 @@ def test_calibrate_with_real_arm_smoke():
     res = calibrate(eps[:1], eps[1:], max_evaluations=6, popsize=3, on_progress=events.append)
     assert res.n_evaluations == 6 and len(events) == 7
     assert math.isfinite(res.eval_score) and math.isfinite(res.baseline_eval_score)
+
+
+def test_fit_gravity_adds_one_shared_dimension():
+    from antares.calibrate import GRAVITY_SPACE, SHARED_GRAVITY
+
+    assert SHARED_GRAVITY.name == "shared"
+    assert SHARED_GRAVITY.dims == DIMS + ("gravity_scale",)
+    p = SHARED_GRAVITY.decode(SHARED_GRAVITY.encode(SimParams(gravity_scale=0.4)))
+    assert p.gravity_scale == pytest.approx(0.4)
+    assert GRAVITY_SPACE["gravity_scale"][:2] == (0.0, 2.0)
+
+
+def test_calibrate_fit_gravity_searches_gravity_scale():
+    eps = make_episodes(2)
+    seen = set()
+
+    def sim(params, ep):
+        seen.add(params.gravity_scale)
+        real, simq = fake_simulate(params, ep)
+        return real, simq + (params.gravity_scale - 0.5)  # best at 0.5
+
+    off = calibrate(eps[:1], eps[1:], simulate=sim, max_evaluations=12, popsize=4)
+    assert seen == {1.0} and "gravity_scale" not in off.params.to_dict()
+    res = calibrate(eps[:1], eps[1:], simulate=sim, max_evaluations=60, popsize=6, fit_gravity=True)
+    assert len(seen) > 1
+    assert res.params.gravity_scale == pytest.approx(0.5, abs=0.15)
+    assert res.space == "shared" and "gravity_scale" in res.to_dict()["params"]

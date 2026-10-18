@@ -711,6 +711,7 @@ def run_calibration(
     per_joint: bool = False,
     per_joint_max_evaluations: int = 600,
     per_joint_sigma0: float | None = None,
+    fit_gravity: bool = False,
     on_progress: Callable[[Any], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
 ) -> tuple[Any, dict, Path]:
@@ -718,6 +719,7 @@ def run_calibration(
 
     ``per_joint`` adds the per-joint refinement stage after the shared fit,
     with its own evaluation budget and (optionally) CMA-ES step size.
+    ``fit_gravity`` adds ``gravity_scale`` to the shared stage.
     """
     from antares.calibrate import calibrate, split_episodes
 
@@ -731,6 +733,8 @@ def run_calibration(
         extra = {"per_joint": True, "per_joint_max_evaluations": int(per_joint_max_evaluations)}
         if per_joint_sigma0 is not None:
             extra["per_joint_sigma0"] = float(per_joint_sigma0)
+    if fit_gravity:
+        extra["fit_gravity"] = True
     result = calibrate(
         train,
         eval_,

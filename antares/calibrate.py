@@ -130,6 +130,11 @@ PER_JOINT_SPACE: dict[str, tuple[float, float, str]] = {
     "forcerange": (0.5, 30.0, "log"),
 }
 
+#: Optional shared dimension for the arm's gravity load (see
+#: :attr:`antares.sim.SimParams.gravity_scale`), searched only when
+#: ``calibrate(fit_gravity=True)``. 0 is a weightless arm, 2 a doubled load.
+GRAVITY_SPACE: dict[str, tuple[float, float, str]] = {"gravity_scale": (0.0, 2.0, "linear")}
+
 DIMS: tuple[str, ...] = tuple(SPACE)
 N_DIMS = len(DIMS)
 
@@ -223,6 +228,8 @@ class SearchSpace:
 
 SHARED = SearchSpace(SPACE, per_joint=False)
 PER_JOINT = SearchSpace(PER_JOINT_SPACE, per_joint=True)
+#: :data:`SHARED` plus the gravity load.
+SHARED_GRAVITY = SearchSpace({**SPACE, **GRAVITY_SPACE}, per_joint=False)
 
 
 def encode(params: SimParams, space: SearchSpace = SHARED) -> np.ndarray:
@@ -559,6 +566,7 @@ def calibrate(
     per_joint_max_evaluations: int = PER_JOINT_MAX_EVALUATIONS,
     per_joint_sigma0: float = PER_JOINT_SIGMA0,
     per_joint_popsize: int | None = None,
+    fit_gravity: bool = False,
 ) -> CalibrationResult:
     """Fit :class:`SimParams` to ``train`` episodes; report on ``eval`` episodes.
 
@@ -569,6 +577,9 @@ def calibrate(
     ``per_joint_max_evaluations`` evaluations, warm-started from the shared
     optimum with step size ``per_joint_sigma0``; ``per_joint_popsize`` of
     None takes CMA-ES's default for that dimensionality.
+
+    ``fit_gravity=True`` adds ``gravity_scale`` to the shared stage
+    (:data:`SHARED_GRAVITY`); the per-joint stage keeps the shared value.
 
     ``on_progress`` fires once per objective evaluation, starting with the
     starting point as evaluation 0, so it is called ``n_evaluations + 1``
@@ -600,7 +611,8 @@ def calibrate(
     )
     fit.record(start, start_report, start_score, SHARED.name)
 
-    finished = fit.run_stage(SHARED, start, max_evaluations, sigma0, popsize, seed)
+    shared = SHARED_GRAVITY if fit_gravity else SHARED
+    finished = fit.run_stage(shared, start, max_evaluations, sigma0, popsize, seed)
     if per_joint and finished:
         # Refine from the shared optimum; a fresh seed so the two stages do
         # not share a random stream.
@@ -678,7 +690,9 @@ __all__ = [
     "PER_JOINT_MAX_EVALUATIONS",
     "PER_JOINT_SIGMA0",
     "SearchSpace",
+    "GRAVITY_SPACE",
     "SHARED",
+    "SHARED_GRAVITY",
     "PER_JOINT",
     "SimulateFn",
     "ProgressEvent",
