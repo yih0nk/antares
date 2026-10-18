@@ -379,16 +379,17 @@ def export_scene(
     :meth:`~antares.task.TaskDistribution.sample` and
     :func:`~antares.task.set_task`."""
     out_dir = Path(out_dir)
+    objects = scene_xml(task, object_size) if task is not None else None  # may raise: before anything is written
     arm_path = export_mjcf(lock, out_dir / f"{lock.name}.xml", bundle_assets=bundle_assets)
 
     scene = SCENE_PATH.read_text()
     scene, n = re.subn(r'<include file="[^"]+"/>', f'<include file="{arm_path.name}"/>', scene, count=1)
     if n == 0:
         raise ExportError("scene.xml has no <include>")
-    if task is not None:
+    if objects is not None:
         if scene.count("</worldbody>") != 1:
             raise ExportError("scene.xml needs exactly one </worldbody>")
-        scene = scene.replace("</worldbody>", scene_xml(task, object_size) + "  </worldbody>")
+        scene = scene.replace("</worldbody>", objects + "  </worldbody>")
         task.save(out_dir / TASK_FILENAME)
     scene = insert_header(
         scene,

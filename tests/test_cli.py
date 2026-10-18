@@ -1383,6 +1383,41 @@ def test_task_then_export_with_task(monkeypatch, tmp_path, capsys):
     assert "antares task" in capsys.readouterr().err
 
 
+def test_task_refuses_a_dataset_with_no_held_grasp(monkeypatch, capsys, tmp_path):
+    from antares import server
+    from test_task import SHUT, pick_place_episode
+
+    eps = (pick_place_episode(0, held_jaw=SHUT), pick_place_episode(1, held_jaw=SHUT + 0.5))
+    monkeypatch.setattr(server, "LOCK_DIR", tmp_path / "locks")
+    monkeypatch.setattr(server, "_DATASETS", {"fake/robot": Dataset("fake/robot", "so101", 30.0, eps[0].joint_names, eps)})
+    assert cli.main(["task", "fake/robot"]) == 1
+    err = capsys.readouterr().err
+    assert "error:" in err and "held anything" in err and "--held-gap" in err
+    assert not (tmp_path / "locks").exists()
+    assert cli.main(["task", "fake/robot", "--out", str(tmp_path / "x.task.json")]) == 1
+    assert not (tmp_path / "x.task.json").exists()
+
+
+def test_export_refuses_a_task_with_no_held_grasp(monkeypatch, capsys, tmp_path):
+    from antares import server
+    from antares.task import TaskDistribution
+    from test_task import SHUT, pick_place_episode
+
+    monkeypatch.setattr(server, "LOCK_DIR", tmp_path / "locks")
+    monkeypatch.setattr(server, "LOCK_SUFFIX", ".lock.json")
+    _real_lock().save(tmp_path / "locks" / "unit_a.lock.json")
+    td = TaskDistribution.from_episodes([pick_place_episode(0, held_jaw=SHUT)], name="empty")
+    assert not td.held
+    task_path = td.save(td.default_path(tmp_path / "locks"))
+
+    out = tmp_path / "out"
+    for ref in ("empty", str(task_path)):
+        assert cli.main(["export", "unit_a", "-o", str(out), "--task", ref, "--no-bundle"]) == 1
+        err = capsys.readouterr().err
+        assert err.startswith("error:") and "no held grasps" in err and "Traceback" not in err
+        assert not out.exists()  # refused before anything was written
+
+
 def test_noise_prints_table_and_saves(monkeypatch, capsys, tmp_path):
     from antares import server
     from test_noise import parked_episode

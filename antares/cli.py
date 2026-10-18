@@ -903,6 +903,14 @@ def cmd_task(args: argparse.Namespace) -> int:
     name = args.name or server._slug(ds.repo_id)
     td = TaskDistribution.from_episodes(list(ds.episodes), name=name, dataset=ds.repo_id, held_gap=args.held_gap)
     s = td.summary()
+    if not td.held:
+        print(
+            f"error: {ds.repo_id}: none of the {s['grasps']} closes of the gripper held anything "
+            f"(jaw never stopped {args.held_gap:g} units above its empty-closed level); "
+            f"nothing to sample from, so no task file was written (try a smaller --held-gap)",
+            file=sys.stderr,
+        )
+        return 1
     print(
         f"{ds.repo_id}: {s['episodes']} episodes, {s['grasps']} closes of the gripper: "
         f"{s['held']} picks ({s['carried']} carried somewhere else), {s['missed']} missed, "
@@ -1294,7 +1302,7 @@ def cmd_export(args: argparse.Namespace) -> int:
     from antares import server
     from antares.export import SCENE_FILENAME, TASK_FILENAME, export_scene, sidecar_path
     from antares.lock import RobotLock
-    from antares.task import TASK_SUFFIX
+    from antares.task import TASK_SUFFIX, TaskDistribution
 
     try:
         lock = RobotLock.from_dict(server.load_lock_dict(args.name))
@@ -1303,8 +1311,6 @@ def cmd_export(args: argparse.Namespace) -> int:
         return 1
     task = None
     if args.task:
-        from antares.task import TaskDistribution
-
         task_path = Path(args.task)
         if not task_path.is_file():
             task_path = server.LOCK_DIR / f"{args.task}{TASK_SUFFIX}"
@@ -1312,10 +1318,17 @@ def cmd_export(args: argparse.Namespace) -> int:
             print(f"error: no task file {args.task} (run `antares task` first)", file=sys.stderr)
             return 1
         task = TaskDistribution.load(task_path)
+        if not task.held:
+            print(f"error: task {task.name} ({task_path}) has no held grasps: nothing to put in the scene", file=sys.stderr)
+            return 1
     out_dir = Path(args.output) if args.output else Path("export") / lock.name
-    scene = export_scene(
-        lock, out_dir, bundle_assets=not args.no_bundle, task=task, object_size=args.object_size
-    )
+    try:
+        scene = export_scene(
+            lock, out_dir, bundle_assets=not args.no_bundle, task=task, object_size=args.object_size
+        )
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
     arm = out_dir / f"{lock.name}.xml"
     p = lock.params
     print(f"exported lock {lock.name} ({lock.dataset}) -> {out_dir}/")
