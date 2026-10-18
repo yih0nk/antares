@@ -1339,3 +1339,10 @@ def test_calibrate_fit_sensor_prints_comparison(monkeypatch, capsys):
     assert seen["fit_sensor"] is True and seen["sensor_mode"] == "kinematic"
     assert "dynamics only" in out and "1.500" in out and "0.750" in out
     assert "sensor calibration" in out and "-2.500" in out and "0.9800" in out
+
+
+def test_params_table_uses_the_robots_columns():
+    from antares.cli import _params_table
+
+    out = _params_table({"kp": [1.0] * 7, "latency_frames": 2}, [f"joint{i}" for i in range(1, 7)] + ["gripper"])
+    assert "joint7" not in out and "gripper" in out and out.count("\n") == 9

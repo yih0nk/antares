@@ -31,7 +31,7 @@ def _fmt(v) -> str:
     return str(v) if isinstance(v, int) else f"{v:.4g}"
 
 
-def _params_table(params: dict) -> str:
+def _params_table(params: dict, joints: list[str] | None = None) -> str:
     """Scalar params on one line; per-joint params as a joints x fields table."""
     if not any(isinstance(v, list) for v in params.values()):
         return "params: " + ", ".join(f"{k}={_fmt(v)}" for k, v in params.items())
@@ -39,7 +39,7 @@ def _params_table(params: dict) -> str:
 
     names = list(params)
     rows = []
-    for j, joint in enumerate(JOINTS):
+    for j, joint in enumerate(joints or JOINTS):
         row = [joint]
         for k in names:
             v = params[k]
@@ -126,7 +126,9 @@ def cmd_inspect(args: argparse.Namespace) -> int:
         f"{frames} frames @ {ds.fps:g} fps"
     )
     print("joints:", ", ".join(ds.joint_names))
-    print(f"sim model: {model_for_dataset(ds.robot_type)}")
+    from antares.catalog import robot_for_dataset
+
+    print(f"sim model: {robot_for_dataset(args.repo_id) or model_for_dataset(ds.robot_type)}")
     _print_verdict(v)
     return 0 if v.ok else 1
 
@@ -230,7 +232,9 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
     print()
     print(_table(headers, rows))
     print()
-    print(_params_table(r["params"]))
+    from antares.robots import get_robot
+
+    print(_params_table(r["params"], list(get_robot(lock["robot"]).joints) if lock.get("robot") else None))
     for s in r.get("stages", []):
         run = f" (seed {s['seed']})" if "seed" in s and r.get("seeds") else ""
         print(f"  {s['name']}{run}: {s['n_evaluations']} evaluations, train {s['train_score']:.3f} deg")

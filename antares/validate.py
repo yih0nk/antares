@@ -322,8 +322,11 @@ def validate_dataset(
         n_frames=int(sum(len(e) for e in ds.episodes)),
         joint_names=list(ds.joint_names),
     )
-    r = _robot_for(robot, v.robot_family, ds.repo_id)
-    if robot or v.robot_family is not None:
+    from antares.catalog import robot_for_dataset
+
+    chosen = robot or robot_for_dataset(ds.repo_id)
+    r = _robot_for(chosen, v.robot_family, ds.repo_id)
+    if chosen or v.robot_family is not None:
         v.robot = r.name
     cols, why = check_joint_names(list(ds.joint_names), r)
     if why:
