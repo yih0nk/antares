@@ -23,15 +23,23 @@ Pure kinematics: no dynamics and no lock are needed, only the dataset-unit
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
 
 import mujoco
 import numpy as np
 
+from antares import __version__
 from antares.data import Episode
 from antares.events import GripperThresholds, gripper_thresholds, gripper_transitions
+from antares.lock import LOCK_DIR, slug
 from antares.sim import GRIPPER_INDEX, UnitMap, load_model
+
+TASK_SUFFIX = ".task.json"
 
 #: MJCF site at the gripper tip, between the jaws.
 TIP_SITE = "gripperframe"
@@ -143,3 +151,193 @@ def find_grasps(
             )
         )
     return out
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _stats(points: np.ndarray) -> dict[str, Any] | None:
+    """Mean, standard deviation and min/max per axis of an (N,3) cloud."""
+    if len(points) == 0:
+        return None
+    return {
+        "n": int(len(points)),
+        "mean": points.mean(axis=0).tolist(),
+        "std": points.std(axis=0).tolist(),
+        "min": points.min(axis=0).tolist(),
+        "max": points.max(axis=0).tolist(),
+    }
+
+
+@dataclass
+class TaskDistribution:
+    """Where one dataset's objects were picked and placed, and where episodes start.
+
+    Positions are the gripper tip in the arm's base frame, metres. Start
+    poses are joint angles in radians (all six joints, gripper included).
+    """
+
+    name: str
+    dataset: str
+    fps: float
+    thresholds: GripperThresholds
+    grasps: list[Grasp]
+    start_q: np.ndarray  # (E, 6) rad
+    episodes: list[int]
+    created_at: str = field(default_factory=_now_iso)
+    antares_version: str = __version__
+
+    @classmethod
+    def from_episodes(
+        cls,
+        episodes: Sequence[Episode],
+        name: str,
+        dataset: str = "",
+        unit_map: UnitMap | None = None,
+        held_gap: float = HELD_GAP,
+    ) -> TaskDistribution:
+        if not episodes:
+            raise ValueError("no episodes")
+        tip = Tip()
+        unit_map = unit_map if unit_map is not None else UnitMap.from_model(tip.model)
+        thr = dataset_thresholds(episodes)
+        grasps = [g for e in episodes for g in find_grasps(e, thr, tip, unit_map, held_gap)]
+        return cls(
+            name=name,
+            dataset=dataset,
+            fps=float(episodes[0].fps),
+            thresholds=thr,
+            grasps=grasps,
+            start_q=np.stack([unit_map.to_rad(e.state[0]) for e in episodes]),
+            episodes=[int(e.index) for e in episodes],
+        )
+
+    # -- the clouds -----------------------------------------------------------
+
+    @property
+    def held(self) -> list[Grasp]:
+        return [g for g in self.grasps if g.held]
+
+    @property
+    def picks(self) -> np.ndarray:
+        """(N,3) tip positions of the held grasps."""
+        return np.array([g.xyz for g in self.held], dtype=np.float64).reshape(-1, 3)
+
+    @property
+    def places(self) -> np.ndarray:
+        """(N,3) release positions of the held grasps that were released."""
+        pts = [g.release_xyz for g in self.held if g.release_xyz is not None]
+        return np.array(pts, dtype=np.float64).reshape(-1, 3)
+
+    @property
+    def missed_episodes(self) -> list[int]:
+        """Episodes with at least one grasp that closed on nothing."""
+        return sorted({g.episode for g in self.grasps if not g.held})
+
+    def summary(self) -> dict[str, Any]:
+        held = self.held
+        return {
+            "episodes": len(self.episodes),
+            "grasps": len(self.grasps),
+            "held": len(held),
+            "missed": len(self.grasps) - len(held),
+            "missed_episodes": self.missed_episodes,
+            "pick": _stats(self.picks),
+            "place": _stats(self.places),
+            "jaw_deg_median": float(np.median([g.jaw_deg for g in held])) if held else None,
+        }
+
+    # -- sampling -------------------------------------------------------------
+
+    def sample(self, n: int, rng: np.random.Generator | None = None, jitter_m: float = 0.01) -> list[dict[str, Any]]:
+        """Draw ``n`` task instances for a sim environment.
+
+        Each picks one held grasp at random and returns its pick and place
+        positions, both with independent Gaussian jitter of ``jitter_m`` per
+        axis (a kernel density estimate of the logged clouds), plus a start
+        pose drawn from the logged ones. ``place`` is None for a grasp that
+        was never released.
+        """
+        rng = rng if rng is not None else np.random.default_rng()
+        held = self.held
+        if not held:
+            raise ValueError("no held grasps to sample from")
+        out = []
+        for _ in range(int(n)):
+            g = held[int(rng.integers(len(held)))]
+            pick = np.asarray(g.xyz) + rng.normal(0.0, jitter_m, 3)
+            place = None if g.release_xyz is None else np.asarray(g.release_xyz) + rng.normal(0.0, jitter_m, 3)
+            out.append(
+                {
+                    "pick": pick.tolist(),
+                    "place": None if place is None else place.tolist(),
+                    "start_q": self.start_q[int(rng.integers(len(self.start_q)))].tolist(),
+                }
+            )
+        return out
+
+    # -- serialization --------------------------------------------------------
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "dataset": self.dataset,
+            "fps": self.fps,
+            "tip_site": TIP_SITE,
+            "thresholds": {
+                "closed_below": self.thresholds.closed_below,
+                "open_above": self.thresholds.open_above,
+            },
+            "grasps": [g.to_dict() for g in self.grasps],
+            "start_q": self.start_q.tolist(),
+            "episodes": self.episodes,
+            "summary": self.summary(),
+            "created_at": self.created_at,
+            "antares_version": self.antares_version,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> TaskDistribution:
+        def xyz(v):
+            return None if v is None else tuple(float(x) for x in v)
+
+        return cls(
+            name=str(d["name"]),
+            dataset=str(d.get("dataset", "")),
+            fps=float(d["fps"]),
+            thresholds=GripperThresholds(
+                closed_below=float(d["thresholds"]["closed_below"]),
+                open_above=float(d["thresholds"]["open_above"]),
+            ),
+            grasps=[
+                Grasp(
+                    episode=int(g["episode"]),
+                    frame=int(g["frame"]),
+                    xyz=xyz(g["xyz"]),
+                    release_frame=None if g["release_frame"] is None else int(g["release_frame"]),
+                    release_xyz=xyz(g["release_xyz"]),
+                    jaw_gap=float(g["jaw_gap"]),
+                    jaw_deg=float(g["jaw_deg"]),
+                    held=bool(g["held"]),
+                )
+                for g in d["grasps"]
+            ],
+            start_q=np.asarray(d["start_q"], dtype=np.float64).reshape(-1, 6),
+            episodes=[int(i) for i in d["episodes"]],
+            created_at=str(d.get("created_at", "")),
+            antares_version=str(d.get("antares_version", "")),
+        )
+
+    def default_path(self, lock_dir: Path = LOCK_DIR) -> Path:
+        return Path(lock_dir) / f"{slug(self.name)}{TASK_SUFFIX}"
+
+    def save(self, path: Path | None = None) -> Path:
+        path = Path(path) if path is not None else self.default_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(self.to_dict(), indent=2, sort_keys=True) + "\n")
+        return path
+
+    @classmethod
+    def load(cls, path: Path | str) -> TaskDistribution:
+        return cls.from_dict(json.loads(Path(path).read_text()))

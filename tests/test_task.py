@@ -86,3 +86,41 @@ def test_held_and_missed_grasps(tip, unit_map):
     assert g.jaw_deg == pytest.approx(np.degrees(unit_map.to_rad(np.array([0, 0, 0, 0, 0, 25.0]))[5]))
     (m,) = find_grasps(missed, thr, tip, unit_map)
     assert not m.held and m.jaw_gap == pytest.approx(0.5)
+
+
+def test_distribution_clouds_summary_and_roundtrip(tmp_path, tip, unit_map):
+    from antares.task import TaskDistribution
+
+    eps = [pick_place_episode(0), pick_place_episode(1, held_jaw=SHUT + 0.5), pick_place_episode(2)]
+    td = TaskDistribution.from_episodes(eps, name="toy", dataset="local/toy")
+    assert len(td.grasps) == 3
+    assert td.picks.shape == (2, 3) and td.places.shape == (2, 3)
+    assert td.missed_episodes == [1]
+    s = td.summary()
+    assert (s["held"], s["missed"]) == (2, 1)
+    np.testing.assert_allclose(s["pick"]["mean"], tip(unit_map.to_rad(np.array([*POSE_B, 0.0]))), atol=1e-9)
+    assert td.start_q.shape == (3, 6)
+
+    path = td.save(tmp_path / "toy.task.json")
+    back = TaskDistribution.load(path)
+    assert back.to_dict() == td.to_dict()
+    assert td.default_path(tmp_path).name == "toy.task.json"
+
+
+def test_sample_draws_near_logged_points():
+    from antares.task import TaskDistribution
+
+    td = TaskDistribution.from_episodes([pick_place_episode(0)], name="toy")
+    draws = td.sample(200, np.random.default_rng(0), jitter_m=0.01)
+    picks = np.array([d["pick"] for d in draws])
+    assert np.all(np.abs(picks - td.picks[0]) < 0.06)
+    assert picks.std(axis=0) == pytest.approx([0.01] * 3, rel=0.2)
+    assert all(len(d["start_q"]) == 6 and d["place"] is not None for d in draws)
+
+
+def test_sample_needs_a_held_grasp():
+    from antares.task import TaskDistribution
+
+    td = TaskDistribution.from_episodes([pick_place_episode(0, held_jaw=SHUT)], name="toy")
+    with pytest.raises(ValueError):
+        td.sample(1)
