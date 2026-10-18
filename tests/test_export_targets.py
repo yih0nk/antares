@@ -266,8 +266,8 @@ def test_dr_ranges_are_emitted_when_the_dr_json_exists(tmp_path):
     assert m["latency_frames"] == [3, 4]
     assert data["dr"]["mujoco"]["kp"] == {"lo": dr["kp"].lo, "hi": dr["kp"].hi}
     assert f'"stiffness_distribution_params": ({dr["kp"].lo!r}, {dr["kp"].hi!r})' in py
-    # the committed ranges were derived around an earlier fit of this lock: say so
-    assert data["dr"]["nominal_matches_lock"] is False and "rerun `antares dr`" in py
+    # the committed ranges were derived around this very fit of the lock
+    assert data["dr"]["nominal_matches_lock"] is True and "rerun `antares dr`" not in py
     assert "DR_RANGES = {" in py
     # every other target carries the same ranges
     for t in ("maniskill", "json"):
