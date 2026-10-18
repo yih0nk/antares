@@ -211,6 +211,12 @@ def test_summary_line_formats():
     assert line.endswith(", last drifted 2026-10-10")
 
 
+def test_summary_line_skips_slope_for_checks_minutes_apart():
+    """Two checks five minutes apart (a rehearsal) print no per-day rate."""
+    recs = [_record("2026-10-18T10:00:00Z", 0.2), _record("2026-10-18T10:05:00Z", 4.4)]
+    assert summary_line(recs) == "history: 2 checks since 2026-10-18, last drifted 2026-10-18"
+
+
 def test_report_and_summary_all(tmp_path):
     (tmp_path / "unit-a.lock.json").write_text("{}")
     (tmp_path / "unit-b.lock.json").write_text("{}")
