@@ -1999,6 +1999,194 @@ def fleet_cross() -> dict:
     return cross
 
 
+# --------------------------------------------------------------------------
+# Fleet dashboard: one row per lock in LOCK_DIR, with its check history
+# --------------------------------------------------------------------------
+
+# Joints that count for "worst joint": the gripper is a different mechanism
+# and is excluded from the tracking score too.
+_DASHBOARD_BODY_JOINTS_EXCLUDE = ("gripper",)
+
+
+def _finite(v: Any) -> float | None:
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if np.isfinite(f) else None
+
+
+def _worst_body_joint(per_joint: dict | None) -> tuple[str | None, float | None]:
+    """``(joint, deg)`` with the largest error among the body joints."""
+    worst: tuple[str, float] | None = None
+    for k, v in (per_joint or {}).items():
+        if k in _DASHBOARD_BODY_JOINTS_EXCLUDE:
+            continue
+        f = _finite(v)
+        if f is None:
+            continue
+        if worst is None or f > worst[1]:
+            worst = (str(k), f)
+    return worst if worst is not None else (None, None)
+
+
+def _drift_verdicts() -> dict[str, str | None]:
+    """lock name -> verdict for every ``<lock>.drift.json`` in LOCK_DIR.
+
+    The saved scan carries its verdict; when it does not, the drift module
+    (imported lazily, tolerated missing) recomputes it from the dict.
+    """
+    d = Path(LOCK_DIR)
+    if not d.is_dir():
+        return {}
+    out: dict[str, str | None] = {}
+    for p in sorted(d.glob(f"*{DRIFT_SUFFIX}")):
+        name = p.name[: -len(DRIFT_SUFFIX)]
+        verdict: str | None = None
+        try:
+            scan = json.loads(p.read_text())
+        except (OSError, ValueError):
+            out[name] = None
+            continue
+        if isinstance(scan.get("verdict"), str):
+            verdict = scan["verdict"]
+        else:
+            try:
+                from antares.drift import DriftScan
+
+                verdict = str(DriftScan.from_dict(scan).verdict())
+            except Exception:
+                verdict = None
+        out[name] = verdict
+    return out
+
+
+def _history_index() -> dict[str, dict]:
+    """lock name -> ``{"latest": entry | None, "trend": dict | None}``.
+
+    ``antares.history`` (the check-history store) is optional. When it is
+    importable it is asked for the ``GET /api/history`` shape
+    (``{"locks": [{"lock", "trend", "latest"}, ...]}``) through the first
+    callable it exposes under one of the names below; anything else degrades
+    to "never checked".
+    """
+    try:
+        from antares import history as _history  # type: ignore
+    except ImportError:
+        return {}
+    for fn_name in ("history_index", "dashboard_index", "summary", "index", "list_history", "load_all"):
+        fn = getattr(_history, fn_name, None)
+        if not callable(fn):
+            continue
+        try:
+            try:
+                data = fn(Path(LOCK_DIR))
+            except TypeError:
+                data = fn()
+        except Exception:
+            continue
+        rows = data.get("locks") if isinstance(data, dict) else data
+        if not isinstance(rows, list):
+            continue
+        out: dict[str, dict] = {}
+        for row in rows:
+            if isinstance(row, dict) and row.get("lock"):
+                out[str(row["lock"])] = {"latest": row.get("latest"), "trend": row.get("trend")}
+        return out
+    return {}
+
+
+def _fleet_index() -> tuple[dict | None, dict[str, dict]]:
+    """``(fleet summary or None, lock name -> fleet robot entry)``."""
+    try:
+        report = load_fleet_dict()
+    except HTTPException:
+        return None, {}
+    robots = [r for r in (report.get("robots") or []) if isinstance(r, dict)]
+    by_lock = {str(r["lock"]): r for r in robots if r.get("lock")}
+    summary = dict(report.get("summary") or {})
+    summary.setdefault("n_robots", len(robots))
+    summary["created_at"] = report.get("created_at")
+    summary["locks"] = sorted(by_lock)
+    return summary, by_lock
+
+
+def _dataset_fps(dataset: str | None, fleet_robot: dict | None) -> float | None:
+    if fleet_robot is not None and _finite(fleet_robot.get("fps")) is not None:
+        return _finite(fleet_robot.get("fps"))
+    if dataset:
+        with _DATASETS_LOCK:
+            ds = _DATASETS.get(dataset)
+        if ds is not None:
+            return _finite(getattr(ds, "fps", None))
+    return None
+
+
+def dashboard_robot(
+    lock: dict,
+    *,
+    drift: dict[str, str | None],
+    history: dict[str, dict],
+    fleet_by_lock: dict[str, dict],
+) -> dict:
+    """One dashboard row for a lock dict."""
+    name = str(lock.get("name") or "")
+    res = lock.get("result") or {}
+    params = lock.get("params") or res.get("params") or {}
+    before = _finite(res.get("baseline_eval_score"))
+    after = _finite(res.get("eval_score"))
+    improvement = _finite(res.get("improvement"))
+    if improvement is None and before is not None and after is not None and before > 0:
+        improvement = 1.0 - after / before
+    worst_joint, worst_deg = _worst_body_joint(res.get("per_joint_after"))
+    seeds = lock.get("seeds") if isinstance(lock.get("seeds"), dict) else None
+    pinned = seeds.get("pinned") if seeds else None
+    hist = history.get(name) or {}
+    fleet_robot = fleet_by_lock.get(name)
+    return {
+        "name": name,
+        "dataset": lock.get("dataset"),
+        "robot_type": lock.get("robot_type"),
+        "robot": lock.get("robot") or DEFAULT_ROBOT,
+        "created_at": lock.get("created_at"),
+        "space": res.get("space", "shared"),
+        "baseline_eval_score": before,
+        "eval_score": after,
+        "improvement": improvement,
+        "per_joint_after": res.get("per_joint_after"),
+        "worst_joint": worst_joint,
+        "worst_joint_deg": worst_deg,
+        "latency_frames": params.get("latency_frames"),
+        "fps": _dataset_fps(lock.get("dataset"), fleet_robot),
+        "drift": {"exists": name in drift, "verdict": drift.get(name)},
+        "in_fleet": fleet_robot is not None,
+        "pinned": list(pinned) if isinstance(pinned, (list, tuple)) else None,
+        "history": {"latest": hist.get("latest"), "trend": hist.get("trend")},
+    }
+
+
+def dashboard() -> dict:
+    """Every lock in LOCK_DIR as a dashboard row plus the fleet summary."""
+    drift = _drift_verdicts()
+    history = _history_index()
+    fleet, fleet_by_lock = _fleet_index()
+    robots = [
+        dashboard_robot(l, drift=drift, history=history, fleet_by_lock=fleet_by_lock)
+        for l in list_lock_dicts()
+        if l.get("name")
+    ]
+    return {
+        "robots": robots,
+        "fleet": fleet,
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+    }
+
+
+@app.get("/api/dashboard")
+def dashboard_get() -> dict:
+    return dashboard()
+
+
 def _csv(s: str | None) -> list[str]:
     return [x.strip() for x in (s or "").split(",") if x.strip()]
 
