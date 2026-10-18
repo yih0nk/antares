@@ -50,10 +50,32 @@ ParamValue = Scalar | PerJoint
 
 #: Fields that are integers (dataset frames) rather than physical quantities.
 INT_FIELDS = frozenset({"latency_frames"})
+#: Fields that name a model rather than hold a number (never per joint).
+STR_FIELDS = frozenset({"servo"})
+
+#: Actuator models :attr:`SimParams.servo` can select. ``position`` is
+#: MuJoCo's ideal position actuator (``kp``, ``kv``, ``forcerange``);
+#: ``sts3215`` is the Feetech STS3215's firmware and DC motor as identified on
+#: a test bench by BAM (Rhoban, https://bam.readthedocs.io), see
+#: :meth:`SimParams.sts3215`.
+SERVOS = ("position", "sts3215")
+
+#: Duty cycle per (firmware P coefficient x radian of error) of the STS3215,
+#: measured by BAM with an oscilloscope (``error_gain`` in bam/feetech).
+STS3215_ERROR_GAIN = 0.166
+#: Largest duty cycle the STS3215's H-bridge reaches (BAM, oscilloscope).
+STS3215_MAX_PWM = 0.97
+#: Servo-model fields; written to a lock only when :attr:`SimParams.servo` is
+#: not ``position``.
+SERVO_FIELDS = ("servo_gain", "p_coefficient", "vin", "kt", "resistance", "max_velocity")
 
 
 def _coerce(name: str, value: Any) -> ParamValue:
     """Normalize a field value to ``float``/``int`` or a 6-tuple of them."""
+    if name in STR_FIELDS:
+        if not isinstance(value, str):
+            raise TypeError(f"{name}: expected a string, got {type(value).__name__}")
+        return value
     as_int = name in INT_FIELDS
     if isinstance(value, (list, tuple, np.ndarray)) and np.ndim(value) > 0:
         arr = np.asarray(value, dtype=np.float64).reshape(-1)
@@ -98,6 +120,32 @@ class SimParams:
     #: moving one trails by it, so the error flips sign with the motion. 0 is
     #: the stock smooth actuator.
     deadband: ParamValue = 0.0
+    #: Actuator model, one of :data:`SERVOS`. With ``sts3215`` the servo is
+    #: simulated as its firmware and motor instead of a position actuator:
+    #: the firmware moves an internal target toward the command at most at
+    #: ``max_velocity``, its P loop turns the error into a PWM duty cycle
+    #: ``clip(error * p_coefficient * STS3215_ERROR_GAIN * servo_gain, +-STS3215_MAX_PWM)``,
+    #: and the motor pushes ``kt / resistance * (vin * duty - kt * qvel)``
+    #: (back-EMF makes it weaker the faster it turns). ``kp``, ``kv`` and
+    #: ``forcerange`` are then unused; ``damping``, ``armature`` and
+    #: ``frictionloss`` stay the joint's viscous friction, rotor inertia and
+    #: Coulomb friction, which is BAM's M1 friction model.
+    servo: str = "position"
+    #: Multiplies the firmware's position-to-duty gain (BAM's
+    #: ``error_gain_ratio``; 1.005 on BAM's bench). What the data has to pin
+    #: for an STS3215 instead of ``kp``: it lumps supply sag and unit spread.
+    servo_gain: ParamValue = 1.0
+    #: Firmware P coefficient written to the servo. LeRobot writes 16 to SO-100
+    #: and SO-101 followers (``position_p_coefficient``); the factory value is 32.
+    p_coefficient: ParamValue = 16.0
+    #: Supply voltage (V); the SO-101 follower's STS3215s are the 7.4 V kind.
+    vin: ParamValue = 7.4
+    #: Motor torque constant at the output shaft (N*m/A, also V*s/rad), BAM.
+    kt: ParamValue = 1.1776311631627974
+    #: Motor winding resistance (ohm), BAM.
+    resistance: ParamValue = 2.478681934101461
+    #: Rate limit of the firmware's internal target (rad/s), BAM.
+    max_velocity: ParamValue = 5.2883481319359
 
     def __post_init__(self) -> None:
         for f in fields(self):
@@ -111,10 +159,71 @@ class SimParams:
             raise ValueError("gravity_scale must be >= 0")
         if np.any(self.per_joint("deadband") < 0):
             raise ValueError("deadband must be >= 0")
+        if self.servo not in SERVOS:
+            raise ValueError(f"servo must be one of {', '.join(SERVOS)}, got {self.servo!r}")
+        for n in ("vin", "kt", "resistance", "max_velocity"):
+            if np.any(self.per_joint(n) <= 0):
+                raise ValueError(f"{n} must be > 0")
+        if np.any(self.per_joint("servo_gain") < 0) or np.any(self.per_joint("p_coefficient") < 0):
+            raise ValueError("servo_gain and p_coefficient must be >= 0")
 
     @classmethod
     def default(cls) -> SimParams:
         return cls()
+
+    @classmethod
+    def sts3215(cls, **changes: Any) -> SimParams:
+        """The STS3215 servo model with BAM's bench-identified values.
+
+        BAM fitted a 7.4 V STS3215 on a pendulum bench (``feetech_sts3215_7_4V``,
+        friction model ``m1``, https://github.com/Rhoban/bam, Apache-2.0):
+        torque constant, resistance, gain ratio, rate limit, rotor inertia
+        (``armature``), Coulomb (``frictionloss``) and viscous (``damping``)
+        friction. ``p_coefficient`` is LeRobot's 16, not BAM's bench value of
+        32. ``changes`` override any field. At these values the servo is as
+        stiff as a position actuator with ``kp`` about 9.4 (see
+        :meth:`linearized`).
+        """
+        base = dict(
+            servo="sts3215",
+            servo_gain=1.0049367060648848,
+            armature=0.02608291141307205,
+            frictionloss=0.05152047758105413,
+            damping=0.05989161871380604,
+        )
+        return cls(**{**base, **changes})
+
+    @property
+    def uses_servo_model(self) -> bool:
+        return self.servo != "position"
+
+    def linearized(self) -> SimParams:
+        """Position-actuator equivalent of the servo model (``self`` if there is none).
+
+        Away from saturation and the rate limit the STS3215 model is a PD
+        servo: ``kp = kt / resistance * vin * p_coefficient * STS3215_ERROR_GAIN
+        * servo_gain`` and ``kv = kt**2 / resistance`` (back-EMF), with a stall
+        torque of ``kt / resistance * vin * STS3215_MAX_PWM`` as ``forcerange``.
+        This is what an MJCF can carry; the rate limit and the duty-cycle
+        (rather than torque) saturation are lost.
+        """
+        if not self.uses_servo_model:
+            return self
+        kt, r, vin = self.per_joint("kt"), self.per_joint("resistance"), self.per_joint("vin")
+        kp = kt / r * vin * self.per_joint("p_coefficient") * STS3215_ERROR_GAIN * self.per_joint("servo_gain")
+        kv = kt**2 / r
+        fr = kt / r * vin * STS3215_MAX_PWM
+
+        def pack(a: np.ndarray) -> ParamValue:
+            return float(a[0]) if np.all(a == a[0]) else tuple(float(v) for v in a)
+
+        return self.replace(
+            servo="position",
+            kp=pack(kp),
+            kv=pack(kv),
+            forcerange=pack(fr),
+            **{n: SimParams.__dataclass_fields__[n].default for n in SERVO_FIELDS},
+        )
 
     @classmethod
     def from_model(cls, model: mujoco.MjModel, latency_frames: int = 0) -> SimParams:
@@ -137,7 +246,11 @@ class SimParams:
 
     @classmethod
     def field_names(cls) -> tuple[str, ...]:
-        return tuple(f.name for f in fields(cls))
+        """The numeric parameters (everything :meth:`per_joint` accepts).
+
+        ``servo``, which names the actuator model, is not one of them.
+        """
+        return tuple(f.name for f in fields(cls) if f.name not in STR_FIELDS)
 
     # -- shape helpers ------------------------------------------------------
 
@@ -151,6 +264,8 @@ class SimParams:
 
     def per_joint(self, name: str) -> np.ndarray:
         """Value of ``name`` broadcast to a ``(6,)`` array (int for frame counts)."""
+        if name in STR_FIELDS:
+            raise ValueError(f"{name} is not a numeric parameter")
         v = getattr(self, name)
         dtype = np.int64 if name in INT_FIELDS else np.float64
         if isinstance(v, tuple):
@@ -158,8 +273,8 @@ class SimParams:
         return np.full(N_JOINTS, v, dtype=dtype)
 
     def broadcast(self) -> SimParams:
-        """Copy with every field in per-joint (6-tuple) form; replays identically."""
-        return SimParams(**{n: tuple(self.per_joint(n).tolist()) for n in self.field_names()})
+        """Copy with every numeric field in per-joint (6-tuple) form; replays identically."""
+        return SimParams(servo=self.servo, **{n: tuple(self.per_joint(n).tolist()) for n in self.field_names()})
 
     # -- serialization ------------------------------------------------------
 
@@ -169,17 +284,24 @@ class SimParams:
         ``gravity_scale`` and ``deadband`` are left out at their scalar
         defaults (1.0 and 0), so locks fitted without them serialize exactly
         as before; in per-joint form they are always written, so
-        :meth:`broadcast` round-trips through :meth:`from_dict`.
+        :meth:`broadcast` round-trips through :meth:`from_dict`. ``servo`` and
+        the servo-model fields (:data:`SERVO_FIELDS`) are written only when a
+        servo model is selected (or, like the others, in per-joint form), so
+        position-actuator locks are unchanged.
         """
         out: dict[str, Any] = {}
         for n in self.field_names():
             v = getattr(self, n)
+            if n in SERVO_FIELDS and not self.uses_servo_model and not isinstance(v, tuple):
+                continue
             if isinstance(v, tuple):
                 out[n] = list(v)
             elif (n == "gravity_scale" and v == 1.0) or (n == "deadband" and v == 0.0):
                 continue
             else:
                 out[n] = v
+        if self.uses_servo_model:
+            out["servo"] = self.servo
         return out
 
     @classmethod
@@ -189,7 +311,7 @@ class SimParams:
         Scalars (possibly as strings) and 6-element sequences are accepted for
         every field, so old locks (all scalars, no ``forcerange``) still load.
         """
-        known = set(cls.field_names())
+        known = set(cls.field_names()) | STR_FIELDS
         return cls(**{k: v for k, v in d.items() if k in known})
 
     def replace(self, **changes: Any) -> SimParams:
