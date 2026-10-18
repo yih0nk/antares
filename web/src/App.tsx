@@ -158,12 +158,46 @@ const FRAMED_ASPECT = 1.6;
 function FitCamera() {
   const camera = useThree((s) => s.camera);
   const aspect = useThree((s) => s.size.width / Math.max(1, s.size.height));
+  // The pull-back factor last applied; a later aspect change rescales the
+  // camera's current offset from the target, so an orbit the user made survives
+  // a resize or the side-by-side toggle.
+  const lastK = useRef<number | null>(null);
   useEffect(() => {
     const k = Math.max(1, FRAMED_ASPECT / aspect);
-    const [x, y, z] = CAMERA_POSITION;
     const [tx, ty, tz] = CAMERA_TARGET;
-    camera.position.set(tx + (x - tx) * k, ty + (y - ty) * k, tz + (z - tz) * k);
+    if (lastK.current == null) {
+      const [x, y, z] = CAMERA_POSITION;
+      camera.position.set(tx + (x - tx) * k, ty + (y - ty) * k, tz + (z - tz) * k);
+    } else if (lastK.current !== k) {
+      const r = k / lastK.current;
+      const { x, y, z } = camera.position;
+      camera.position.set(tx + (x - tx) * r, ty + (y - ty) * r, tz + (z - tz) * r);
+    }
+    lastK.current = k;
   }, [camera, aspect]);
+  return null;
+}
+
+// A pane that mirrors another pane's playhead: the second episode is a pure
+// function of the first one's clock (scaled by frame rate, wrapped to its
+// own length), so the two never drift apart.
+function Follow({
+  lead,
+  leadFps,
+  playhead,
+  fps,
+  frames,
+}: {
+  lead: Playhead;
+  leadFps: number;
+  playhead: Playhead;
+  fps: number;
+  frames: number;
+}) {
+  useFrame(() => {
+    if (frames < 2) return;
+    playhead.frame = ((lead.frame / Math.max(1, leadFps)) * fps) % frames;
+  });
   return null;
 }
 
@@ -185,6 +219,7 @@ function Scene({
   onFrame,
   ghostMat = ghostMaterial,
   children,
+  follow,
 }: {
   geometry: Geometry | null;
   realPoses: number[][][] | null;
@@ -203,6 +238,8 @@ function Scene({
   ghostMat?: THREE.Material;
   // Extra things drawn in the arm's frame (policy ghosts, the fitted scene, the tracked object).
   children?: ReactNode;
+  // Follow another pane's playhead (scaled by fps) instead of running its own clock.
+  follow?: { lead: Playhead; leadFps: number };
 }) {
   return (
     <Canvas shadows camera={{ position: CAMERA_POSITION, fov: 38, near: 0.01, far: 20 }}>
@@ -252,7 +289,11 @@ function Scene({
           </group>
         </Suspense>
       )}
-      <Driver playhead={playhead} playing={playing} fps={fps} frames={frames} speed={speed} onFrame={onFrame} />
+      {follow ? (
+        <Follow lead={follow.lead} leadFps={follow.leadFps} playhead={playhead} fps={fps} frames={frames} />
+      ) : (
+        <Driver playhead={playhead} playing={playing} fps={fps} frames={frames} speed={speed} onFrame={onFrame} />
+      )}
       <OrbitControls makeDefault target={CAMERA_TARGET} />
     </Canvas>
   );
@@ -443,23 +484,51 @@ export default function App() {
     setFrame(0);
   }, [compare, playhead, comparePlayhead]);
 
+  // The second pane's ghost with a lock or the live fit is fetched for its
+  // own episode; with the default ghost it is simply the base replay, read at
+  // render time so no request is made for it. Requests run one at a time:
+  // while one is in flight the newest wanted one waits (the live fit lands a
+  // new best every few events), and a reply for an older episode or ghost is
+  // dropped.
   const liveParams = ghost === LIVE ? replay?.params ?? null : null;
+  const [compareBusy, setCompareBusy] = useState(false);
+  const compareKey = useRef("");
+  const compareWanted = useRef<{ key: string; episode: number; run: () => Promise<Replay> } | null>(null);
+  const compareInFlight = useRef(false);
+  const pumpCompare = useCallback(() => {
+    if (compareInFlight.current || !compareWanted.current) return;
+    const { key, episode: ep, run } = compareWanted.current;
+    compareWanted.current = null;
+    compareInFlight.current = true;
+    setCompareBusy(true);
+    run()
+      .then(
+        (r) => key === compareKey.current && setCompareReplay(r),
+        (e) => key === compareKey.current && setError(`Replay of episode ${ep} failed: ${(e as Error).message}`),
+      )
+      .finally(() => {
+        compareInFlight.current = false;
+        setCompareBusy(false);
+        pumpCompare();
+      });
+  }, []);
   useEffect(() => {
-    if (!dataset || compare == null) return;
-    if (ghost === DEFAULT) {
-      setCompareReplay(compareBase);
-      return;
-    }
+    compareKey.current = `${dataset}#${compare}#${ghost}`;
+    setCompareReplay(null);
+  }, [dataset, compare, ghost]);
+  useEffect(() => {
+    if (!dataset || compare == null || ghost === DEFAULT) return;
     if (ghost === LIVE && !liveParams) return;
-    let live = true;
-    (ghost === LIVE && liveParams ? api.replayParams(dataset, compare, liveParams) : api.replay(dataset, compare, ghost)).then(
-      (r) => live && setCompareReplay(r),
-      () => {}, // the first pane already reports replay errors
-    );
-    return () => {
-      live = false;
+    const ep = compare;
+    const key = compareKey.current;
+    compareWanted.current = {
+      key,
+      episode: ep,
+      run: () => (ghost === LIVE && liveParams ? api.replayParams(dataset, ep, liveParams) : api.replay(dataset, ep, ghost)),
     };
-  }, [dataset, compare, ghost, compareBase, liveParams]);
+    pumpCompare();
+  }, [dataset, compare, ghost, liveParams, pumpCompare]);
+  const shownCompare = ghost === DEFAULT ? compareBase : compareReplay;
 
   // ---- ghost replay for a saved lock ----------------------------------------
   useEffect(() => {
@@ -924,8 +993,12 @@ export default function App() {
               speed={speed}
               onFrame={setFrame}
             >
-              <Arm geometry={geometry} poses={polPoses("default")} clip={`${clip}#policy`} playhead={playhead} material={policyDefaultMaterial} />
-              <Arm geometry={geometry} poses={polPoses("lock")} clip={`${clip}#policy`} playhead={playhead} material={policyLockMaterial} />
+              {geometry && (
+                <>
+                  <Arm geometry={geometry} poses={polPoses("default")} clip={`${clip}#policy`} playhead={playhead} material={policyDefaultMaterial} />
+                  <Arm geometry={geometry} poses={polPoses("lock")} clip={`${clip}#policy`} playhead={playhead} material={policyLockMaterial} />
+                </>
+              )}
               <SceneGeometry scene={scene} />
               <ObjectMarker track={track} playhead={playhead} />
             </Scene>
@@ -936,7 +1009,7 @@ export default function App() {
               <Scene
                 geometry={geometry}
                 realPoses={compareBase?.real_poses ?? null}
-                simPoses={compareReplay?.sim_poses ?? null}
+                simPoses={shownCompare?.sim_poses ?? null}
                 compPoses={null}
                 hotSpans={null}
                 clip={`${dataset}#${compare}`}
@@ -947,6 +1020,7 @@ export default function App() {
                 frames={compareFrames}
                 speed={speed}
                 onFrame={noop}
+                follow={{ lead: playhead, leadFps: fps }}
                 ghostMat={compareGhostMat}
               />
               <div className="pane-label">
@@ -964,7 +1038,8 @@ export default function App() {
                       </option>
                     ))}
                 </select>
-                {deg(compareReplay?.gap?.overall_deg)}
+                {deg(shownCompare?.gap?.overall_deg)}
+                {compareBusy && <span className="dot" />}
               </div>
             </div>
           )}
