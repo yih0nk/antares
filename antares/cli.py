@@ -482,10 +482,14 @@ def cmd_dr(args: argparse.Namespace) -> int:
     )
 
     def on_fit(i, result) -> None:
-        p = result.params.to_dict()
+        p = result.params
+
+        def fmt(v, spec):  # a per-joint value prints as its range over the joints
+            return f"{min(v):{spec}}-{max(v):{spec}}" if isinstance(v, tuple) else f"{v:{spec}}"
+
         print(
             f"  fit {i + 1}/{args.n_fits}: train {result.train_score:6.3f} deg  "
-            f"kp {p['kp']:.1f}  kv {p['kv']:.2f}  latency {p['latency_frames']}",
+            f"kp {fmt(p.kp, '.1f')}  kv {fmt(p.kv, '.2f')}  latency {fmt(p.latency_frames, '')}",
             flush=True,
         )
 
