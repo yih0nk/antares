@@ -418,3 +418,23 @@ def test_so100_lock_exports_the_so100_model(tmp_path):
     ep = _episodes(arm, p, n=1, T=40)[0]
     arm.apply(p)
     np.testing.assert_allclose(exported.replay(ep), arm.replay(ep), atol=1e-6)
+
+
+def test_framework_configs_refuse_non_so101_locks(tmp_path):
+    """Isaac Lab/ManiSkill/mjlab configs name the SO-101's joints; a lock on
+    another model is refused with a reason instead of mislabelled, and its
+    zip still ships the MJCF."""
+    import io
+    import zipfile
+
+    from antares.export import export_zip
+    from antares.export_targets import TargetExportError, render
+    from tests.test_export import make_lock
+
+    _arm("piper")
+    lock = dataclasses.replace(make_lock(SimParams(kp=40.0)), robot="piper", name="piper_unit")
+    with pytest.raises(TargetExportError, match="SO-101 model only"):
+        render(lock, "isaaclab")
+    names = zipfile.ZipFile(io.BytesIO(export_zip(lock, targets=["isaaclab"]))).namelist()
+    assert "piper_unit/TARGETS-NOT-EXPORTED.txt" in names
+    assert any(n.endswith(".xml") for n in names)

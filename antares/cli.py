@@ -1795,7 +1795,14 @@ def cmd_export(args: argparse.Namespace) -> int:
 
     from antares import server
     from antares.export import SCENE_FILENAME, TASK_FILENAME, export_scene, sidecar_path
-    from antares.export_targets import TARGET_LABELS, TargetExportError, dataset_fps, render, resolve_targets
+    from antares.export_targets import (
+        TARGET_LABELS,
+        TargetExportError,
+        dataset_fps,
+        render,
+        resolve_targets,
+        unsupported_reason,
+    )
     from antares.lock import RobotLock
     from antares.task import TASK_SUFFIX, TaskDistribution
 
@@ -1818,6 +1825,8 @@ def cmd_export(args: argparse.Namespace) -> int:
             return 1
     try:
         targets = resolve_targets(getattr(args, "format", "mjcf"))
+        if targets and (reason := unsupported_reason(lock)) is not None:
+            raise TargetExportError(reason)
     except TargetExportError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2

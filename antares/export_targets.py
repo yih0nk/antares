@@ -990,6 +990,23 @@ RENDERERS = {
 }
 
 
+def unsupported_reason(lock: RobotLock) -> str | None:
+    """Why the framework configs cannot be written for ``lock``, or None.
+
+    They name the SO-101's six joints, limits and USD asset, so they are
+    only written for locks on the SO-101 model; other robots export as MJCF.
+    """
+    from antares.robots import get_robot
+
+    robot = get_robot(getattr(lock, "robot", None))
+    if Path(robot.model_path).resolve() == Path(MODEL_PATH).resolve() and tuple(robot.joints) == tuple(JOINTS):
+        return None
+    return (
+        f"Isaac Lab, ManiSkill, mjlab and JSON configs are written for the SO-101 model only; "
+        f"lock {lock.name} is on {robot.name}, export it as MJCF (--format mjcf)"
+    )
+
+
 def render(
     lock: RobotLock,
     target: str,
@@ -1007,6 +1024,9 @@ def render(
         fn = RENDERERS[target]
     except KeyError:
         raise TargetExportError(f"unknown export target {target!r}; known: {', '.join(TARGETS)}") from None
+    reason = unsupported_reason(lock)
+    if reason is not None:
+        raise TargetExportError(reason)
     return fn(lock, fps=fps, dr=dr, lock_dir=lock_dir)
 
 
@@ -1066,4 +1086,5 @@ __all__ = [
     "render_maniskill",
     "render_mjlab",
     "resolve_targets",
+    "unsupported_reason",
 ]
