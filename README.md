@@ -942,6 +942,10 @@ so old locks load and replay unchanged:
   plus gear backlash. MJCF cannot express it, so it travels in the export
   sidecar.
 
+`POST /api/calibrate` takes the same two flags (`fit_gravity`, `fit_deadband`)
+and the UI's calibrate panel has a checkbox for each; a lock's parameter table
+shows the two terms when the lock carries them.
+
 Held-out RMS (deg) at an equal budget of 300 shared evaluations. Seed 0 and
 seed 1 use different train/eval splits.
 

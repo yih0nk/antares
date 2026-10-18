@@ -1271,6 +1271,8 @@ def _job_worker(job: Job, req: "CalibrateRequest") -> None:
             fit_sensor=req.fit_sensor,
             sensor_mode=req.sensor_mode,
             n_seeds=req.n_seeds,
+            fit_gravity=req.fit_gravity,
+            fit_deadband=req.fit_deadband,
         )
         result_d = result.to_dict()
         job.push({"type": "done", "lock": lock, "result": result_d})
@@ -1840,6 +1842,10 @@ class CalibrateRequest(BaseModel):
     per_joint_max_evaluations: int = Field(600, ge=1)
     fit_sensor: bool = False
     sensor_mode: Literal["sim", "kinematic"] = "sim"
+    # Optional terms: the arm's gravity load (shared stage) and the servo
+    # deadband (both stages); see run_calibration.
+    fit_gravity: bool = False
+    fit_deadband: bool = False
     # Sim model override (registry name); default: the dataset's family.
     robot: str | None = None
 
