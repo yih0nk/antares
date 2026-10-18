@@ -288,6 +288,27 @@ SHARED = SearchSpace(SPACE, per_joint=False)
 PER_JOINT = SearchSpace(PER_JOINT_SPACE, per_joint=True)
 
 
+def default_factor_names(
+    servo: bool = False, shared: Sequence[str] | None = None
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """``(shared, per_joint)`` factor names a fit searches when none are picked.
+
+    ``shared`` (a selection already made for the shared stage) replaces the
+    shared defaults, which are :data:`SERVO_SPACE` with ``servo`` and the
+    registry's otherwise. The per-joint stage searches those of them that can
+    take one value per joint (not ``gravity_scale``), plus, for the position
+    actuator, the registry's per-joint defaults (the force limit).
+    """
+    if shared is not None:
+        shared = tuple(shared)
+    else:
+        shared = tuple(SERVO_SPACE) if servo else factors.names("shared")
+    per_joint = tuple(n for n in shared if factors.get(n).per_joint_ok)
+    if not servo:
+        per_joint += tuple(n for n in factors.names("per_joint") if n not in per_joint)
+    return shared, per_joint
+
+
 def spaces_for(
     robot: Any | None = None,
     fit_factors: Sequence[str] | None = None,
@@ -312,17 +333,9 @@ def spaces_for(
         return SHARED, PER_JOINT
     joints = tuple(robot.joints) if robot is not None else JOINTS
     overrides = {**(SERVO_SPACE if servo else {}), **(dict(robot.bounds) if robot is not None else {})}
-    if fit_factors is not None:
-        shared_names = tuple(fit_factors)
-    else:
-        shared_names = tuple(SERVO_SPACE) if servo else factors.names("shared")
+    shared_names, default_per_joint = default_factor_names(servo, fit_factors)
     if per_joint_factors is None:
-        if servo:
-            per_joint_factors = shared_names
-        else:
-            per_joint_factors = tuple(n for n in shared_names if factors.get(n).per_joint_ok) + tuple(
-                n for n in factors.names("per_joint") if n not in shared_names
-            )
+        per_joint_factors = default_per_joint
     shared = SearchSpace(factors.space("shared", factors=shared_names, overrides=overrides), False, joints)
     per_joint = SearchSpace(
         factors.space("per_joint", per_joint=True, factors=tuple(per_joint_factors), overrides=overrides), True, joints
@@ -1092,6 +1105,7 @@ __all__ = [
     "describe_simulate",
     "robot_of",
     "scoring_names",
+    "default_factor_names",
     "spaces_for",
     "param_spread_of",
     "seed_summary",
