@@ -132,3 +132,19 @@ def test_lock_extras_need_their_factor_file():
         factors.unregister("link_mass")
     with pytest.raises(ValueError, match="link_mass.*--factors-file"):
         SimParams.from_dict(d)
+
+
+def test_selection_edits_apply_to_the_fits_own_defaults():
+    """+/- edits start from what the fit would search: the servo model's
+    fields with --servo, and the full per-joint stage (not just forcerange)."""
+    from antares.calibrate import SERVO_SPACE, default_factor_names
+
+    servo_shared = default_factor_names(True)[0]
+    fit = factors.parse_selection("-latency_frames", "shared", defaults=servo_shared)
+    assert fit == tuple(n for n in SERVO_SPACE if n != "latency_frames")
+    per = factors.parse_selection("+deadband", "per_joint", defaults=default_factor_names(False)[1])
+    assert per[-1] == "deadband" and {"kp", "kv", "latency_frames", "forcerange"} <= set(per)
+    per = factors.parse_selection("-forcerange", "per_joint", defaults=default_factor_names(False)[1])
+    assert "forcerange" not in per and "kp" in per
+    with pytest.raises(ValueError, match="whole arm"):
+        factors.parse_selection("+gravity_scale", "per_joint", defaults=default_factor_names(False)[1])

@@ -57,13 +57,18 @@ def _hub_file(repo_id: str, filename: str) -> Path:
         if not p.is_file():
             raise VideoUnavailable(f"{repo_id} has no {filename}")
         return p
-    from huggingface_hub import hf_hub_download
     from huggingface_hub.utils import EntryNotFoundError
 
+    from antares.hub import HubUnavailable, download
+
     try:
-        return Path(hf_hub_download(repo_id, filename, repo_type="dataset"))
+        return download(repo_id, filename)
     except EntryNotFoundError as e:
         raise VideoUnavailable(f"{repo_id} has no {filename}") from e
+    except HubUnavailable as e:
+        # Offline (or behind a portal) with no cached copy: the same outcome
+        # as a dataset without the file, so the callers' fallbacks apply.
+        raise VideoUnavailable(str(e)) from e
 
 
 def dataset_info(repo_id: str) -> dict[str, Any]:

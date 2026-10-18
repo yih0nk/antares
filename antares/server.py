@@ -117,10 +117,9 @@ def rejected(verdict: Verdict, what: str) -> HTTPException:
 
 def fetch_hub_info(repo_id: str) -> dict:
     """Only ``meta/info.json`` from the Hub (cached by huggingface_hub)."""
-    from huggingface_hub import hf_hub_download
+    from antares.hub import download
 
-    path = hf_hub_download(repo_id, "meta/info.json", repo_type="dataset")
-    return json.loads(Path(path).read_text())
+    return json.loads(download(repo_id, "meta/info.json").read_text())
 
 
 def _upload_dir_for(repo_id: str) -> Path | None:
@@ -1255,19 +1254,19 @@ def run_drift(
     lock_name = resolve_lock_ref(lock_name)
     lock = load_lock(lock_name)
     path = _drift_path(lock_name)
-    sim = simulate_for(dataset_robot(ds))
+    # The lock's own sim (its robot, sensor and unit maps), else the dataset's robot.
+    sim = lock_simulate(lock.to_dict()) or simulate_for(dataset_robot(ds))
     try:
         scan = drift_scan(
             ds.episodes,
             lock,
-            simulate=lock_simulate(lock.to_dict()),
+            simulate=sim,
             window=window,
             step=step,
             max_evaluations=max_evaluations,
             seed=seed,
             on_progress=on_progress,
             should_stop=should_stop,
-            **({"simulate": sim} if sim is not None else {}),
         )
     except ValueError as e:  # e.g. fewer episodes than one window
         raise HTTPException(status_code=400, detail=str(e))
@@ -1530,10 +1529,18 @@ def run_calibration(
     if n_seeds > 1:
         extra["n_seeds"] = int(n_seeds)
     try:
+        if factors is not None or per_joint_factors is not None:
+            # +/- edits apply to what this fit searches by default (the servo
+            # model's fields on a servo start).
+            from antares.calibrate import default_factor_names
+
+            servo_fit = start.uses_servo_model
         if factors is not None:
-            extra["fit_factors"] = _factor_names(factors, "shared")
+            extra["fit_factors"] = _factor_names(factors, "shared", default_factor_names(servo_fit)[0])
         if per_joint_factors is not None:
-            extra["per_joint_factors"] = _factor_names(per_joint_factors, "per_joint")
+            extra["per_joint_factors"] = _factor_names(
+                per_joint_factors, "per_joint", default_factor_names(servo_fit, extra.get("fit_factors"))[1]
+            )
     except (KeyError, ValueError) as e:
         raise HTTPException(status_code=400, detail=str(e).strip("'\"")) from e
     if fit_sensor:
@@ -1589,14 +1596,15 @@ def run_calibration(
     return result, lock.to_dict(), path
 
 
-def _factor_names(selection: list[str], stage: str) -> list[str] | None:
-    """Resolve a factor selection (names, or ``+x``/``-y`` edits of the
-    stage's defaults) into the list calibrate takes (``None``: defaults)."""
+def _factor_names(selection: list[str], stage: str, defaults=None) -> list[str] | None:
+    """Resolve a factor selection (names, or ``+x``/``-y`` edits of
+    ``defaults``, what the fit searches without one) into the list calibrate
+    takes (``None``: defaults)."""
     from antares import factors
 
     if not selection:
         raise ValueError(f"{stage} factors: an empty list leaves nothing to fit; omit it for the defaults")
-    out = factors.parse_selection(",".join(selection), stage)
+    out = factors.parse_selection(",".join(selection), stage, defaults=defaults)
     return None if out is None else list(out)
 def resolve_calibration(
     calibration_path, robot_id: str | None, robot_type: str = "so101_follower", *, strict: bool = True
@@ -1836,6 +1844,7 @@ def run_check(
 ):
     """Score ``lock`` (a name in LOCK_DIR, or a lock dict) on ``ds`` with the
     shared Arm and return an :class:`antares.check.CheckResult`."""
+    from antares.calibrate import describe_simulate
     from antares.check import check
 
     lock_d = lock if isinstance(lock, dict) else load_lock_dict(lock)
@@ -1846,6 +1855,8 @@ def run_check(
         arm.apply(params)
         return np.asarray(arm.real_q(ep)), np.asarray(arm.replay(ep))
 
+    # Tagged with the robot so scoring uses its joints, not the SO arms' six.
+    describe_simulate(simulate, arm)
     try:
         with arm_lock(robot), _command_map(arm, command_map_from_lock(lock_d), unit_map_from_lock(lock_d)):
             return check(

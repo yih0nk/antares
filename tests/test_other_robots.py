@@ -150,9 +150,15 @@ def test_cli_lists(capsys):
     assert "lerobot/aloha_static_coffee" in capsys.readouterr().out
 
 
-def test_cli_rejects_unknown_factor(capsys):
+def test_cli_rejects_unknown_factor(monkeypatch, capsys):
+    """The selection is passed through as typed and resolved once, by
+    run_calibration; its 400 is the CLI's usage error."""
+    from antares import cli
     from antares.cli import main
+    from antares.synthetic import make_dataset
 
+    ds = make_dataset("x/y", SimParams(), n_episodes=2, T=20)
+    monkeypatch.setattr(cli, "_load_dataset", lambda repo_id: ds)
     assert main(["calibrate", "x/y", "--factors", "+nope"]) == 2
     assert "nope" in capsys.readouterr().err
     assert main(["calibrate", "x/y", "--factors", "+sensor_gain"]) == 2
@@ -160,6 +166,8 @@ def test_cli_rejects_unknown_factor(capsys):
     everything = ",".join("-" + n for n in factors.names("shared"))
     assert main(["calibrate", "x/y", f"--factors={everything}"]) == 2
     assert "nothing to fit" in capsys.readouterr().err
+    assert main(["calibrate", "x/y", "--per-joint", "--per-joint-factors", "+nope"]) == 2
+    assert "nope" in capsys.readouterr().err
 
 
 def test_robot_profile_from_toml(tmp_path):
@@ -377,3 +385,64 @@ def test_generic_export_of_a_toml_robot_compiles_one_arm(mini_robot, tmp_path, m
     ep = _episodes(arm, p, n=1, T=40)[0]
     arm.apply(p)
     np.testing.assert_allclose(exported.replay(ep), arm.replay(ep), atol=1e-6)
+
+
+def test_check_and_drift_run_on_piper(tmp_path, monkeypatch):
+    """The drift gate scores a non-SO arm on its own joints, and a drift scan
+    runs on it (it used to pass ``simulate`` twice)."""
+    from antares import server
+    from antares.data import Dataset
+    from tests.test_export import make_lock
+
+    arm = _arm("piper")
+    p = arm.default_params(from_model=True)
+    eps = _episodes(arm, p, n=6, T=40)
+    ds = Dataset(repo_id="local/piper", robot_type="piper", fps=30.0,
+                 joint_names=tuple(arm.robot.joints), episodes=tuple(eps))
+    monkeypatch.setattr(server, "LOCK_DIR", tmp_path)
+    monkeypatch.setattr(server, "dataset_robot", lambda _ds: "piper")
+    lock = dataclasses.replace(make_lock(p), robot="piper", name="piper_unit")
+    lock.save(tmp_path / "piper_unit.lock.json")
+
+    result = server.run_check(ds, lock.to_dict(), min_episodes=1)
+    assert np.isfinite(result.score) and set(result.per_joint) <= set(arm.robot.joints)
+    scan, path = server.run_drift(ds, "piper_unit", window=3, step=3, max_evaluations=4)
+    assert path.is_file() and len(scan.windows) == 2
+
+
+def test_so100_lock_exports_the_so100_model(tmp_path):
+    """A lock on the SO-ARM100 model exports that model, not the SO-101 file,
+    and the exported arm replays like the sim it was fitted in."""
+    from antares.export import export_mjcf, load_exported_arm
+    from tests.test_export import make_lock
+
+    arm = Arm(robot="so100")
+    p = SimParams(kp=40.0, latency_frames=2)
+    lock = dataclasses.replace(make_lock(p), robot="so100")
+    out = export_mjcf(lock, tmp_path / "so100.xml")
+    exported = load_exported_arm(out)
+    assert exported.robot.name == "so100"
+    assert "shoulder_pan" not in out.read_text()
+    ep = _episodes(arm, p, n=1, T=40)[0]
+    arm.apply(p)
+    np.testing.assert_allclose(exported.replay(ep), arm.replay(ep), atol=1e-6)
+
+
+def test_framework_configs_refuse_non_so101_locks(tmp_path):
+    """Isaac Lab/ManiSkill/mjlab configs name the SO-101's joints; a lock on
+    another model is refused with a reason instead of mislabelled, and its
+    zip still ships the MJCF."""
+    import io
+    import zipfile
+
+    from antares.export import export_zip
+    from antares.export_targets import TargetExportError, render
+    from tests.test_export import make_lock
+
+    _arm("piper")
+    lock = dataclasses.replace(make_lock(SimParams(kp=40.0)), robot="piper", name="piper_unit")
+    with pytest.raises(TargetExportError, match="SO-101 model only"):
+        render(lock, "isaaclab")
+    names = zipfile.ZipFile(io.BytesIO(export_zip(lock, targets=["isaaclab"]))).namelist()
+    assert "piper_unit/TARGETS-NOT-EXPORTED.txt" in names
+    assert any(n.endswith(".xml") for n in names)
