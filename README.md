@@ -438,7 +438,7 @@ OK: lerobot/svla_so101_pickplace vs lock svla_so101_pickplace: 1.067 deg RMSE on
 Exit codes: `0` pass, `1` drifted, `2` usage error or too few episodes
 (`--min-episodes`, default 5). `--json` prints the full `CheckResult`. The
 same check is `POST /api/check` with
-`{"dataset", "lock", "threshold_deg"?, "ratio"?, "last"?}`.
+`{"dataset", "lock", "threshold_deg"?, "ratio"?, "last"?, "record"?}`.
 
 In CI, the repo is a composite GitHub Action. Point it at your dataset and
 lock and the job fails when the robot drifts:
@@ -458,6 +458,42 @@ weekly) against the public SO-101 dataset and the lock under `locks/`. The
 tests in `tests/test_check.py` prove the gate bites: real episodes pass,
 the same episodes with 3 frames of extra lag or excursions scaled to 0.9
 (a weak servo) fail.
+
+### Check history
+
+One check says whether the arm matches its sim today. A shop running arms
+for weeks wants that answer per robot over time, so every `antares check`
+(and `POST /api/check`) appends one JSON line to
+`locks/<lock>.history.jsonl` next to the lock: when it ran, the dataset,
+the verdict, the score, the limit, the worst joint and the per-joint
+errors. Insufficient-data checks are recorded too, with a null score; a
+check that could not run is itself a signal. `--no-record` skips it and
+`--history-dir` moves the file. The check's last line is the trend so far:
+
+```
+history: 7 checks since 2026-09-30, +0.021 deg/day (r² 0.41), last drifted 2026-10-10
+```
+
+`antares history <lock>` tabulates the entries (`--last N` for the newest
+N) and `antares history <lock> --json` prints what the API serves:
+`GET /api/history/{lock}` is `{"lock", "entries": [...oldest first],
+"trend": {"n", "first", "last", "slope_deg_per_day", "r2",
+"latest_verdict", "n_drifted"}}` (404 when the lock does not exist, empty
+entries and an `n` of 0 when it has no checks yet), and `GET /api/history`
+lists every lock with its trend and latest entry. The slope is a
+least-squares fit of the score in degrees against days since the first
+check, so it measures how fast the tracking error is growing *if the
+checks are comparable*; a handful of checks on different tasks or episode
+counts will scatter (low r²) and the slope then says nothing about wear.
+Compare like with like: the same task, the same `--last`, the same lock.
+
+In the Action the history is a workspace file (`record-history: "false"`
+turns it off), so commit it from the job or keep it as an artifact:
+
+```yaml
+- uses: actions/upload-artifact@v4
+  with: { name: robot-check-history, path: locks/*.history.jsonl }
+```
 
 ### What changed? `--explain`
 
@@ -806,6 +842,7 @@ back in raw units), `export` (in the sidecar) and the drift and DR refits
 | `antares/dr.py` | Domain-randomization ranges derived from refits (`locks/*.dr.json`) |
 
 | `antares/check.py` | Pre-deploy drift gate (`antares check`, `/api/check`) |
+| `antares/history.py` | Check history per lock across sessions (`locks/*.history.jsonl`, `antares history`, `/api/history`) |
 | `antares/diagnose.py` | Names the parameter change behind a drift (`check --explain`) |
 | `antares/synth.py` | Synthetic recordings of an arm with known wear (`antares synth`) |
 | `action.yml` | Composite GitHub Action running the gate in CI |
