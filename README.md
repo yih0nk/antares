@@ -21,11 +21,11 @@ or `results/`; the linked section says how it was measured.
 | Question | Answer | Section |
 |---|---|---|
 | How far is the stock sim from the SO-101, and how close does one fitted parameter set get? | 6.01° → **0.74°** held-out (`locks/svla_so101_pickplace.lock.json`) | [Per-joint calibration](#per-joint-calibration) |
-| Same for the SO-100 | 2.74° → **0.79°** (`locks/svla_so100_pickplace.lock.json`) | same |
-| One parameter set per joint instead of one shared? | **0.66°** (SO-101) and **0.54°** (SO-100) | same |
+| Same for the SO-100 | 2.61° → **0.77°** (`locks/svla_so100_pickplace.lock.json`; this dataset is recorded in degrees, see [Per-joint calibration](#per-joint-calibration)) | same |
+| One parameter set per joint instead of one shared? | **0.66°** (SO-101) and **0.47°** (SO-100) | same |
 | Does it work on arms other than the two demos? | 58 public SO-100/101 arms from the Hub, all improved; median 3.45° → 1.09°, the median arm closing **63%** of its gap (`locks/fleet/fleet.json`) | [Fleet scan](#fleet-scan) |
 | Is a lock specific to its arm? | On a 6-arm cross matrix a robot scores **1.00°** on its own lock, 1.54° on another arm's, 4.60° on the defaults | [Fleet scan](#fleet-scan), [Is a lock specific to its arm?](#is-a-lock-specific-to-its-arm) |
-| Where are the cameras? | Pose from the video by silhouette matching; held-out IoU **0.83** (SO-101 `up`), 0.72 (`side`), 0.60 (SO-100 `top`) | [Cameras from the logs](#cameras-from-the-logs) |
+| Where are the cameras? | Pose from the video by silhouette matching; held-out IoU **0.83** (SO-101 `up`), 0.72 (`side`), 0.64 (SO-100 `top`) | [Cameras from the logs](#cameras-from-the-logs) |
 | Where is the table? | **−22 mm** below the base, tilt 0.6°, read from where the gripper closed (SO-101) | [Scene from the logs](#scene-from-the-logs) |
 | Where is the object? | Tracked through 50/50 episodes; vision and forward kinematics agree to **2.1 cm** median at the grasp (SO-101) | [Objects from the video and the residual](#objects-from-the-video-and-the-residual) |
 | Does the calibration change what a policy looks like? | A policy learned from the logs, open loop: the stock and the calibrated sim disagree by **5.8°** RMS on SO-101, as much as the stock sim's own replay error. Closed loop: the stock sim closes the gripper **2.8 s early** (84 frames) on average; the calibrated sim within a frame of the real close | [A learned policy, judged in both sims](#a-learned-policy-judged-in-both-sims) |
@@ -115,6 +115,7 @@ Bring your own dataset, in short (details in [Bring your own dataset](#bring-you
 * **Parameter values are fits, not measurements.** `kp`, `kv`, damping, armature and friction trade off at the same tracking error (seeds on one arm span 25× in `kp`); only latency and the sensor map are pinned by pick-and-place logs. `--seeds 3` records which parameters the seeds agree on, and everything downstream reads only those as physical.
 * **The leftover elbow error is step-shaped**, not a slope in gravity load, so the six servo parameters do not express it; the contact detector sees that pose dependence, not contact with a light object.
 * **Payload mass is below the noise.** The residual resolves 13 g per encoder step with a noise floor of 40–60 g; a 30 g object comes out at 22 g with a 69 g IQR, so the export uses an assumed 30 g and says so.
+* **Some SO-100 numbers predate its degrees fix.** The SO-100 demo dataset is recorded in degrees and was first replayed as LeRobot's normalized units. Its locks, the per-joint and sensor tables, the two-arm `antares cross` numbers, and the camera, scene, object and payload fits were redone on `so101_deg` (2026-10-18). Still on the old reading: the robot-specificity study and the seed spread quoted from it (`antares specificity` builds one simulator for every dataset, so it cannot yet replay one in degrees), the gravity/deadband and STS3215 servo-model tables, drift over a session, contact detection, lag compensation, domain randomization, the video-delay table, both policy experiments, and the fleet scan's copy of this dataset. Their SO-100 stock baseline is 2.74° rather than 2.61°.
 * **Camera fits are loose in depth.** Silhouettes pin the viewing direction but trade distance against field of view; the SO-101 `side` camera's rays meet 2.6 cm below the object plane. The table height assumes a 15 mm object half-height and a horizontal plane.
 
 ## Reference map
@@ -237,14 +238,21 @@ gripper excluded from the overall score. The per-joint locks are
 `locks/*_perjoint.lock.json`; their shared stage reproduces the shipped
 shared locks exactly (all four refit with the `kp` floor at 10).
 
+The SO-100 dataset (`lerobot/svla_so100_pickplace`) stores its body joints
+in degrees (they span -90..124, outside LeRobot's -100..100 normalized
+range), so the catalog replays it on `so101_deg`. Its locks, camera,
+scene and object fits were refit on that model on 2026-10-18; read as
+normalized units the same data gave 2.744 -> 0.787 (shared) and 0.538
+(per-joint).
+
 | | SO-101 default | SO-101 shared | SO-101 per-joint | SO-100 default | SO-100 shared | SO-100 per-joint |
 |---|---|---|---|---|---|---|
-| **overall** | 6.007 | 0.736 | **0.656** | 2.744 | 0.787 | **0.538** |
-| shoulder_pan | 8.049 | 0.522 | 0.446 | 3.224 | 0.356 | 0.336 |
-| shoulder_lift | 6.832 | 0.813 | 0.736 | 3.540 | 0.840 | 0.662 |
-| elbow_flex | 5.355 | 1.121 | **1.061** | 2.516 | 1.329 | **0.703** |
-| wrist_flex | 3.797 | 0.548 | 0.371 | 1.955 | 0.436 | 0.361 |
-| wrist_roll | 5.085 | 0.463 | 0.383 | 2.136 | 0.557 | 0.522 |
+| **overall** | 6.007 | 0.736 | **0.656** | 2.614 | 0.768 | **0.475** |
+| shoulder_pan | 8.049 | 0.522 | 0.446 | 2.930 | 0.492 | 0.373 |
+| shoulder_lift | 6.832 | 0.813 | 0.736 | 3.541 | 0.936 | 0.523 |
+| elbow_flex | 5.355 | 1.121 | **1.061** | 2.599 | 1.226 | **0.677** |
+| wrist_flex | 3.797 | 0.548 | 0.371 | 2.060 | 0.418 | 0.378 |
+| wrist_roll | 5.085 | 0.463 | 0.383 | 1.430 | 0.395 | 0.334 |
 | evaluations | – | 200 | 200 + 1200 | – | 150 | 150 + 1200 |
 
 With the lower `kp` floor the shared fit already reaches most of what the
@@ -271,8 +279,8 @@ for a lock worth keeping, try both step sizes with a 1200 budget.
 
 The per-joint locks also transfer across the two arms better than the
 shared ones (`antares cross`, held-out splits): the SO-100 per-joint lock
-scores 1.069° on SO-101 against 1.269° for the SO-100 shared lock, and the
-SO-101 per-joint lock 0.812° on SO-100 against 0.964°.
+scores 1.679° on SO-101 against 1.826° for the SO-100 shared lock, and the
+SO-101 per-joint lock 0.765° on SO-100 against 0.919°.
 
 
 Caveat: the gripper is not scored (object contacts are not logged), so its
@@ -380,7 +388,7 @@ rounds of 150 evaluations, with the wider `kp` range), held-out RMSE in degrees.
 "Dynamics only" is a fresh shared fit given the same budget under the
 identity map (300 evaluations plus the map fits' simulations), which is
 why it beats the committed shared locks (0.736 SO-101 at 200 evaluations,
-0.787 SO-100 at 150). The `sim` columns are the committed
+0.768 SO-100 at 150). The `sim` columns are the committed
 `locks/svla_so101_pickplace_sensor_sim.lock.json` and
 `locks/svla_so100_pickplace_sensor_sim.lock.json` (`_sim` is the sensor
 mode, not a simulated robot), which a test replays against their stored
@@ -388,19 +396,21 @@ scores:
 
 | | SO-101 dynamics only | SO-101 `sim` | SO-101 `kinematic` | SO-100 dynamics only | SO-100 `sim` | SO-100 `kinematic` |
 |---|---|---|---|---|---|---|
-| **overall** | 0.708 | **0.624** | 0.633 | 0.745 | **0.466** | 0.480 |
-| shoulder_pan | 0.407 | 0.373 | 0.368 | 0.326 | 0.317 | 0.311 |
-| shoulder_lift | 0.801 | 0.651 | 0.665 | 0.854 | 0.462 | 0.504 |
-| elbow_flex | 1.145 | 1.027 | 1.049 | 1.248 | 0.683 | 0.701 |
-| wrist_flex | 0.485 | 0.425 | 0.420 | 0.416 | 0.312 | 0.308 |
-| wrist_roll | 0.394 | 0.385 | 0.383 | 0.458 | 0.458 | 0.465 |
+| **overall** | 0.708 | **0.624** | 0.633 | 0.532 | **0.444** | 0.453 |
+| shoulder_pan | 0.407 | 0.373 | 0.368 | 0.426 | 0.270 | 0.354 |
+| shoulder_lift | 0.801 | 0.651 | 0.665 | 0.529 | 0.489 | 0.475 |
+| elbow_flex | 1.145 | 1.027 | 1.049 | 0.809 | 0.702 | 0.663 |
+| wrist_flex | 0.485 | 0.425 | 0.420 | 0.408 | 0.315 | 0.358 |
+| wrist_roll | 0.394 | 0.385 | 0.383 | 0.367 | 0.285 | 0.325 |
 
 Both real arms carry a real mismatch, mostly on the elbow (`sim` bias
-+1.6 units on SO-101 and +2.2 on SO-100, gain about 0.98) and, on the
-SO-100, the shoulder lift (+1.1 units, gain 1.010). The fitted map cuts
-the SO-100's held-out error by 37% and the SO-101's by 12%. `kinematic`
-puts more into the gravity-loaded joints (an SO-101 elbow bias of +3.5),
-as its sag caveat predicts, and is never better overall.
++1.6 units on SO-101 and +2.1° on SO-100, gain about 0.98) and, on the
+SO-100, the shoulder lift (+1.0°, gain 1.009). The fitted map cuts the
+SO-100's held-out error by 17% and the SO-101's by 12%. (Read as
+normalized units the SO-100 map cut 37%: part of what it absorbed was the
+wrong unit map.) `kinematic` puts more into the gravity-loaded joints (an
+SO-101 elbow bias of +3.5), as its sag caveat predicts, and is never
+better overall.
 
 Locks fitted this way carry a `command_map`. Replay, the viewer, `cross`,
 `check`, residuals and events, `compensate` (whose `--out` commands come
@@ -1501,7 +1511,7 @@ The demo datasets, 40 fit frames / 12 held-out frames each:
 |---|---|---|---|---|
 | svla_so101_pickplace | `up` | 0.82 | 0.83 | clean; residual is hull slack and the real gripper reaching lower than the sim's |
 | svla_so101_pickplace | `side` | 0.58 | 0.72 | the arm leaves the top of the frame in many fit frames (per-frame IoU down to 0.08) |
-| svla_so100_pickplace | `top` | 0.63 | 0.60 | black servo and gripper parts vanish against the black table, so the real mask is the orange and white parts only |
+| svla_so100_pickplace | `top` | 0.69 | 0.64 | black servo and gripper parts vanish against the black table, so the real mask is the orange and white parts only |
 
 Fits are saved as `locks/<lock>.camera.json` (frames used, per-frame IoUs)
 and a compact copy in the lock's `cameras` field, which `antares export`
@@ -1592,13 +1602,12 @@ The demo datasets, with their committed locks and cameras:
 | dataset | table z | on-table grasps | lowest fingertip ever | per-episode min spread | tilt | workspace (cm) | picks / places |
 |---|---|---|---|---|---|---|---|
 | svla_so101_pickplace | -22.1 mm | 51 of 68 at -7.1 mm (p10 -8.7, median -6.6, p90 +66.1) | -23.7 mm | 16 mm | 0.6° | 24 x 33 x 12 | 68 / 68 |
-| svla_so100_pickplace | -10.6 mm | 39 of 89 at +4.4 mm (p10 +2.1, median +74.3, p90 +95.9) | -5.7 mm | 17 mm | 1.4° | 27 x 31 x 14 | 89 / 89 |
+| svla_so100_pickplace | -11.9 mm | 39 of 89 at +3.1 mm (p10 +0.9, median +67.0, p90 +87.7) | -5.8 mm | 14 mm | 1.3° | 25 x 29 x 13 | 89 / 89 |
 
 Heights are in the base frame (z = 0 at the base body origin; the base
 mesh's underside is at -2.4 mm). Both fits land where a table under the
 base should be. The SO-100 grasps are bimodal: half close at the table
-and half 7-9 cm up, at the container the objects are dropped into (its
-releases sit at +53 to +88 mm). The SO-101's lowest-ever fingertip
+and half 6-9 cm up, at the container the objects are dropped into. The SO-101's lowest-ever fingertip
 (-23.7 mm, one episode) is 1.6 mm below its table estimate, so the
 15 mm half-height is on the small side there.
 
@@ -1608,7 +1617,7 @@ Table plane against the backdrop image, per camera:
 |---|---|---|---|---|---|
 | svla_so101_pickplace | `up` | 0.85 | 0.64 | 0.57 | the far edge of the projected rectangle coincides with the real table edge; the colour region also takes in the near-white wall |
 | svla_so101_pickplace | `side` | 0.96 | 0.55 | 0.54 | same; the real table is larger than the workspace rectangle, which caps the coverage |
-| svla_so100_pickplace | `top` | 0.44 | 0.84 | 0.40 | the lighting gradient splits the black table into two colour clusters, so the region is the evenly lit half |
+| svla_so100_pickplace | `top` | 0.42 | 0.84 | 0.39 | the lighting gradient splits the black table into two colour clusters, so the region is the evenly lit half |
 
 The numbers are what they are: a projected rectangle sized to the
 workspace against a colour blob. The composite below is the better check.
@@ -1693,15 +1702,20 @@ FK fingertip at the grasp:
 | dataset | camera | object | footprint (IQR) | start poses: std, range (cm) | end poses: std (cm) | vision vs FK: median, IQR, worst | fixed offset (vision - FK) | spread about it |
 |---|---|---|---|---|---|---|---|---|
 | svla_so101_pickplace | `up` | a red 2x4-stud brick on a white table, carried into a shallow orange-rimmed tray | 3.9 x 1.8 cm (0.4 / 0.3) | 8.4 x 11.4; x 1..25, y -16..14 | 0.7 x 1.7 at (2.0, -15.9) | 2.1 / 0.7 / 3.4 cm | (+0.7, +0.2) cm | 1.8 cm |
-| svla_so100_pickplace | `top` | a red cube on a black table, dropped into a white box | 3.9 x 3.5 cm (0.1 / 0.2) | 3.8 x 8.5; x 20..33, y -9..15 | 0.5 x 0.4 at (7.3, -11.9) | 1.4 / 0.7 / 2.5 cm | (+1.1, -0.3) cm | 0.8 cm |
+| svla_so100_pickplace | `top` | a red cube on a black table, dropped into a white box | 3.5 x 3.2 cm (0.2 / 0.3) | 3.4 x 7.7; x 20..32, y -10..12 | 0.5 x 0.4 at (5.7, -12.6) | 2.2 / 0.5 / 3.3 cm | (+0.5, -2.0) cm | 0.8 cm |
 
 50 of 50 episodes tracked on each. The vision start poses cover the same
 area as `antares task`'s FK picks (SO-101: x 3..24, y -14..13; SO-100: x
-19..33, y -8..14) and the two agree to about 2 cm, of which roughly 1 cm
-is a fixed offset along +x: the camera puts the object a little further
-out than the kinematics put the jaws (the blob centroid takes in the
-object's front face from an oblique camera, and the camera fit is loose
-along its optical axis). The end poses are tight (the container), and sit
+19..33, y -8..14) and the two agree to about 2 cm, most of it a fixed
+offset: on the SO-101 roughly 1 cm along +x, where the camera puts the
+object a little further out than the kinematics put the jaws (the blob
+centroid takes in the object's front face from an oblique camera, and the
+camera fit is loose along its optical axis); on the SO-100, since its
+refit in degrees, 2 cm along -y with a tighter spread (0.8 cm) around it.
+Read as normalized units the SO-100 agreed to 1.4 cm, so the better joint
+angles moved the camera (held-out IoU 0.60 -> 0.64) and left a sideways
+offset that a top-down camera should not have; it is not explained yet.
+The end poses are tight (the container), and sit
 7.6-7.9 cm from the FK release point: the object is let go 7-8 cm up and
 drops, so that number is the drop height, not an error. A 2x4 brick is
 3.2 x 1.6 cm and the SO-100 cube looks like 3.5 cm: the oblique `up`
@@ -1732,16 +1746,16 @@ the motion term. Windows of 0.6 s either side of each event, medians,
 | dataset | lock kp | shoulder: extra deflection (IQR), motion term | elbow: extra deflection (IQR), motion term | mass per encoder step | noise floor | combined mass (IQR) | verdict |
 |---|---|---|---|---|---|---|---|
 | svla_so101_pickplace | 10.5 | +0.69° (0.58), +0.38° | -0.27° (0.89), -0.18° | 13 g | 41-58 g | 22 g (69) over 50 picks | below the noise |
-| svla_so100_pickplace | 1427 | +0.63° (0.52), +0.47° | +0.22° (1.10), +0.02° | 1.5 kg | 4-7 kg | 5.8 kg (6.9) over 49 picks | below the noise |
+| svla_so100_pickplace | 70.9 | +0.69° (0.46), +0.31° | -0.06° (0.61), -0.13° | 58-74 g | 196-199 g | 206 g (315) over 49 picks | below the noise |
 
 So: no. The residual does step across a pick, by about 0.6-0.7° on the
 shoulder, repeatably (IQR 0.5°), but the same step shows on an arm whose
-lock says `kp = 1427` and on one whose lock says `kp = 10.5`, so it is not
+lock says `kp = 71` and on one whose lock says `kp = 10.5`, so it is not
 a stiffness-limited sag; the elbow's step has the opposite sign on the
 SO-101; and the per-episode spread is 1.3-5x the median. The method's
 resolution with the SO-101 lock is 13 g per encoder step and its noise
 floor 40-60 g, both above a 30 g printed object; with the SO-100 lock the
-resolution is 1.5 kg. The deflection is reported, the mass is marked as
+resolution is 58-74 g and the noise floor about 200 g. The deflection is reported, the mass is marked as
 not measured, and the export falls back to the assumed 30 g.
 Assumptions, stated: quasi-static windows; torque = `kp (cmd - q)` with
 the lock's `kp` (the mass scales 1:1 with it, and pick-and-place logs do

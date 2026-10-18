@@ -37,6 +37,13 @@ class CatalogEntry:
 
 CATALOG: tuple[CatalogEntry, ...] = (
     CatalogEntry(
+        "lerobot/svla_so100_pickplace", "so101_deg", "so100",
+        30, 50, 19631, "degrees (body joints); gripper 0..100",
+        "Body joints span -90..124, outside LeRobot's -100..100 normalized range, so the recording is in "
+        "degrees. Read as degrees the stock model's held-out gap is 2.61 deg (2.74 read as normalized).",
+        "calibrated",
+    ),
+    CatalogEntry(
         "TrossenRoboticsCommunity/trossen_ai_stationary_block_transfer", "trossen_ai", "trossen_ai_stationary",
         30, 53, 31584, "radians; gripper carriage in metres",
         "Two WidowX AI arms, leader-follower teleop. Columns left_joint_0..6, right_joint_0..6. "
