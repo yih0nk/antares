@@ -37,6 +37,7 @@ for r in robots:
         print(f"FAIL {ds_id}: {type(exc).__name__}: {exc}", flush=True)
 
 arrays["meta"] = np.array([json.dumps(m) for m in meta])
+OUT.parent.mkdir(parents=True, exist_ok=True)  # .policy-data/ is gitignored and may not exist yet
 np.savez_compressed(OUT, **arrays)
 print(f"\n{OUT}  {OUT.stat().st_size/1e6:.2f} MB")
 print(f"loaded {len(meta)}/{len(robots)} datasets, {sum(len(m['episode_indices']) for m in meta)} episodes")

@@ -27,6 +27,35 @@ def test_closed_loop_plant_matches_open_loop_rollout(lat):
     np.testing.assert_allclose(q_loop, q_open, atol=1e-12)
 
 
+def test_latency_zero_lock_is_evaluated_on_the_plant_it_runs_on():
+    """A latency-0 lock behaves like latency 1 in the closed loop; the ILC
+    ceiling and the own-latency shift are built for that same plant."""
+    ref = _ref()
+    zero = pt.ArmSpec("z", pt.SimParams(kp=90.0, kv=1.5, latency_frames=0))
+    one = pt.ArmSpec("o", pt.SimParams(kp=90.0, kv=1.5, latency_frames=1))
+    plant = pt.Plant()
+    plant.set(zero)
+    q0 = plant.track(pt.raw_controller, ref)
+    plant.set(one)
+    q1 = plant.track(pt.raw_controller, ref)
+    np.testing.assert_allclose(q0, q1, atol=1e-12)
+    assert list(pt.effective_latency(zero.params)) == [1] * 6
+    ilc_row = pt._eval_one(("ilc_own_model", zero, ref, {"type": "ilc"}))
+    raw_row = pt._eval_one(("raw", zero, ref, {"type": "raw"}))
+    assert ilc_row["rms_deg"] < 0.2 * raw_row["rms_deg"]  # a real ceiling, not 60x worse than in rollout
+    assert ilc_row["unstable"] is False
+
+
+def test_deadband_lock_runs_the_same_physics_as_rollout():
+    ref = _ref()
+    spec = pt.ArmSpec("d", pt.SimParams(kp=90.0, kv=1.5, latency_frames=2, deadband=0.01))
+    plant = pt.Plant()
+    plant.set(spec)
+    q_loop = plant.track(pt.raw_controller, ref)
+    q_open = plant.arm.rollout(ref.q, ref.q[0], ref.fps)
+    np.testing.assert_allclose(q_loop, q_open, atol=1e-12)
+
+
 def test_payload_is_applied_and_removed():
     plant = pt.Plant()
     base = pt.ArmSpec("a", pt.SimParams(latency_frames=2))
@@ -66,3 +95,14 @@ def test_end_to_end_on_synthetic_refs(tmp_path):
     s = json.loads((out / "summary.json").read_text())["summary"]
     assert {"raw", "shift_own_latency", "ilc_own_model", "learned_lock", "learned_fleet"} <= set(s["nominal"])
     assert s["nominal"]["ilc_own_model"]["mean_deg"] < s["nominal"]["raw"]["mean_deg"]
+    cached = json.loads((out / "train_lock_s0.json").read_text())
+    assert cached["settings"]["generations"] == 2 and cached["settings"]["batch_size"] == 2
+
+    # a cached training is reused only with the same settings: a different
+    # generation count retrains instead of relabelling the old controller
+    rc = pt.main(
+        ["--refs", str(refs), "--out", str(out), "--conditions", "lock", "--n-test", "2",
+         "--generations", "3", "--batch", "2", "--train-seeds", "1", "--workers", "1"]
+    )
+    assert rc == 0
+    assert json.loads((out / "train_lock_s0.json").read_text())["settings"]["generations"] == 3

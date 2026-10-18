@@ -1855,8 +1855,16 @@ RMS tracking error in degrees on the 10 unseen arms (gripper excluded,
 
 All of it is sim-to-sim, with test arms from the same model class as the
 training arms. Rerun: `python experiments/dump_refs.py` where the Hub is
-reachable, then `python experiments/policy_transfer.py --refs
-.policy-data/refs.npz` (about 80 minutes on 4 cores). The summary is
+reachable, then
+
+```sh
+python experiments/policy_transfer.py --refs .policy-data/refs.npz --generations 150 --batch 32 --out results/policy_transfer
+cp results/policy_transfer/summary.json experiments/results/policy_transfer_summary.json
+```
+
+(about 80 minutes on 4 cores; the script's defaults are a shorter 120
+generations with batches of 24, and a cached `train_*.json` is reused only
+when it was trained with the same settings). The committed summary is
 `experiments/results/policy_transfer_summary.json`.
 
 ## Scene from the logs

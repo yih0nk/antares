@@ -35,6 +35,7 @@ import cma
 import mujoco
 import numpy as np
 
+from antares.closedloop import FrameStepper
 from antares.compensate import ilc
 from antares.dr import DRRanges, sample, uniform_ranges
 from antares.sim import GRIPPER_INDEX, JOINTS, Arm, SimParams
@@ -94,7 +95,11 @@ def load_refs(path: Path, max_len: int) -> dict[str, list[Ref]]:
     """Measured trajectories per arm, converted with the default unit map (fleet locks carry none)."""
     z = np.load(path, allow_pickle=False)
     raw = z["meta"]
-    meta = json.loads(str(raw)) if raw.ndim == 0 else [json.loads(str(m)) for m in raw]
+    if raw.ndim == 0:  # one JSON string holding the whole list, or a single entry
+        loaded = json.loads(str(raw))
+        meta = loaded if isinstance(loaded, list) else [loaded]
+    else:
+        meta = [json.loads(str(m)) for m in raw]
     unit_map = Arm().unit_map
     out: dict[str, list[Ref]] = {}
     for m in meta:
@@ -134,30 +139,26 @@ class Plant:
         self.arm.apply(spec.params)  # also recomputes the mass-derived constants
 
     def track(self, controller, ref: Ref) -> np.ndarray:
-        """Run ``controller`` against ``ref`` from its initial state; return sim q (T, 6)."""
-        arm, m, d = self.arm, self.arm.model, self.arm.data
+        """Run ``controller`` against ``ref`` from its initial state; return sim q (T, 6).
+
+        Stepping (substeps, clipping, deadband) is :class:`FrameStepper`, the
+        same physics as :meth:`Arm.rollout`; only the latency buffer lives here.
+        """
+        arm = self.arm
         lo, hi = arm.ctrl_range
-        lat = arm.params.per_joint("latency_frames")
+        lat = effective_latency(arm.params)
         q_ref = ref.q
         T = len(q_ref)
-        frame_dt = 1.0 / ref.fps
-        n_sub = max(1, int(round(frame_dt / 0.005)))
-        old_dt = m.opt.timestep
-        m.opt.timestep = frame_dt / n_sub
         # The window the controller reads runs past the end: hold the last frame.
         q_pad = np.concatenate([q_ref, np.repeat(q_ref[-1:], H, axis=0)])
         sent = np.repeat(q_ref[:1], T + K, axis=0)  # sent[K + t] = command sent at t
         q = np.empty((T, 6))
-        try:
-            mujoco.mj_resetData(m, d)
-            d.qpos[:] = q_ref[0]
-            d.qvel[:] = 0.0
-            mujoco.mj_forward(m, d)
-            q[0] = d.qpos
+        cols = np.arange(6)
+        with FrameStepper(arm, q_ref[0], ref.fps) as stepper:
+            q[0] = stepper.q
             prev = q_ref[0]
-            cols = np.arange(6)
             for t in range(T):
-                cur = d.qpos.copy()
+                cur = q[t]
                 u = controller(t, cur, cur - prev, q_pad[t : t + H + 1], sent[t : t + K][::-1])
                 sent[K + t] = np.clip(u, lo, hi)
                 if t == T - 1:
@@ -165,13 +166,16 @@ class Plant:
                 # Same convention as Arm.rollout: the step into frame t+1 applies the
                 # command sent at t+1-lat. A command computed from the state at t
                 # can act at the earliest on that step, so latency 0 behaves like 1.
-                d.ctrl[:] = sent[K + np.maximum(t + 1 - np.maximum(lat, 1), 0), cols]
-                mujoco.mj_step(m, d, n_sub)
+                q[t + 1] = stepper.step(sent[K + np.maximum(t + 1 - lat, 0), cols])
                 prev = cur
-                q[t + 1] = d.qpos
-        finally:
-            m.opt.timestep = old_dt
         return q
+
+
+def effective_latency(params: SimParams) -> np.ndarray:
+    """Per-joint command latency the closed loop can realize: a command computed
+    from frame t acts on the step into t+1 at the earliest, so a lock's latency
+    0 behaves like 1. The ILC ceiling and the own-latency shift use the same."""
+    return np.maximum(params.per_joint("latency_frames").astype(int), 1)
 
 
 def rms_deg(q_sim: np.ndarray, q_ref: np.ndarray) -> float:
@@ -261,17 +265,25 @@ def shift_controller(lat: int):
 
 
 def make_sampler(kind: str, train: list[ArmSpec]):
-    """Return ``draw(rng) -> ArmSpec`` for one training condition."""
-    source = next(a for a in train if a.name == SOURCE_LOCK)
+    """Return ``draw(rng) -> ArmSpec`` for one training condition.
+
+    ``lock`` and ``lock_dr`` share one source arm, the nominal of the
+    committed ``antares dr`` ranges (the SO-101 lock those ranges were
+    derived around), so the only difference between the two conditions is
+    the randomization.
+    """
     if kind == "default":
         return lambda rng: ArmSpec("default", SimParams())
     if kind == "default_dr30":
         ranges = uniform_ranges(SimParams(), 0.3, name="default+-30%")
         return lambda rng: ArmSpec("default_dr30", sample(ranges, rng, 1)[0])
-    if kind == "lock":
-        return lambda rng: source
-    if kind == "lock_dr":
+    if kind in ("lock", "lock_dr"):
+        if not DR_PATH.is_file():
+            raise FileNotFoundError(f"{DR_PATH} is missing: run `antares dr` on {SOURCE_LOCK} first")
         ranges = DRRanges.load(DR_PATH)
+        if kind == "lock":
+            source = ArmSpec(SOURCE_LOCK, ranges.nominal)
+            return lambda rng: source
         return lambda rng: ArmSpec("lock_dr", sample(ranges, rng, 1)[0])
     if kind in ("fleet", "fleet_cond"):
         return lambda rng: train[int(rng.integers(len(train)))]
@@ -328,12 +340,9 @@ def train(
     n_cond = 2 if kind == "fleet_cond" else 0
     draw = make_sampler(kind, train_arms)
     rng = np.random.default_rng(seed)
-    es = cma.CMAEvolutionStrategy(
-        Linear.init(n_cond), 0.1, {"seed": seed + 1, "verbose": -9, "maxiter": generations}
-    )
+    es = cma.CMAEvolutionStrategy(Linear.init(n_cond), 0.1, {"seed": seed + 1, "verbose": -9})
     history = []
     t0 = time.time()
-    best = (math.inf, Linear.init(n_cond))
     for g in range(generations):
         # One batch per generation shared by the whole population (common random numbers).
         batch = []
@@ -342,14 +351,38 @@ def train(
             ref = crop(train_refs[int(rng.integers(len(train_refs)))], rng, crop_len)
             batch.append((spec, ref, lock_features(spec.params) if n_cond else None))
         xs = es.ask()
-        fs = pool.map(_score, [(np.asarray(x), batch, n_cond) for x in xs])
+        # The distribution mean the generation was drawn from is scored in the
+        # same parallel pass as the population (no serial rollout while the
+        # workers sit idle).
+        mean_theta = np.asarray(es.mean)
+        fs_all = pool.map(_score, [(np.asarray(x), batch, n_cond) for x in xs] + [(mean_theta, batch, n_cond)])
+        fs, mean_f = fs_all[:-1], fs_all[-1]
         es.tell(xs, fs)
-        mean_f = _score((es.mean, batch, n_cond))
         history.append({"gen": g, "best": float(min(fs)), "mean_theta": mean_f})
         if g % 10 == 0 or g == generations - 1:
             log(f"[{kind}] gen {g:3d}  best {min(fs):.3f}  mean {mean_f:.3f}  ({time.time() - t0:.0f}s)")
     theta = np.asarray(es.mean)
-    return {"kind": kind, "theta": theta.tolist(), "n_cond": n_cond, "history": history, "elapsed_s": time.time() - t0}
+    return {
+        "kind": kind,
+        "theta": theta.tolist(),
+        "n_cond": n_cond,
+        "history": history,
+        "elapsed_s": time.time() - t0,
+        "settings": train_settings(train_arms, train_refs, generations, batch_size, seed, crop_len),
+    }
+
+
+def train_settings(train_arms, train_refs, generations, batch_size, seed, crop_len) -> dict:
+    """What a cached training result must match to be reused."""
+    return {
+        "generations": int(generations),
+        "batch_size": int(batch_size),
+        "seed": int(seed),
+        "crop_len": int(crop_len),
+        "train_arms": sorted(a.name for a in train_arms),
+        "n_train_refs": len(train_refs),
+        "max_len": max(len(r.q) for r in train_refs) if train_refs else 0,
+    }
 
 
 # --------------------------------------------------------------------------
@@ -364,7 +397,7 @@ def _eval_one(args) -> dict:
     if how["type"] == "raw":
         ctrl = raw_controller
     elif how["type"] == "shift":
-        ctrl = shift_controller(how["lat"] if how["lat"] is not None else spec.params.per_joint("latency_frames")[0])
+        ctrl = shift_controller(how["lat"] if how["lat"] is not None else int(effective_latency(spec.params)[0]))
     elif how["type"] == "linear":
         theta = np.asarray(how["theta"])
         cond = lock_features(spec.params) if how["n_cond"] else None
@@ -372,20 +405,31 @@ def _eval_one(args) -> dict:
     elif how["type"] == "ilc":
         # Open-loop upper bound: commands optimized in the test arm's lock (which
         # does not know about the payload), then sent to the arm as it really is.
-        plant.set(ArmSpec(spec.name, spec.params))
-        cmds = ilc(plant.arm, ref.q, ref.q[0], ref.fps).ctrl
+        # The lock is given the latency the closed loop realizes (a latency-0
+        # lock behaves like 1 here), so the ceiling is measured on the same plant.
+        lat = effective_latency(spec.params)
+        shared = int(lat[0]) if len(set(lat.tolist())) == 1 else tuple(int(v) for v in lat)
+        plant.set(ArmSpec(spec.name, spec.params.replace(latency_frames=shared)))
+        cmds = ilc(plant.arm, ref.q, ref.q[0], ref.fps, latency=int(lat.max())).ctrl
         plant.set(spec)
         ctrl = lambda t, q, v, window, past: cmds[t]  # noqa: E731
     else:
         raise ValueError(how)
     q = plant.track(ctrl, ref)
-    per_joint = np.sqrt(np.mean(np.degrees(q - ref.q) ** 2, axis=0))
+    rms = rms_deg(q, ref.q)
+    unstable = not math.isfinite(rms)
+    if unstable:  # a blown-up rollout scores the same penalty as in training, never NaN
+        rms = 1e3
+        per_joint = np.full(6, 1e3)
+    else:
+        per_joint = np.sqrt(np.mean(np.degrees(q - ref.q) ** 2, axis=0))
     return {
         "controller": name,
         "arm": spec.name,
         "payload_kg": spec.payload_kg,
         "ref": f"{ref.arm}/{ref.episode}",
-        "rms_deg": rms_deg(q, ref.q),
+        "rms_deg": rms,
+        "unstable": unstable,
         "per_joint_deg": {JOINTS[i]: float(per_joint[i]) for i in SCORED},
     }
 
@@ -459,10 +503,14 @@ def main(argv=None) -> int:
             for s in range(args.train_seeds):
                 key = f"{kind}_s{s}"
                 path = args.out / f"train_{key}.json"
+                wanted = train_settings(train_arms, train_refs, args.generations, args.batch, args.seed + 1000 * s, 150)
                 if path.exists():
-                    trained[key] = json.loads(path.read_text())
-                    print(f"[{key}] loaded {path}")
-                    continue
+                    cached = json.loads(path.read_text())
+                    if cached.get("settings") == wanted:
+                        trained[key] = cached
+                        print(f"[{key}] loaded {path}")
+                        continue
+                    print(f"[{key}] {path} was trained with other settings; retraining")
                 res = train(kind, train_arms, train_refs, pool, args.generations, args.batch, args.seed + 1000 * s)
                 path.write_text(json.dumps(res))
                 trained[key] = res
