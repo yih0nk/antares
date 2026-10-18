@@ -380,3 +380,40 @@ def add_parser(sub) -> None:
     b.add_argument("--fresh", metavar="DATASET", help="a recording of the same servo without the coin, for contrast")
     b.add_argument("--ratio", type=float, default=1.5, help="drift limit as a multiple of the lock's held-out score")
     b.set_defaults(func=cmd_demo)
+
+    _add_live_parser(bsub)
+
+
+def cmd_live(args) -> int:
+    from antares import servo_live
+
+    lock = load_lock(args.lock)
+    pot = servo_live.pot_for_lock(lock, args.dataset)
+    if args.replay:
+        ticks = servo_live.csv_ticks(args.replay, args.servo)
+    else:
+        port = args.port or _find_port()
+        ticks = servo_live.serial_ticks(port, args.servo)
+    servo_live.serve(ticks, pot, lock, host=args.host, port=args.http_port)
+    return 0
+
+
+def _find_port() -> str:
+    import glob
+
+    ports = glob.glob("/dev/cu.usbmodem*") + glob.glob("/dev/cu.usbserial*") + glob.glob("/dev/ttyACM*") + glob.glob("/dev/ttyUSB*")
+    if not ports:
+        raise SystemExit("error: no Arduino found; pass --port (Arduino IDE > Tools > Port shows it)")
+    return ports[0]
+
+
+def _add_live_parser(bsub) -> None:
+    b = bsub.add_parser("live", help="watch the real stick and its sim ghosts move together in the browser")
+    b.add_argument("--lock", required=True, help="the servo's lock (name or path)")
+    b.add_argument("--servo", default="a", help="which raw_<servo> column to follow (default a)")
+    b.add_argument("--port", help="the Arduino's serial port (default: the first one found)")
+    b.add_argument("--replay", metavar="CSV", help="play a recorded run at real speed instead of the Arduino")
+    b.add_argument("--dataset", help="dataset whose pot conversion to use (default: the one the lock was fitted on)")
+    b.add_argument("--host", default="127.0.0.1")
+    b.add_argument("--http-port", type=int, default=8010)
+    b.set_defaults(func=cmd_live)
