@@ -1213,6 +1213,7 @@ export default function App() {
                       ? (
                         <>
                           lining the 3D view up with the {underlay.camera.name} camera
+                          {video.lineUp.sibling && video.lineUp.status !== "done" ? `, second pass with the ${video.lineUp.sibling} camera's field of view` : ""}
                           {video.lineUp.status === "done"
                             ? " (saved)"
                             : video.lineUp.last

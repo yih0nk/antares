@@ -32,6 +32,8 @@ export type LineUp = {
   // "done": saved, until the refetched fits bring it in.
   status: "running" | "done" | "error" | "cancelled";
   last?: CameraProgressEvent;
+  // Set during the second pass: the fitted camera whose field of view it holds.
+  sibling?: string;
   error?: string;
 };
 
@@ -146,6 +148,8 @@ export function useUnderlay(
           const ev = JSON.parse(msg.data) as CameraJobEvent;
           if (ev.type === "progress") {
             update((l) => ({ ...l, last: ev }));
+          } else if (ev.type === "pass") {
+            update((l) => ({ ...l, sibling: ev.sibling, last: undefined }));
           } else if (ev.type === "done") {
             src.close();
             update((l) => ({ ...l, status: "done" }));
