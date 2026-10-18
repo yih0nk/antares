@@ -1801,7 +1801,7 @@ def cmd_export(args: argparse.Namespace) -> int:
         dataset_fps,
         render,
         resolve_targets,
-        unsupported_reason,
+        write_unsupported_note,
     )
     from antares.lock import RobotLock
     from antares.task import TASK_SUFFIX, TaskDistribution
@@ -1825,8 +1825,6 @@ def cmd_export(args: argparse.Namespace) -> int:
             return 1
     try:
         targets = resolve_targets(getattr(args, "format", "mjcf"))
-        if targets and (reason := unsupported_reason(lock)) is not None:
-            raise TargetExportError(reason)
     except TargetExportError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
@@ -1857,6 +1855,14 @@ def cmd_export(args: argparse.Namespace) -> int:
     else:
         print(f"  {'assets/':<40} STL meshes")
     fps = getattr(args, "fps", None)
+    # A lock on another model than the SO-101 gets the MJCF and a note in
+    # place of the framework configs, as the zip download does.
+    note = write_unsupported_note(lock, out_dir) if targets else None
+    if note is not None:
+        skipped = ", ".join(TARGET_LABELS[t] for t in targets)
+        print(f"  {note.name:<40} why the {skipped} configs were not written")
+        print(f"note: {note.read_text().strip()}")
+        targets = []
     for target in targets:
         export = render(lock, target, fps=fps, lock_dir=server.LOCK_DIR)
         for path in export.write(out_dir):

@@ -878,13 +878,11 @@ def export_zip(
         root = Path(tmp) / lock.name
         export_scene(lock, root, bundle_assets=True, lock_dir=lock_dir)
         if targets:
-            from antares.export_targets import export_targets, unsupported_reason
+            from antares.export_targets import export_targets, write_unsupported_note
 
-            reason = unsupported_reason(lock)
-            if reason is None:
+            # the MJCF and scene still ship; the note says why the configs do not
+            if write_unsupported_note(lock, root) is None:
                 export_targets(lock, root, targets, fps=fps, lock_dir=lock_dir)
-            else:  # the MJCF and scene still ship; say why the configs do not
-                (root / "TARGETS-NOT-EXPORTED.txt").write_text(reason + "\n")
         with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             for p in sorted(root.rglob("*")):
                 if p.is_file():
