@@ -21,8 +21,8 @@ export type Underlay = {
 };
 
 // Cameras of the dataset and the fits saved for the lock, refetched when the
-// underlay is turned on so a fit made in the Cameras panel is picked up.
-export function useUnderlay(dataset: string, episode: number | null, lock: string | null, on: boolean) {
+// underlay is turned on or `fitsRev` changes (a fit saved in the Camera panel).
+export function useUnderlay(dataset: string, episode: number | null, lock: string | null, on: boolean, fitsRev = 0) {
   const [cameras, setCameras] = useState<CameraInfo[]>([]);
   const [camera, setCamera] = useState("");
   const [fits, setFits] = useState<Record<string, CameraFit>>({});
@@ -58,7 +58,7 @@ export function useUnderlay(dataset: string, episode: number | null, lock: strin
     return () => {
       live = false;
     };
-  }, [on, lock, camera]);
+  }, [on, lock, camera, fitsRev]);
 
   const info = cameras.find((c) => c.name === camera) ?? null;
   const fit = info?.fixed ? fits[camera] : undefined;

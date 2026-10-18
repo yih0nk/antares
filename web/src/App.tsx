@@ -873,7 +873,8 @@ export default function App() {
   // The dataset's video behind the main pane, pinned to the lock's fitted camera when it has one.
   const [videoOn, setVideoOn] = useState(false);
   const [videoError, setVideoError] = useState<string | null>(null);
-  const video = useUnderlay(dataset, episode, cameraLock, videoOn);
+  const [fitsRev, setFitsRev] = useState(0);
+  const video = useUnderlay(dataset, episode, cameraLock, videoOn, fitsRev);
   const underlay = video.underlay;
 
   const compareFrames = compareBase?.real_poses.length ?? 0;
@@ -1564,6 +1565,7 @@ export default function App() {
           onObjectsChange={setObjects}
           track={track}
           onError={setError}
+          onFitSaved={() => setFitsRev((r) => r + 1)}
         />
 
         <section>

@@ -39,6 +39,8 @@ type Props = {
   onObjectsChange: (fit: ObjectsFit | null) => void;
   track: ObjectTrack | null;
   onError: (message: string) => void;
+  // A camera fit finished and was saved (the video underlay refetches the fits).
+  onFitSaved?: () => void;
 };
 
 type ObjectsJob = {
@@ -76,7 +78,7 @@ const stageLabel = (ev?: CameraProgressEvent) => {
 const mm = (v: number | null | undefined) => (v == null || !isFinite(v) ? "--" : `${(v * 1000).toFixed(1)} mm`);
 const cm = (v: number) => `${(v * 100).toFixed(0)}`;
 
-export function CameraView({ dataset, episode, frame, playing, lock, busy, scene, onSceneChange, objects, onObjectsChange, track, onError }: Props) {
+export function CameraView({ dataset, episode, frame, playing, lock, busy, scene, onSceneChange, objects, onObjectsChange, track, onError, onFitSaved }: Props) {
   const [cameras, setCameras] = useState<CameraInfo[]>([]);
   const [objectsJob, setObjectsJob] = useState<ObjectsJob | null>(null);
   const objectsSourceRef = useRef<EventSource | null>(null);
@@ -208,6 +210,7 @@ export function CameraView({ dataset, episode, frame, playing, lock, busy, scene
         src.close();
         setJob((j) => (j && j.jobId === jobId ? { ...j, status: "done" } : j));
         refreshFits(lock);
+        onFitSaved?.();
       } else if (ev.type === "error") {
         src.close();
         setJob((j) => (j && j.jobId === jobId ? { ...j, status: "error", error: ev.message } : j));
