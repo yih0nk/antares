@@ -13,9 +13,11 @@ Grasps and releases come from :func:`antares.events.gripper_transitions`
 tip is the MJCF's ``gripperframe`` site, between the jaws.
 
 Whether a grasp caught anything is read from the jaw: with an object between
-them the jaws stop short of the closed command, so the measured gripper sits
-well above the command; on a miss they close all the way. The jaw angle it
-stops at is a proxy for the object's width.
+them the jaws stop open by the object's width; on a miss they close all the
+way. "All the way" is the dataset's own empty-closed level (the 1st
+percentile of the measured jaw and of the closed command), and the jaw is
+read just after it settles, before the operator has a chance to let go.
+The angle it stops at is a proxy for the object's width.
 
 Pure kinematics: no dynamics and no lock are needed, only the dataset-unit
 -> radian map.
@@ -53,13 +55,14 @@ OBJECT_MASS = 0.03
 #: MJCF site at the gripper tip, between the jaws.
 TIP_SITE = "gripperframe"
 
-#: Measured jaw this far above the closed command (dataset units, 0..100)
-#: means something is between the jaws.
-HELD_GAP = 5.0
+#: Measured jaw this far above the dataset's empty-closed level (dataset
+#: units, 0..100) means something is between the jaws.
+HELD_GAP = 3.0
 
 #: The jaw is still closing for this long after the command flips; the stop
-#: position is read after it.
+#: position is read over the next ``JAW_WINDOW_S`` after it.
 SETTLE_S = 0.3
+JAW_WINDOW_S = 0.5
 
 
 class Tip:
@@ -94,8 +97,8 @@ class Grasp:
     xyz: tuple[float, float, float]  # tip position at ``frame``, metres
     release_frame: int | None  # next flip back to open
     release_xyz: tuple[float, float, float] | None
-    jaw_gap: float  # median measured - commanded gripper while closed, dataset units
-    jaw_deg: float  # median measured jaw angle while closed, degrees
+    jaw_gap: float  # measured jaw above the empty-closed level just after settling, dataset units
+    jaw_deg: float  # measured jaw angle just after settling, degrees
     held: bool  # jaw_gap >= the held threshold: an object stopped the jaw
 
     def to_dict(self) -> dict:
@@ -123,8 +126,24 @@ def dataset_thresholds(episodes: Sequence[Episode]) -> GripperThresholds:
     """
     cmd = np.concatenate([np.asarray(e.action[:, GRIPPER_INDEX], dtype=np.float64) for e in episodes])
     t = gripper_thresholds(cmd)
+
     mid, half = 0.5 * (t.closed_below + t.open_above), (t.open_above - t.closed_below) / 4.0
     return GripperThresholds(closed_below=mid - half, open_above=mid + half)
+
+
+def empty_level(episodes: Sequence[Episode], thr: GripperThresholds) -> float:
+    """Where the jaw sits when it closes on nothing, dataset units.
+
+    The 1st percentile of the measured jaw and of the closed commands, pooled:
+    the measured jaw covers datasets with empty closes, the command covers
+    ones where every close held something but the leader was squeezed shut.
+    """
+    vals = []
+    for e in episodes:
+        cmd = np.asarray(e.action[:, GRIPPER_INDEX], dtype=np.float64)
+        vals.append(np.asarray(e.state[:, GRIPPER_INDEX], dtype=np.float64))
+        vals.append(cmd[cmd < thr.closed_below])
+    return float(np.percentile(np.concatenate(vals), 1.0))
 
 
 def find_grasps(
@@ -132,27 +151,29 @@ def find_grasps(
     thr: GripperThresholds,
     tip: Tip,
     unit_map: UnitMap,
+    empty: float,
     held_gap: float = HELD_GAP,
 ) -> list[Grasp]:
     """Every grasp in ``episode``, paired with the release that follows it.
 
-    The jaw is read over the closed stretch (grasp to release, or to the end
-    of the episode) after :data:`SETTLE_S`; a stretch shorter than that
-    uses its last frame.
+    The jaw is read over :data:`JAW_WINDOW_S` starting :data:`SETTLE_S`
+    after the close, cut short by the release or the end of the episode
+    (at least one frame), and compared with ``empty`` (see :func:`empty_level`).
     """
-    cmd = episode.action[:, GRIPPER_INDEX]
     jaw = episode.state[:, GRIPPER_INDEX]
-    grasps, releases = gripper_transitions(cmd, thr)
+    grasps, releases = gripper_transitions(episode.action[:, GRIPPER_INDEX], thr)
     q = unit_map.to_rad(episode.state)
     settle = int(round(SETTLE_S * episode.fps))
+    window = max(1, int(round(JAW_WINDOW_S * episode.fps)))
     out = []
     for g in grasps:
         later = releases[releases > g]
         r = int(later[0]) if later.size else None
         end = r if r is not None else len(episode)
         start = min(g + settle, end - 1)
-        gap = float(np.median(jaw[start:end] - cmd[start:end]))
-        jaw_rad = float(np.median(q[start:end, GRIPPER_INDEX]))
+        stop = min(start + window, end)
+        gap = float(np.median(jaw[start:stop])) - empty
+        jaw_rad = float(np.median(q[start:stop, GRIPPER_INDEX]))
         out.append(
             Grasp(
                 episode=int(episode.index),
@@ -217,7 +238,8 @@ class TaskDistribution:
         tip = Tip()
         unit_map = unit_map if unit_map is not None else UnitMap.from_model(tip.model)
         thr = dataset_thresholds(episodes)
-        grasps = [g for e in episodes for g in find_grasps(e, thr, tip, unit_map, held_gap)]
+        empty = empty_level(episodes, thr)
+        grasps = [g for e in episodes for g in find_grasps(e, thr, tip, unit_map, empty, held_gap)]
         return cls(
             name=name,
             dataset=dataset,

@@ -1751,8 +1751,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("task", help="where objects were picked and placed, from the gripper and FK")
     p.add_argument("repo_id")
     p.add_argument("--name", default=None, help="task name (default: dataset slug)")
-    p.add_argument("--held-gap", type=float, default=5.0,
-                   help="jaw this far above the closed command (0..100 units) counts as holding")
+    p.add_argument("--held-gap", type=float, default=3.0,
+                   help="jaw this far above an empty close (0..100 units) counts as holding")
     p.add_argument("--out", default=None, help="output path (default: locks/<name>.task.json)")
     p.add_argument("--no-save", action="store_true")
     p.set_defaults(func=cmd_task)

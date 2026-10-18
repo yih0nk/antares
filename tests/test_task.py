@@ -3,7 +3,7 @@ import pytest
 
 from antares.data import Episode
 from antares.sim import JOINTS, UnitMap, load_model
-from antares.task import Tip, dataset_thresholds, find_grasps
+from antares.task import Tip, dataset_thresholds, empty_level, find_grasps
 
 FPS = 30.0
 OPEN, SHUT = 80.0, 2.0
@@ -60,7 +60,7 @@ def test_tip_matches_site_and_handles_batches(tip, unit_map):
 def test_find_grasps_locates_pick_and_place(tip, unit_map):
     ep = pick_place_episode()
     thr = dataset_thresholds([ep])
-    grasps = find_grasps(ep, thr, tip, unit_map)
+    grasps = find_grasps(ep, thr, tip, unit_map, empty_level([ep], thr))
     assert len(grasps) == 1
     g = grasps[0]
     assert g.frame == 40
@@ -72,7 +72,8 @@ def test_find_grasps_locates_pick_and_place(tip, unit_map):
 def test_grasp_without_release(tip, unit_map):
     ep = pick_place_episode()
     cut = Episode(ep.index, FPS, JOINTS, ep.state[:70], ep.action[:70])
-    (g,) = find_grasps(cut, dataset_thresholds([ep]), tip, unit_map)
+    thr = dataset_thresholds([ep])
+    (g,) = find_grasps(cut, thr, tip, unit_map, empty_level([ep], thr))
     assert g.release_frame is None and g.release_xyz is None
     assert g.to_dict()["release_xyz"] is None
 
@@ -81,10 +82,12 @@ def test_held_and_missed_grasps(tip, unit_map):
     held = pick_place_episode(0, held_jaw=25.0)
     missed = pick_place_episode(1, held_jaw=SHUT + 0.5)
     thr = dataset_thresholds([held, missed])
-    (g,) = find_grasps(held, thr, tip, unit_map)
+    empty = empty_level([held, missed], thr)
+    assert empty == pytest.approx(SHUT)
+    (g,) = find_grasps(held, thr, tip, unit_map, empty)
     assert g.held and g.jaw_gap == pytest.approx(25.0 - SHUT)
     assert g.jaw_deg == pytest.approx(np.degrees(unit_map.to_rad(np.array([0, 0, 0, 0, 0, 25.0]))[5]))
-    (m,) = find_grasps(missed, thr, tip, unit_map)
+    (m,) = find_grasps(missed, thr, tip, unit_map, empty)
     assert not m.held and m.jaw_gap == pytest.approx(0.5)
 
 
@@ -135,4 +138,19 @@ def test_thresholds_catch_a_shallow_close(tip, unit_map):
     shallow = Episode(1, FPS, JOINTS, shallow.state, act)
     thr = dataset_thresholds([deep, shallow])
     assert thr.closed_below > 30.0
-    assert len(find_grasps(shallow, thr, tip, unit_map)) == 1
+    assert len(find_grasps(shallow, thr, tip, unit_map, empty_level([deep, shallow], thr))) == 1
+
+
+def test_held_read_before_the_operator_lets_go(tip, unit_map):
+    """No release is detected (the leader only opens a little), so the closed
+    stretch runs to the end; the jaw must still be read while it holds."""
+    ep = pick_place_episode(0)
+    st, act = ep.state.copy(), ep.action.copy()
+    act[80:, 5] = SHUT + 5.0  # a shallow open the thresholds do not see
+    st[80:100, 5] = SHUT + 5.0  # cube dropped, jaw at the command
+    st[100:, 5] = SHUT  # and shut again
+    ep = Episode(0, FPS, JOINTS, st, act)
+    thr = dataset_thresholds([ep])
+    (g,) = find_grasps(ep, thr, tip, unit_map, empty_level([ep], thr))
+    assert g.release_frame is None
+    assert g.held and g.jaw_gap == pytest.approx(25.0 - SHUT)
