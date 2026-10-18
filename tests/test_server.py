@@ -56,6 +56,10 @@ class FakeParams:
     def default(cls):
         return cls()
 
+    def scalar(self, name):  # as SimParams.scalar: a per-joint value is its joint mean
+        v = getattr(self, name)
+        return float(sum(v) / len(v)) if isinstance(v, (tuple, list)) else float(v)
+
 
 class FakeCommandMap:
     def __init__(self, gain, bias):
@@ -343,11 +347,13 @@ def fakes(monkeypatch, tmp_path):
                   model_geometry=lambda model=None: {"bodies": [], "geoms": [], "joints": []})
     gap = _module("antares.gap", GapReport=FakeGap, tracking_error=fake_tracking_error,
                   aggregate=fake_aggregate)
-    from antares.calibrate import scoring_names  # the real one: pure, reads the robot off its argument
+    # the real ones: pure, reading the robot off their argument / the factor registry
+    from antares.calibrate import default_factor_names, scoring_names
 
     cal = _module("antares.calibrate", calibrate=fake_calibrate, split_episodes=fake_split, PENALTY=1e3,
                   default_simulate=lambda command_map=None, robot=None: (lambda params, ep: (ep.state, ep.action)),
-                  scoring_names=scoring_names)
+                  scoring_names=scoring_names, default_factor_names=default_factor_names,
+                  describe_simulate=lambda simulate, arm: simulate)  # FakeArm has no robot model
     lock = _module("antares.lock", RobotLock=FakeLock, dataset_digest=lambda eps: "deadbeef",
                    slug=lambda r: r.replace("/", "__"), LOCK_DIR=tmp_path / "locks",
                    LOCK_SUFFIX=LOCK_SUFFIX,

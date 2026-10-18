@@ -694,6 +694,18 @@ def test_spaces_servo_swaps_the_actuator_dims():
         assert lo <= getattr(start, name) <= hi, name
 
 
+def test_servo_with_gravity_keeps_gravity_out_of_the_per_joint_stage():
+    """gravity_scale is one value for the whole arm; selecting it on a servo
+    fit used to crash building the per-joint space."""
+    from antares.calibrate import SERVO_SPACE, spaces, spaces_for
+
+    shared, pj = spaces(fit_gravity=True, servo=True)
+    assert "gravity_scale" in shared.fields and "gravity_scale" not in pj.fields
+    assert pj.fields == tuple(SERVO_SPACE)
+    shared, pj = spaces_for(None, tuple(SERVO_SPACE) + ("gravity_scale",), servo=True)
+    assert "gravity_scale" not in pj.fields
+
+
 def test_calibrate_from_a_servo_start_fits_the_servo_terms():
     # The toy residual depends only on servo_gain, so the fit must move it
     # (and only fields of the servo space) while keeping the servo model.

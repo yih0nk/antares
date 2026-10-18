@@ -403,6 +403,28 @@ def test_cli_format_all_writes_every_file(monkeypatch, tmp_path, capsys):
     assert "latency:" not in capsys.readouterr().out
 
 
+def test_cli_ships_the_mjcf_and_a_note_for_a_non_so101_lock(monkeypatch, tmp_path, capsys):
+    """Like the zip download: a lock on another model gets its MJCF and
+    TARGETS-NOT-EXPORTED.txt instead of a refusal, and exits 0."""
+    from antares.export_targets import NOTE_FILENAME, unsupported_reason
+    from antares.sim import SimParams
+    from tests.test_export import make_lock
+
+    lock_dir = _install_locks(monkeypatch, tmp_path, names=())
+    lock = replace(make_lock(SimParams(kp=40.0)), robot="so100", name="so100_unit")
+    lock.save(lock_dir / "so100_unit.lock.json")
+    out = tmp_path / "out"
+    assert cli.main(["export", "so100_unit", "-o", str(out), "--no-bundle", "--format", "all"]) == 0
+    text = capsys.readouterr().out
+    names = sorted(p.name for p in out.iterdir())
+    assert names == sorted(["so100_unit.xml", "so100_unit.antares.json", "scene.xml", NOTE_FILENAME])
+    assert (out / NOTE_FILENAME).read_text().strip() == unsupported_reason(lock)
+    assert NOTE_FILENAME in text and "SO-101 model only" in text and "latency:" not in text
+    # the zip download writes the same note
+    zipped = zipfile.ZipFile(io.BytesIO(export_zip(lock, targets=["isaaclab"]))).namelist()
+    assert f"so100_unit/{NOTE_FILENAME}" in zipped and not any(n.endswith("_isaaclab.py") for n in zipped)
+
+
 def test_cli_rejects_unknown_format(monkeypatch, tmp_path, capsys):
     _install_locks(monkeypatch, tmp_path)
     with pytest.raises(SystemExit) as e:

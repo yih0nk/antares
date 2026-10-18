@@ -47,21 +47,33 @@ VELOCITY_FACTOR = 1.5
 # --------------------------------------------------------------------------
 
 
-def shift_compensate(q_des: np.ndarray, latency_frames: int) -> np.ndarray:
+def shift_compensate(q_des: np.ndarray, latency_frames: int | Sequence[int]) -> np.ndarray:
     """Send ``q_des[t + L]`` at frame ``t``; the last frame is held at the end.
 
-    With exactly ``L`` frames of pure delay and a stiff servo this cancels
-    the lag. It does nothing about a soft gain.
+    ``latency_frames`` is one value for the arm or one per joint (a per-joint
+    lock, one entry per column of ``q_des``), in which case each column is
+    shifted by its own joint's latency. A fractional latency is truncated
+    to whole frames, as ``int()`` does. With exactly ``L`` frames of pure
+    delay and a stiff servo this cancels the lag. It does nothing about a
+    soft gain.
     """
     q_des = np.asarray(q_des, dtype=np.float64)
     if q_des.ndim != 2:
         raise ValueError(f"q_des must be (T, J), got {q_des.shape}")
-    L = int(latency_frames)
-    if L < 0:
+    J = q_des.shape[1]
+    lat = np.asarray(latency_frames, dtype=np.float64)
+    if lat.ndim == 0:
+        lat = np.full(J, float(lat))
+    elif lat.shape != (J,):
+        raise ValueError(
+            f"latency_frames must be one value or one per joint ({J} for these commands), got {lat.shape}"
+        )
+    L = lat.astype(int)  # truncation toward zero, like int()
+    if (L < 0).any():
         raise ValueError("latency_frames must be >= 0")
     T = q_des.shape[0]
-    src = np.minimum(np.arange(T) + L, T - 1)
-    return q_des[src].copy()
+    src = np.minimum(np.arange(T)[:, None] + L[None, :], T - 1)
+    return np.take_along_axis(q_des, src, axis=0)
 
 
 def _rms_deg(q_des: np.ndarray, q_sim: np.ndarray, names: dict | None = None) -> float:
@@ -130,7 +142,7 @@ def ilc(
         raise ValueError("iters must be >= 0")
     if gain <= 0:
         raise ValueError("gain must be positive")
-    L = arm.params.latency_frames if latency is None else int(latency)
+    L = arm.params.latency_frames if latency is None else latency
     lo, hi = arm.ctrl_range
 
     ctrl = np.clip(shift_compensate(q_des, L), lo, hi)

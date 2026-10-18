@@ -651,13 +651,17 @@ def load_factor_file(path: str | Path, replace_existing: bool = True) -> list[Fa
     return out
 
 
-def parse_selection(spec: str | None, stage: str = "shared") -> tuple[str, ...] | None:
+def parse_selection(
+    spec: str | None, stage: str = "shared", defaults: Sequence[str] | None = None
+) -> tuple[str, ...] | None:
     """``"+gravity,-forcerange"`` / ``"kp,kv,latency_frames"`` -> factor names.
 
-    Entries with ``+``/``-`` add to or drop from ``stage``'s defaults; a
-    plain list replaces them. ``None`` or empty means the defaults. A
-    selection the stage cannot fit, or that leaves it nothing to fit, is a
-    :class:`ValueError`.
+    Entries with ``+``/``-`` add to or drop from ``defaults`` (what the fit
+    would search without a selection, see
+    :func:`antares.calibrate.default_factor_names`; default: ``stage``'s
+    registry defaults); a plain list replaces them. ``None`` or empty means
+    the defaults. A selection the stage cannot fit, or that leaves it nothing
+    to fit, is a :class:`ValueError`.
     """
     if not spec or not spec.strip():
         return None
@@ -665,7 +669,18 @@ def parse_selection(spec: str | None, stage: str = "shared") -> tuple[str, ...] 
     if all(s[0] in "+-" for s in items):
         inc = [s[1:] for s in items if s[0] == "+"]
         exc = [s[1:] for s in items if s[0] == "-"]
-        return names(stage, include=inc, exclude=exc)
+        if defaults is None:
+            return names(stage, include=inc, exclude=exc)
+        for n in exc:
+            get(n)
+        for n in inc:
+            check_stage(n, stage)
+        out = tuple(n for n in defaults if n not in exc) + tuple(
+            n for n in dict.fromkeys(inc) if n not in defaults and n not in exc
+        )
+        if not out:
+            raise ValueError(f"the selection leaves the {stage} stage nothing to fit")
+        return out
     if any(s[0] in "+-" for s in items):
         raise ValueError("mix of +/- and plain factor names; use one form")
     for s in items:
