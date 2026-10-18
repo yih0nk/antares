@@ -206,6 +206,33 @@ def test_so101_lock_replays_unchanged():
     np.testing.assert_array_equal(arm.replay(ep0), scalar_q)
 
 
+@pytest.mark.slow
+@pytest.mark.parametrize("name", ["svla_so101_pickplace_sensor_sim", "svla_so100_pickplace_sensor_sim"])
+def test_sensor_locks_replay_to_their_stored_scores(name):
+    """A sensor lock replayed with its own command map reproduces the held-out
+    score it stores, so a change to how the map is applied cannot silently
+    invalidate the README's numbers."""
+    from antares.calibrate import split_episodes
+    from antares.gap import aggregate, tracking_error
+    from antares.sim import Arm, CommandMap
+
+    lock = RobotLock.load(REPO_LOCKS / f"{name}.lock.json")
+    assert lock.command_map is not None and lock.dynamics_only is not None
+    ds = _cached_dataset(lock.dataset)
+    _, eval_ = split_episodes(ds.episodes, 20, 10, seed=0)
+    assert [e.index for e in eval_] == lock.result.eval_episodes
+    arm = Arm(lock.params, command_map=CommandMap.from_dict(lock.command_map))
+    report = aggregate([tracking_error(arm.real_q(e), arm.replay(e)) for e in eval_])
+    assert report.overall_deg == pytest.approx(lock.result.eval_score, abs=1e-4)
+    for joint, deg in lock.result.per_joint_after.items():
+        assert report.per_joint_deg[joint] == pytest.approx(deg, abs=1e-4)
+    # the budget bookkeeping the README describes: stages sum to n_evaluations on both sides
+    assert sum(s["n_evaluations"] for s in lock.result.stages) == lock.result.n_evaluations
+    assert sum(s["n_evaluations"] for s in lock.dynamics_only["stages"]) == lock.dynamics_only["n_evaluations"]
+    assert lock.result.n_evaluations == lock.dynamics_only["n_evaluations"]
+    assert [s["name"] for s in lock.result.stages] == ["shared", "command_map", "shared", "command_map"]
+
+
 def test_lock_command_map_round_trip(tmp_path):
     from antares.sim import CommandMap
 
@@ -230,9 +257,12 @@ def test_committed_locks_still_load():
 
     from antares.sim import CommandMap
 
-    locks = list_locks(Path(__file__).resolve().parent.parent / "locks")
-    assert locks
-    for lk in locks:
+    lock_dir = Path(__file__).resolve().parent.parent / "locks"
+    paths = sorted(lock_dir.glob("*.lock.json"))
+    assert paths
+    for path in paths:
+        lk = RobotLock.load(path)
+        raw = json.loads(path.read_text())
         # locks from before sensor fitting have none; sensor locks parse
         cmap = CommandMap.from_dict(lk.command_map)
         assert cmap.gain.shape == cmap.bias.shape == (6,)
@@ -240,9 +270,11 @@ def test_committed_locks_still_load():
         assert lk.result.seeds is None and seed_info(lk) is None
         assert pinned_params(lk) == list(DEFAULT_PINNED) == ["latency_frames"]
         assert param_spread(lk) is None
-        # and re-serializing adds nothing a loader before seeds would trip on
+        # and re-serializing adds nothing that is not already in the file (a loader
+        # from before seeds were recorded must see exactly what it saw on disk)
         d = lk.to_dict()
-        assert "seeds" not in d["result"] and all("seed" not in s for s in d["result"]["stages"])
+        assert "seeds" not in d["result"] and ("seeds" in raw["result"]) is False
+        assert [set(s) for s in d["result"]["stages"]] == [set(s) for s in raw["result"]["stages"]]
         assert RobotLock.from_dict(json.loads(json.dumps(d))) == lk
 
 

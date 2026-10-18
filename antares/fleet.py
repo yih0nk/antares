@@ -47,6 +47,11 @@ PINNED: tuple[str, ...] = ("lerobot/svla_so101_pickplace", "lerobot/svla_so100_p
 MIN_EPISODES = 15
 MAX_DATA_BYTES = 200 * 2**20  # tabular part only; videos are never downloaded
 MAX_DATA_FILES = 200  # v2 datasets store one parquet per episode; thousands of tiny downloads are too slow
+#: A recording the *uncalibrated* sim already tracks this closely (held-out
+#: RMSE, degrees) is not a physical arm: no real SO-100/101 in the fleet
+#: comes within 1.2 deg of the MJCF defaults. Such logs are most likely
+#: recorded in a simulator under a name that does not say so.
+MIN_BASELINE_DEG = 0.5
 
 
 # --------------------------------------------------------------------------
@@ -505,14 +510,16 @@ def scan(
     ``<lock_dir>/<owner>__<name>.lock.json``. Any exception from one dataset
     is recorded under ``failures`` and the scan continues. Candidates not
     reached before ``time_budget_s`` runs out are listed under ``skipped``.
-    ``on_progress`` receives dict events (``start``, ``fit``, ``robot``,
-    ``failed``, ``skipped``, ``done``). The report is saved to
+    A dataset the default parameters already track to under
+    :data:`MIN_BASELINE_DEG` is moved to ``rejected`` and gets no lock. ``on_progress`` receives dict events
+    (``start``, ``fit``, ``robot``, ``rejected``, ``failed``, ``skipped``,
+    ``done``). The report is saved to
     ``report_path`` (default ``<lock_dir>/fleet.json``) after every robot.
 
     Afterwards :func:`finalize` adds the fleet statistics, outliers and a
     partial cross matrix over up to ``cross_n`` robots (0 disables it).
     """
-    from antares.calibrate import calibrate, split_episodes
+    from antares.calibrate import calibrate, score, split_episodes
     from antares.lock import RobotLock, pinned_params, seed_info
     from antares.sim import SimParams
 
@@ -569,41 +576,52 @@ def scan(
                         }
                     )
 
-            result = calibrate(
-                train,
-                eval_,
-                simulate=simulate,
-                start=SimParams.default(),
-                max_evaluations=max_evaluations,
-                seed=seed,
-                on_progress=on_fit,
-            )
-            name = lock_name(cand.repo_id)
-            lock = RobotLock.create(ds.repo_id, ds.robot_type, train, result, name=name)
-            lock.save(lock_dir / f"{name}{LOCK_SUFFIX}")
-            entry = RobotEntry(
-                dataset=ds.repo_id,
-                robot_type=ds.robot_type,
-                n_episodes=len(episodes),
-                fps=float(ds.fps),
-                n_train=len(train),
-                n_eval=len(eval_),
-                baseline_eval=float(result.baseline_eval_score),
-                calibrated_eval=float(result.eval_score),
-                improvement=float(result.improvement),
-                params=result.params.to_dict(),
-                lock=name,
-                per_joint_before=dict(result.per_joint_before),
-                per_joint_after=dict(result.per_joint_after),
-                n_evaluations=int(result.n_evaluations),
-                elapsed_s=time.monotonic() - t_robot,
-                frames_per_episode=float(np.mean([len(e) for e in episodes])) if episodes else 0.0,
-                data_bytes=cand.data_bytes,
-                downloads=cand.downloads,
-                pinned=pinned_params(result) if seed_info(result) is not None else None,
-            )
-            report.robots.append(entry)
-            emit({"type": "robot", "dataset": cand.repo_id, "entry": entry.to_dict()})
+            # One cheap held-out score of the defaults decides whether this is a
+            # physical arm at all, before any fit budget is spent on it.
+            default_eval = float(score(SimParams.default(), eval_ or train, simulate).overall_deg)
+            if default_eval < MIN_BASELINE_DEG:
+                reason = (
+                    f"the default sim already tracks it to {default_eval:.2f} deg "
+                    f"(< {MIN_BASELINE_DEG}); likely recorded in a simulator, not a physical arm"
+                )
+                report.rejected.append({"dataset": cand.repo_id, "reason": reason})
+                emit({"type": "rejected", "dataset": cand.repo_id, "reason": reason})
+            else:
+                result = calibrate(
+                    train,
+                    eval_,
+                    simulate=simulate,
+                    start=SimParams.default(),
+                    max_evaluations=max_evaluations,
+                    seed=seed,
+                    on_progress=on_fit,
+                )
+                name = lock_name(cand.repo_id)
+                lock = RobotLock.create(ds.repo_id, ds.robot_type, train, result, name=name)
+                lock.save(lock_dir / f"{name}{LOCK_SUFFIX}")
+                entry = RobotEntry(
+                    dataset=ds.repo_id,
+                    robot_type=ds.robot_type,
+                    n_episodes=len(episodes),
+                    fps=float(ds.fps),
+                    n_train=len(train),
+                    n_eval=len(eval_),
+                    baseline_eval=float(result.baseline_eval_score),
+                    calibrated_eval=float(result.eval_score),
+                    improvement=float(result.improvement),
+                    params=result.params.to_dict(),
+                    lock=name,
+                    per_joint_before=dict(result.per_joint_before),
+                    per_joint_after=dict(result.per_joint_after),
+                    n_evaluations=int(result.n_evaluations),
+                    elapsed_s=time.monotonic() - t_robot,
+                    frames_per_episode=float(np.mean([len(e) for e in episodes])) if episodes else 0.0,
+                    data_bytes=cand.data_bytes,
+                    downloads=cand.downloads,
+                    pinned=pinned_params(result) if seed_info(result) is not None else None,
+                )
+                report.robots.append(entry)
+                emit({"type": "robot", "dataset": cand.repo_id, "entry": entry.to_dict()})
         except Exception as e:  # noqa: BLE001 - one bad dataset must not end the scan
             msg = f"{type(e).__name__}: {e}"
             report.failures.append({"dataset": cand.repo_id, "error": msg})
@@ -910,8 +928,7 @@ def finalize(
     """Fill ``stats``, ``outliers`` and (``cross_n`` > 1) ``cross`` in place.
 
     Robots flagged as outliers on their scores (an arm the simulator cannot
-    explain, or a dataset whose commands equal its measured state) are kept
-    out of the cross matrix unless they are preferred."""
+    explain) are kept out of the cross matrix unless they are preferred."""
     report.stats = fleet_stats(report.robots)
     report.outliers = find_outliers(report.robots, report.stats)
     if cross_n > 1 and report.robots:
@@ -940,6 +957,7 @@ __all__ = [
     "JOINTS",
     "MAX_DATA_BYTES",
     "MAX_DATA_FILES",
+    "MIN_BASELINE_DEG",
     "MIN_EPISODES",
     "PINNED",
     "Candidate",

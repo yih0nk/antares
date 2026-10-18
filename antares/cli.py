@@ -1474,6 +1474,8 @@ def cmd_fleet_scan(args: argparse.Namespace) -> int:
             )
         elif t == "failed":
             print(f"    FAILED {ev['dataset']}: {ev['error']}", flush=True)
+        elif t == "rejected":
+            print(f"    rejected {ev['dataset']}: {ev['reason']}", flush=True)
         elif t == "skipped":
             print(f"    skipped {ev['dataset']}: {ev['reason']}", flush=True)
         elif t == "done":
