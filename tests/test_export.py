@@ -171,7 +171,8 @@ def test_export_mjcf_bundled(tmp_path):
     # header with the lock facts, right inside the root element
     head = xml.split("<option", 1)[0]
     assert head.startswith('<mujoco model="so101">\n  <!--')
-    for s in ("unit_a", "lerobot/svla_so101_pickplace", "2026-10-17T20:35:05Z", "6.007", "1.054", "latency_frames: 4"):
+    for s in ("unit_a", "lerobot/svla_so101_pickplace", "2026-10-17T20:35:05Z", "6.007", "1.054", "latency_frames: 4",
+              "gravity_scale=1.0", "Base model: MuJoCo Menagerie"):
         assert s in head, s
     assert "--" not in head.split("<!--", 1)[1].rsplit("-->", 1)[0]
 
@@ -319,6 +320,8 @@ def test_gravity_scale_is_baked_into_option_and_replays_identically(tmp_path):
     ep = synthetic_episode()
     arm = load_exported_arm(out)
     assert arm.params.gravity_scale == pytest.approx(0.4)
+    assert "gravity_scale=0.4 (scales option gravity)" in out.read_text().split("<option", 1)[0]
+    assert "gravity_scale" in read_sidecar(out)["baked_params"]
     ref = Arm(params=lock.params).replay(ep)
     np.testing.assert_allclose(arm.replay(ep), ref, rtol=0, atol=1e-9)
     assert not np.allclose(Arm(params=FITTED).replay(ep), ref, atol=1e-4)
@@ -329,6 +332,13 @@ def test_deadband_travels_in_the_sidecar(tmp_path):
     out = export_mjcf(lock, tmp_path / "d.xml")
     arm = load_exported_arm(out)
     assert arm.params.per_joint("deadband").tolist() == [0.0, 0.0, 0.01, 0.0, 0.0, 0.0]
+    sc = read_sidecar(out)
+    assert "deadband" in sc["sidecar_params"] and "deadband" not in sc["baked_params"]
+    assert sc["params"]["deadband"] == [0.0, 0.0, 0.01, 0.0, 0.0, 0.0] and "deadband_note" in sc
+    head = out.read_text().split("<option", 1)[0]
+    assert "deadband: 0.0 0.0 0.01 0.0 0.0 0.0 rad" in head
+    assert "deadband" not in export_mjcf(make_lock(), tmp_path / "p.xml").read_text().split("<option", 1)[0]
+    assert bake_params(STOCK_XML, {"deadband": 0.01, "latency_frames": 3}) == STOCK_XML
     ep = synthetic_episode()
     np.testing.assert_allclose(arm.replay(ep), Arm(params=lock.params).replay(ep), rtol=0, atol=1e-9)
 

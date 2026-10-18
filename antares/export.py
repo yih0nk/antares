@@ -57,7 +57,13 @@ EXPORT_FORMAT = "antares.export/1"
 SERVO_CLASS = "sts3215"
 JOINT_PARAMS: tuple[str, ...] = ("damping", "armature", "frictionloss")
 ACTUATOR_PARAMS: tuple[str, ...] = ("kp", "kv")
-BAKED_PARAMS: tuple[str, ...] = JOINT_PARAMS + ACTUATOR_PARAMS
+#: Written on ``<option>`` (``gravity_scale`` scales the gravity vector).
+OPTION_PARAMS: tuple[str, ...] = ("gravity_scale",)
+#: Everything :func:`bake_params` writes into the MJCF.
+BAKED_PARAMS: tuple[str, ...] = JOINT_PARAMS + ACTUATOR_PARAMS + OPTION_PARAMS
+#: Parameters MJCF cannot express; they travel in the sidecar for the
+#: consumer's control loop.
+SIDECAR_PARAMS: tuple[str, ...] = ("latency_frames", "deadband")
 
 ParamValue = float | Sequence[float]
 
@@ -114,14 +120,15 @@ def bake_params(xml: str, params: Mapping[str, ParamValue], joints: Sequence[str
 
     Scalars are set on the ``sts3215`` default class; a sequence of
     ``len(joints)`` values is written on each named joint/actuator element
-    instead (explicit attributes override class defaults in MuJoCo). Keys
-    other than the five baked parameters (e.g. ``latency_frames``) are
-    ignored. The rest of the text is untouched.
+    instead (explicit attributes override class defaults in MuJoCo).
+    ``gravity_scale`` scales ``<option gravity>``. Keys outside
+    :data:`BAKED_PARAMS` (``latency_frames``, ``deadband``: see
+    :data:`SIDECAR_PARAMS`) are ignored. The rest of the text is untouched.
     """
     scalar: dict[str, str] = {}
     per_joint: dict[str, list[str]] = {}
     for key, value in params.items():
-        if key not in BAKED_PARAMS:
+        if key not in BAKED_PARAMS or key in OPTION_PARAMS:
             continue
         if np.ndim(value) == 0:
             scalar[key] = _fmt(value)  # type: ignore[arg-type]
@@ -246,7 +253,7 @@ def _score_text(v: float, unit: str = " deg") -> str:
 def header_lines(lock: RobotLock) -> list[str]:
     r = lock.result
     p = lock.params
-    return [
+    lines = [
         f"Antares calibrated SO-101 (antares {__version__}, lock format {EXPORT_FORMAT})",
         f"lock:        {lock.name}",
         f"dataset:     {lock.dataset} ({lock.robot_type}), data sha256 {lock.data_sha256}",
@@ -254,10 +261,17 @@ def header_lines(lock: RobotLock) -> list[str]:
         f"held-out tracking RMSE: {_score_text(r.baseline_eval_score)} before -> "
         f"{_score_text(r.eval_score)} after ({len(r.eval_episodes)} episodes)",
         f"baked: kp={_fmt(p.kp)} kv={_fmt(p.kv)} damping={_fmt(p.damping)} "
-        f"armature={_fmt(p.armature)} frictionloss={_fmt(p.frictionloss)}",
+        f"armature={_fmt(p.armature)} frictionloss={_fmt(p.frictionloss)} "
+        f"gravity_scale={_fmt(float(p.per_joint('gravity_scale')[0]))} (scales option gravity)",
         f"latency_frames: {p.latency_frames} (command delay in dataset frames; MJCF cannot "
         f"express this, apply it in your control loop; see the .antares.json sidecar)",
     ]
+    if np.any(p.per_joint("deadband")):
+        band = " ".join(_fmt(v) for v in p.per_joint("deadband")) if p.is_per_joint("deadband") else _fmt(p.deadband)
+        lines.append(
+            f"deadband: {band} rad (servo deadband; MJCF cannot express this, "
+            f"apply it in your control loop; see the .antares.json sidecar)"
+        )
     if lock.cameras:
         lines.append(
             "cameras:     "
@@ -285,10 +299,16 @@ def sidecar_dict(lock: RobotLock, model: mujoco.MjModel, model_file: str, meshdi
         },
         "params": lock.params.to_dict(),
         "baked_params": list(BAKED_PARAMS),
+        "sidecar_params": list(SIDECAR_PARAMS),
         "latency_frames": int(lock.params.latency_frames),
         "latency_note": (
             "Command delay in dataset frames (at the dataset's recording rate). "
             "Not representable in MJCF: delay each ctrl by latency_frames frames."
+        ),
+        "deadband_note": (
+            "Servo position-error deadband in radians (params.deadband, shared or per joint; "
+            "0 or absent means none). Not representable in MJCF: command q + shrink(target - q) "
+            "with |error| reduced by the band, as antares.sim.Arm.replay does."
         ),
         "joints": list(JOINTS),
         "command_map": {
