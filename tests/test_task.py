@@ -152,5 +152,17 @@ def test_held_read_before_the_operator_lets_go(tip, unit_map):
     ep = Episode(0, FPS, JOINTS, st, act)
     thr = dataset_thresholds([ep])
     (g,) = find_grasps(ep, thr, tip, unit_map, empty_level([ep], thr))
-    assert g.release_frame is None
     assert g.held and g.jaw_gap == pytest.approx(25.0 - SHUT)
+    assert g.release_frame is None  # the jaw dropped to the command, it never opened past the cube
+
+
+def test_release_found_from_the_jaw_opening(tip, unit_map):
+    ep = pick_place_episode(0)
+    st, act = ep.state.copy(), ep.action.copy()
+    act[80:, 5] = SHUT + 5.0  # the leader barely opens
+    st[80:, 5] = 40.0  # but the follower's jaw opens past the cube
+    ep = Episode(0, FPS, JOINTS, st, act)
+    thr = dataset_thresholds([ep])
+    (g,) = find_grasps(ep, thr, tip, unit_map, empty_level([ep], thr))
+    assert g.held and g.release_frame == 80
+    np.testing.assert_allclose(g.release_xyz, tip(unit_map.to_rad(np.array([*POSE_C, 0.0]))), atol=1e-9)
