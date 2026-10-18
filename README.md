@@ -571,7 +571,11 @@ searches the Hub, keeps the datasets the simulator can replay (SO-100/101
 robot type, the six canonical joints, 30 or 50 fps, at least 15 episodes, a
 tabular part under 200 MB and 200 parquet files, not a simulation or a merge
 of several people's recordings, one dataset per account), calibrates each
-one from the default parameters and writes one lock per robot plus a report:
+one from the default parameters and writes one lock per robot plus a report.
+A dataset whose commands equal its measured joints (a scripted or replayed
+log, not teleoperation: the best-shift command-to-state RMS is under 2% of
+the joints' spread) is rejected after loading, since any sim matches it
+trivially:
 
 ```sh
 .venv/bin/antares fleet scan --limit 60 --budget-s 2400   # locks/fleet/*.lock.json, fleet.json
