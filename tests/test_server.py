@@ -1402,3 +1402,12 @@ def test_calibrate_request_forwards_fit_sensor(client, fakes, monkeypatch):
             break
         time.sleep(0.01)
     assert seen["fit_sensor"] is True and seen["sensor_mode"] == "kinematic"
+
+
+def test_check_uses_lock_command_map(client, fakes):
+    write_lock(fakes, "unit-b", kp=50.0, dataset=FAKE_DS2, command_map=SHIFT_MAP)
+    write_lock(fakes, "unit-b-plain", kp=50.0, dataset=FAKE_DS2)
+    mapped = client.post("/api/check", json={"dataset": FAKE_DS2, "lock": "unit-b"}).json()
+    plain = client.post("/api/check", json={"dataset": FAKE_DS2, "lock": "unit-b-plain"}).json()
+    assert mapped["score"] < 0.5 * plain["score"]
+    assert mapped["passed"] is True and plain["passed"] is False

@@ -1007,7 +1007,7 @@ def run_check(
         return np.asarray(arm.real_q(ep)), np.asarray(arm.replay(ep))
 
     try:
-        with _ARM_LOCK:
+        with _ARM_LOCK, _command_map(arm, command_map_from_lock(lock_d)):
             return check(
                 ds.episodes,
                 lock_d,
