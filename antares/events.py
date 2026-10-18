@@ -343,22 +343,26 @@ def residual_baseline(
     """Replay ``episodes`` on ``arm`` and estimate the free-motion residual baseline.
 
     ``arm`` is anything with ``real_q(episode)`` and ``replay(episode)``
-    returning (T, 6) radians, normally an :class:`antares.sim.Arm` carrying
-    the lock's parameters. Use held-out episodes so the baseline is not
+    returning (T, J) radians, normally an :class:`antares.sim.Arm` carrying
+    the lock's parameters; an Arm's robot names the columns and which
+    gripper's command labels free motion (the first, on a two-arm rig). Use held-out episodes so the baseline is not
     flattered by the fit. ``thresholds`` default to ones fitted on these
     episodes' gripper commands.
     """
     episodes = list(episodes)
     if not episodes:
         raise ValueError("no episodes")
+    robot = getattr(arm, "robot", None)
+    g = robot.gripper_indices[0] if robot is not None and robot.grippers else GRIPPER_INDEX
+    joints = tuple(robot.joints) if robot is not None else JOINTS
     if thresholds is None:
-        thresholds = gripper_thresholds(np.concatenate([ep.action[:, GRIPPER_INDEX] for ep in episodes]))
+        thresholds = gripper_thresholds(np.concatenate([ep.action[:, g] for ep in episodes]))
     res, masks = [], []
     for ep in episodes:
         res.append(residuals(arm.real_q(ep), arm.replay(ep)))
-        masks.append(free_motion_mask(ep.action[:, GRIPPER_INDEX], thresholds, margin))
+        masks.append(free_motion_mask(ep.action[:, g], thresholds, margin))
     return baseline_from_residuals(
-        res, masks, joints=JOINTS, episodes=[ep.index for ep in episodes], min_scale_deg=min_scale_deg
+        res, masks, joints=joints, episodes=[ep.index for ep in episodes], min_scale_deg=min_scale_deg
     )
 
 
