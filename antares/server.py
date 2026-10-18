@@ -1058,6 +1058,70 @@ def build_lock(ds: Dataset, train: list, result, name: str | None, robot: str | 
     )
 
 
+def save_tuned_lock(
+    ds: Dataset,
+    params,
+    name: str,
+    *,
+    from_lock: str | None = None,
+    n_train: int = 20,
+    n_eval: int = 10,
+    seed: int = 0,
+) -> dict:
+    """Save hand-picked ``params`` (the viewer's tuning panel) as lock ``name``.
+
+    Scored like a calibration on the same train/eval split, against the
+    robot's default parameters, so the lock's numbers compare with fitted
+    ones. Tuned from a saved lock (``from_lock``), the new lock keeps that
+    lock's model, sensor command map, LeRobot calibration and camera/scene
+    fits: only the physics changed. Refuses to overwrite an existing lock.
+    """
+    import time
+
+    from antares.calibrate import CalibrationResult, default_simulate, score, split_episodes
+
+    path = _lock_path(name)
+    if path.exists():
+        raise HTTPException(status_code=409, detail=f"a lock named {name!r} already exists")
+    src = load_lock_dict(from_lock) if from_lock else None
+    robot = check_robot((src or {}).get("robot") or dataset_robot(ds))
+    sim = (lock_simulate(src) if src else None) or default_simulate(robot=robot)
+    try:
+        train, eval_ = split_episodes(ds.episodes, n_train, n_eval, seed=seed)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    held_out = eval_ or train
+    t0 = time.perf_counter()
+    start = default_params(robot)
+    before_train, after_train = score(start, train, sim), score(params, train, sim)
+    before_eval, after_eval = score(start, held_out, sim), score(params, held_out, sim)
+    result = CalibrationResult(
+        params=params,
+        baseline=start,
+        train_score=float(after_train.overall_deg),
+        eval_score=float(after_eval.overall_deg),
+        baseline_train_score=float(before_train.overall_deg),
+        baseline_eval_score=float(before_eval.overall_deg),
+        per_joint_before={k: float(v) for k, v in before_eval.per_joint_deg.items()},
+        per_joint_after={k: float(v) for k, v in after_eval.per_joint_deg.items()},
+        history=[],
+        n_evaluations=0,
+        elapsed_s=time.perf_counter() - t0,
+        train_episodes=[ep.index for ep in train],
+        eval_episodes=[ep.index for ep in eval_],
+        space="per_joint" if params.has_per_joint else "shared",
+        # No search ran: the one "manual" stage records the hand-set values.
+        stages=[{"name": "manual", "n_evaluations": 0, "train_score": float(after_train.overall_deg),
+                 "params": params.to_dict()}],
+    )
+    carried = {k: src[k] for k in ("command_map", "dynamics_only", "calibration") if src and src.get(k) is not None}
+    lock = build_lock(ds, train, result, name, robot=robot, **carried)
+    if src:
+        lock = lock.replace(cameras=dict(src.get("cameras") or {}), scene=src.get("scene"), objects=src.get("objects"))
+    save_lock(lock)
+    return lock.to_dict()
+
+
 # --------------------------------------------------------------------------
 # Drift scans (``LOCK_DIR/<lock>.drift.json``, one per lock)
 # --------------------------------------------------------------------------
@@ -2357,6 +2421,32 @@ def lock_export_zip(
         media_type="application/zip",
         headers=_attachment(f"{name}.zip"),
     )
+
+
+class SaveLockRequest(BaseModel):
+    dataset: str
+    name: str
+    # As POST /api/replay takes them: scalars or per-joint lists, plus "servo".
+    params: dict[str, float | list[float] | str]
+    # The saved lock the values were tuned from; its sensor map, calibration
+    # and camera fits carry over.
+    from_lock: str | None = None
+    n_train: int = Field(20, ge=1)
+    n_eval: int = Field(10, ge=0)
+    seed: int = 0
+
+
+@app.post("/api/locks")
+def lock_save(req: SaveLockRequest) -> dict:
+    """Save hand-tuned parameters as a new lock; returns its summary."""
+    ds = get_dataset(req.dataset)
+    try:
+        params = params_from_dict(req.params)
+    except (TypeError, ValueError, KeyError) as e:
+        raise HTTPException(status_code=400, detail=f"bad params: {e}")
+    return lock_summary(save_tuned_lock(
+        ds, params, req.name, from_lock=req.from_lock, n_train=req.n_train, n_eval=req.n_eval, seed=req.seed
+    ))
 
 
 @app.delete("/api/locks/{name}")
