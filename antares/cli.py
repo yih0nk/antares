@@ -1921,7 +1921,8 @@ def cmd_camera_fit(args: argparse.Namespace) -> int:
           f"held-out IoU {fit.heldout_iou:.3f} on {len(fit.heldout_frames)} frames, "
           f"{fit.n_evaluations} evaluations in {fit.elapsed_s:.0f}s"
           + (" (cancelled)" if fit.cancelled else ""))
-    print(f"  pos {['%.3f' % v for v in fit.pos]} quat {['%.4f' % v for v in fit.quat]} fovy {fit.fovy:.1f} deg")
+    # Distance trades against field of view in a silhouette fit, so the pose is not a measurement.
+    print(f"  fitted pose (loose along the optical axis): pos {['%.3f' % v for v in fit.pos]} quat {['%.4f' % v for v in fit.quat]} fovy {fit.fovy:.1f} deg")
     print(f"  starts reached IoU {', '.join('%.2f' % v for v in fit.start_ious)}; best was {fit.best_start}")
     print(f"saved {path}")
     return 0
