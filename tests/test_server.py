@@ -1803,7 +1803,7 @@ def test_registry_routes_register_activate_rollback_remove(client, fakes):
     out = _register(client, "arm_a", "v3", activate=False)
     assert not out["registration"]["activated"] and out["active"] == "v2" and out["n_versions"] == 3
     assert client.post("/api/registry/arm_a/register", json={"lock": "ghost"}).status_code == 404
-    assert client.post("/api/registry/bad%2Fid/register", json={"lock": "v1"}).status_code in (400, 404)
+    assert client.post("/api/registry/-bad/register", json={"lock": "v1"}).status_code == 400  # invalid robot id
     assert client.post("/api/registry/arm_a/register", json={"lock": "v1", "max_regression": -1}).status_code == 422
 
     listing = client.get("/api/registry").json()
