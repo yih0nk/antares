@@ -2,52 +2,126 @@
 
 **A simulator calibrated to *this* robot, from its own logs.**
 
-Every physical robot is a slightly different deploy target: servo gains
-drift, joints wear, calibrations differ. A policy that works in a generic
-sim meets a specific arm in the real world. Antares takes a few minutes of
-one robot's recorded episodes, fits the simulator to that unit, and shows
-you how much of the sim-to-real gap closed.
+Point Antares at a robot's recorded episodes and it fits the simulator to
+that one unit: the servos' gain, damping and latency, where its cameras
+stand, how high its table is, the object it handles and where that object
+gets picked up and put down. A policy trained or tested in that sim then
+meets the arm that actually exists rather than a generic one. It was built
+in a weekend on public [LeRobot](https://github.com/huggingface/lerobot)
+datasets of the SO-100 and SO-101 arms, with no hardware: every number
+below is measured against logged trajectories, never against a live arm.
+
+## The result
+
+Tracking error is the RMS difference in degrees, over the five body joints,
+between the real arm and a MuJoCo arm fed the same commands, on held-out
+episodes the fit never saw. Every number comes from a file under `locks/`
+or `results/`; the linked section says how it was measured.
+
+| Question | Answer | Section |
+|---|---|---|
+| How far is the stock sim from the SO-101, and how close does one fitted parameter set get? | 6.01° → **0.74°** held-out (`locks/svla_so101_pickplace.lock.json`) | [Per-joint calibration](#per-joint-calibration) |
+| Same for the SO-100 | 2.74° → **0.79°** (`locks/svla_so100_pickplace.lock.json`) | same |
+| One parameter set per joint instead of one shared? | **0.66°** (SO-101) and **0.54°** (SO-100) | same |
+| Does it work on arms other than the two demos? | 58 public SO-100/101 arms from the Hub, all improved; median 3.45° → 1.09°, the median arm closing **63%** of its gap (`locks/fleet/fleet.json`) | [Fleet scan](#fleet-scan) |
+| Is a lock specific to its arm? | On a 6-arm cross matrix a robot scores **1.00°** on its own lock, 1.54° on another arm's, 4.60° on the defaults | [Fleet scan](#fleet-scan), [Is a lock specific to its arm?](#is-a-lock-specific-to-its-arm) |
+| Where are the cameras? | Pose from the video by silhouette matching; held-out IoU **0.83** (SO-101 `up`), 0.72 (`side`), 0.60 (SO-100 `top`) | [Cameras from the logs](#cameras-from-the-logs) |
+| Where is the table? | **−22 mm** below the base, tilt 0.6°, read from where the gripper closed (SO-101) | [Scene from the logs](#scene-from-the-logs) |
+| Where is the object? | Tracked through 50/50 episodes; vision and forward kinematics agree to **2.1 cm** median at the grasp (SO-101) | [Objects from the video and the residual](#objects-from-the-video-and-the-residual) |
+| Does the calibration change what a policy looks like? | A policy learned from the logs, open loop: the stock and the calibrated sim disagree by **5.8°** RMS on SO-101, as much as the stock sim's own replay error. Closed loop: the stock sim closes the gripper **2.8 s early** (84 frames) on average; the calibrated sim within a frame of the real close | [A learned policy, judged in both sims](#a-learned-policy-judged-in-both-sims) |
+
+The policy row is sim against sim. What makes the calibrated sim's verdict
+the one to believe is the lock's held-out replay against the real arm, not
+anything measured on hardware; see [Honest limits](#honest-limits).
 
 ## How it works
 
-1. **Load real logs.** Commanded actions and measured joint positions
-   from a [LeRobot](https://github.com/huggingface/lerobot) dataset (no
-   video needed).
-2. **Replay in sim.** Start MuJoCo from the real initial state, feed the
-   same commands, and measure where the sim drifts from reality.
-3. **Calibrate.** CMA-ES fits actuator gain, damping, armature, friction,
-   and latency to that robot's episodes, scored on held-out ones.
-4. **Fit the sensor calibration (optional).** With `--fit-sensor`,
-   Antares also fits a per-joint offset and scale between the logged
-   commands and the measured joints, and saves it in the lock.
-5. **See it.** The web UI overlays the real arm and the sim ghost in 3D
-   and streams the fit live, so you watch the ghost lock on.
+1. **Logs.** Load a LeRobot dataset (a Hub id, a zip or a directory): the
+   commanded actions and the measured joint positions at 30 or 50 fps. The
+   video is optional until step 5. → [Bring your own dataset](#bring-your-own-dataset)
+2. **Replay.** Start MuJoCo from the real initial state, feed it the same
+   commands and record where the sim arm ends up. → [Supported robots](#supported-robots)
+3. **Gap.** Score real against sim per joint, in degrees, on episodes held
+   out of the fit; this one number is what every other section is measured
+   in, and the same replay later becomes the drift gate. → [Gate deploys on your robot's drift](#gate-deploys-on-your-robots-drift)
+4. **Calibrate.** CMA-ES fits gain, damping, armature, friction and latency
+   to the training episodes, shared across joints and then per joint, with
+   optional sensor map, gravity load, deadband or a servo model, and saves
+   a lock. → [Calibrating the arm](#calibrating-the-arm)
+5. **Cameras, scene, objects.** From the same logs and the video: each
+   camera's pose by matching the sim arm's silhouette to the real one, the
+   table height from where the gripper closed, the object tracked through
+   every frame. → [Seeing what the robot sees](#seeing-what-the-robot-sees)
+6. **Policy in the loop.** Train a policy on the lock's split and run it in
+   the stock and the calibrated sim, open loop and closed loop, to see how
+   differently the two judge it. → [A policy in the loop](#a-policy-in-the-loop)
 
-First embodiment: the SO-100/101 arm, using public community datasets.
-
-## Run it
+## Quickstart
 
 ```sh
-python3.11 -m venv .venv && .venv/bin/pip install -e ".[dev]"
-.venv/bin/antares serve            # API on :8000
-
-cd web && npm install && npm run dev   # UI on :5173
+python3.11 -m venv .venv && .venv/bin/pip install -e ".[dev,video,policy]"
+.venv/bin/antares serve                  # API on :8000
+cd web && npm install && npm run dev     # UI on :5173
 ```
 
 Or build the UI once (`cd web && npm run build`) and `antares serve` alone
-serves it on :8000.
+serves it on :8000. The `video` extra is for the camera, scene and object
+fits (PyAV, OpenCV, SciPy); `policy` is torch for the state policy.
 
-In the viewer, the white arm is the logged robot and the blue ghost is the
+In the viewer the white arm is the logged robot and the blue ghost is the
 simulator replaying the same commands. Pick an episode, scrub the timeline,
 switch the ghost between the default sim and a saved lock, or press
 **Calibrate** to fit a new lock and watch the ghost lock on as the error
-drops.
+drops. The **Fleet** toggle shows every lock with its last drift check.
 
-Inspect a dataset from the CLI:
+A five-command tour on the public SO-101 dataset:
 
 ```sh
-.venv/bin/antares inspect lerobot/svla_so101_pickplace
+.venv/bin/antares inspect lerobot/svla_so101_pickplace                         # verdict and summary, no sim
+.venv/bin/antares calibrate lerobot/svla_so101_pickplace --seeds 3 --name my_so101   # about a minute; locks/my_so101.lock.json
+.venv/bin/antares replay lerobot/svla_so101_pickplace --episode 0 --lock my_so101    # the gap on one episode
+.venv/bin/antares camera-fit lerobot/svla_so101_pickplace --camera up --lock my_so101  # about a minute per camera
+.venv/bin/antares policy evaluate lerobot/svla_so101_pickplace --lock svla_so101_pickplace --mode both   # the committed policy in both sims
 ```
+
+Bring your own dataset, in short (details in [Bring your own dataset](#bring-your-own-dataset)):
+
+* **A Hub id**: `antares inspect owner/name` says whether it can be replayed before anything large is downloaded; the UI's **+ add dataset** does the same.
+* **A zip** of a LeRobot dataset directory, dropped on that popover or sent to `POST /api/datasets/upload`.
+* **A directory on disk**: every command takes `./recordings/2026-10-17` wherever it takes a Hub id.
+* **What it needs**: an SO-100/101 `robot_type` (or a registered robot), the six joints in order, 30 or 50 fps, at least 5 episodes.
+* **Your arm's LeRobot calibration file**, by `--robot-id` or `--calibration`, gives the replay the exact unit map instead of the model's guess.
+
+## What you get out
+
+* **A lock**, `locks/<name>.lock.json`: the fitted parameters, the split and the held-out scores before and after, every seed's candidate and which parameters they agree on, the unit map, and the camera, scene and object fits once made. Everything else reads it.
+* **Exports**: `antares export <lock>` writes a standalone MJCF and a `scene.xml` with the table, the backdrops and the object at the fitted camera poses; `--format all` adds Isaac Lab, ManiSkill and mjlab actuator configs and a neutral JSON sidecar. → [Export](#export)
+* **Domain-randomization ranges**: `antares dr` refits the lock on subsets of the episodes and writes the measured scatter to `locks/<name>.dr.json`, in place of a hand-picked ±30%. → [Domain randomization from data](#domain-randomization-from-data)
+* **A drift gate**: `antares check` replays fresh episodes and exits 1 when the arm no longer matches its lock; `--explain` names the parameter that moved, `--notify` posts to a webhook, and `action.yml` runs it as a GitHub Action. → [Gate deploys on your robot's drift](#gate-deploys-on-your-robots-drift)
+* **Lag-compensated commands**: `antares compensate --method ilc --out commands.npy` computes commands that make the calibrated sim follow a desired path; validated in the sim only. → [Lag compensation](#lag-compensation-sim-validated)
+* **One identity per robot**: `locks/registry.json` gives a physical arm an id, a lineage of locks and one active one, so `--lock @arm_a` follows recalibrations. → [One identity per robot: the registry](#one-identity-per-robot-the-registry)
+
+## Honest limits
+
+* **Two arm types.** Every number here is from the two SO-100/101 demo datasets and the 58 SO-100/101 arms in the fleet scan. ALOHA, Trossen AI, AgileX Piper and Koch are registered models that load, replay and export (the tests cover them), but no lock for them is committed and no gap has been measured. Adding a robot is an MJCF, a unit map and a registry entry.
+* **Nothing was driven on hardware.** Locks are scored against held-out logged trajectories; lag compensation, DR ranges and both policy experiments are sim-to-sim. The policy claim is "the stock sim and the calibrated sim judge the same policy differently, and the lock's held-out replay says which to believe", not "the policy works on the arm".
+* **Parameter values are fits, not measurements.** `kp`, `kv`, damping, armature and friction trade off at the same tracking error (seeds on one arm span 25× in `kp`); only latency and the sensor map are pinned by pick-and-place logs. `--seeds 3` records which parameters the seeds agree on, and everything downstream reads only those as physical.
+* **The leftover elbow error is step-shaped**, not a slope in gravity load, so the six servo parameters do not express it; the contact detector sees that pose dependence, not contact with a light object.
+* **Payload mass is below the noise.** The residual resolves 13 g per encoder step with a noise floor of 40–60 g; a 30 g object comes out at 22 g with a 69 g IQR, so the export uses an assumed 30 g and says so.
+* **Camera fits are loose in depth.** Silhouettes pin the viewing direction but trade distance against field of view; the SO-101 `side` camera's rays meet 2.6 cm below the object plane. The table height assumes a 15 mm object half-height and a horizontal plane.
+
+## Reference map
+
+| Section | What it answers |
+|---|---|
+| [Calibrating the arm](#calibrating-the-arm) | What the fit accounts for, per-joint and seeded fits, the sensor map, gravity and deadband, the STS3215 servo model, your own LeRobot calibration file |
+| [Every robot is different](#every-robot-is-different) | Whether a lock is specific to its arm, the 58-arm fleet scan, the registry that gives each physical robot one id |
+| [Operating the robot](#operating-the-robot) | Drift within a session, the pre-deploy gate with its cause diagnosis and alerts, contact events, lag compensation, DR ranges |
+| [Seeing what the robot sees](#seeing-what-the-robot-sees) | Pick and place positions, joint noise, camera poses and video delay, the table and backdrops, the object and its mass |
+| [A policy in the loop](#a-policy-in-the-loop) | A learned policy judged in both sims; two sim-to-sim transfer experiments |
+| [Export](#export) | The MJCF, scene and sidecar; Isaac Lab, ManiSkill and mjlab configs |
+| [Bring your own dataset](#bring-your-own-dataset) | Hub ids, zips and directories; what a dataset needs; which robots are modelled |
+| [Layout](#layout), [Status](#status) | Where the code is; what works end to end and what is partial |
 
 ## Calibrating the arm
 
