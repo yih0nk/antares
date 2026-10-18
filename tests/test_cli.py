@@ -1339,3 +1339,87 @@ def test_calibrate_fit_sensor_prints_comparison(monkeypatch, capsys):
     assert seen["fit_sensor"] is True and seen["sensor_mode"] == "kinematic"
     assert "dynamics only" in out and "1.500" in out and "0.750" in out
     assert "sensor calibration" in out and "-2.500" in out and "0.9800" in out
+
+
+# ---------------------------------------------------------------------------
+# the follower's LeRobot calibration
+# ---------------------------------------------------------------------------
+
+
+def _calibration_file(path, shift_joint=None, shift=0):
+    """A calibration matching the SO-101 model's ranges, one joint optionally shifted."""
+    from antares import lerobot_calib as lc
+    from antares.sim import load_model
+
+    jr = load_model().jnt_range
+    out = {}
+    for i, j in enumerate(JOINTS):
+        span = int(round((jr[i, 1] - jr[i, 0]) / lc.RAD_PER_TICK))
+        lo = 1000 if j == "gripper" else lc.HALF_TURN - span // 2
+        if j == shift_joint:
+            lo += shift
+        out[j] = {"id": i + 1, "drive_mode": 0, "homing_offset": 0, "range_min": lo, "range_max": lo + span}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(out))
+    return path
+
+
+def test_inspect_with_calibration_prints_the_disagreement_table(monkeypatch, capsys, tmp_path):
+    import antares.data
+    from antares import server
+
+    monkeypatch.setattr(server, "fetch_hub_info", lambda repo_id: _info())
+    monkeypatch.setattr(antares.data, "load_dataset", lambda repo_id, cache_dir=None: _dataset(repo_id, n=20))
+    path = _calibration_file(tmp_path / "arm.json", shift_joint="wrist_roll", shift=100)  # 8.8 deg
+    assert cli.main(["inspect", "fake/robot", "--calibration", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert f"LeRobot calibration {path} vs the so101 model" in out
+    assert "range_min" in out and "FLAG" in out
+    assert "warning: wrist_roll is off by up to 8.8 deg: the model's assumed range does not match" in out
+    assert "use --calibration when calibrating" in out
+    # the untouched joints are not flagged
+    assert out.count("FLAG") == 1
+
+
+def test_inspect_with_robot_id_uses_lerobot_dir(monkeypatch, capsys, tmp_path):
+    import antares.data
+    from antares import server
+
+    monkeypatch.setattr(server, "fetch_hub_info", lambda repo_id: _info())
+    monkeypatch.setattr(antares.data, "load_dataset", lambda repo_id, cache_dir=None: _dataset(repo_id, n=20))
+    monkeypatch.setenv("HF_LEROBOT_CALIBRATION", str(tmp_path / "cal"))
+    _calibration_file(tmp_path / "cal" / "robots" / "so_follower" / "my_arm.json")
+    assert cli.main(["inspect", "fake/robot", "--robot-id", "my_arm"]) == 0
+    out = capsys.readouterr().out
+    assert "all joints within 2 deg" in out and "FLAG" not in out
+    assert cli.main(["inspect", "fake/robot", "--robot-id", "nope"]) == 2
+    err = capsys.readouterr().err
+    assert "no LeRobot calibration named 'nope'" in err and "so101_follower" in err
+
+
+def test_calibrate_cli_forwards_the_calibration(monkeypatch, capsys, tmp_path):
+    from antares import server
+
+    seen = {}
+    result = type("R", (), {"to_dict": lambda self: {
+        "per_joint_before": {j: 4.0 for j in JOINTS}, "per_joint_after": {j: 1.0 for j in JOINTS},
+        "baseline_eval_score": 4.0, "eval_score": 0.75, "params": {"kp": 1.0},
+        "n_evaluations": 10, "elapsed_s": 1.0,
+    }})()
+    lock = {"name": "unit-c", "calibration": {"source": "/x/arm.json", "robot_id": "arm",
+                                              "unit_map_disagreement_deg": {"wrist_roll": 8.79, "gripper": 0.0}}}
+
+    def fake_run(ds, **kw):
+        seen.update(kw)
+        return result, lock, "locks/unit-c.lock.json"
+
+    monkeypatch.setattr(server, "_DATASETS", {"fake/robot": _dataset()})
+    monkeypatch.setattr(server, "run_calibration", fake_run)
+    assert cli.main(["calibrate", "fake/robot", "--calibration", "/x/arm.json"]) == 0
+    out = capsys.readouterr().out
+    assert seen["calibration_path"] == "/x/arm.json" and seen["robot_id"] is None
+    assert seen["robot_type"] == "so101_follower"
+    assert "unit map from the arm's LeRobot calibration" in out
+    assert "unit map from LeRobot calibration /x/arm.json (robot id arm)" in out and "wrist_roll=8.79" in out
+    assert cli.main(["calibrate", "fake/robot", "--robot-id", "arm", "--robot-type", "so100_follower"]) == 0
+    assert seen["calibration_path"] is None and seen["robot_id"] == "arm" and seen["robot_type"] == "so100_follower"

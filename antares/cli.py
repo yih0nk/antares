@@ -127,7 +127,51 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     print("joints:", ", ".join(ds.joint_names))
     print(f"sim model: {model_for_dataset(ds.robot_type)}")
     _print_verdict(v)
+    if getattr(args, "calibration", None) or getattr(args, "robot_id", None):
+        if _print_calibration_check(ds, args) is None:
+            return 2
     return 0 if v.ok else 1
+
+
+def _print_calibration_check(ds, args: argparse.Namespace):
+    """Model-range unit map vs the arm's LeRobot calibration, per joint.
+
+    Prints the table and a warning per joint over 2 deg. Returns the check
+    dict, or None (after printing the error) when the calibration cannot be
+    read.
+    """
+    from fastapi import HTTPException
+
+    from antares import server
+    from antares.lerobot_calib import FLAG_MESSAGE, calibration_check
+
+    try:
+        calib, path = server.resolve_calibration(args.calibration, args.robot_id, args.robot_type)
+        robot = server.check_robot(server.dataset_robot(ds))
+        chk = calibration_check(calib, server.get_arm(robot).model)
+    except HTTPException as e:
+        print(f"error: {_detail(e)}", file=sys.stderr)
+        return None
+    print()
+    print(f"LeRobot calibration {path} vs the {robot} model's joint ranges")
+    print("(calibration map - model map, degrees, at -100/0/+100 units; gripper at 0/50/100):")
+    rows = []
+    for r in chk["joints"]:
+        at = list(r["at"].values())
+        rows.append([
+            r["joint"], str(r["range_min"]), str(r["range_max"]), str(r["homing_offset"]),
+            f"{r['calibration_span_deg']:.1f}", f"{r['model_span_deg']:.1f}",
+            f"{at[0]:+.2f}", f"{at[1]:+.2f}", f"{at[2]:+.2f}", f"{r['max_deg']:.2f}",
+            "FLAG" if r["flagged"] else "",
+        ])
+    print(_table(["joint", "range_min", "range_max", "homing", "arm span", "model span",
+                  "lo", "mid", "hi", "max", ""], rows))
+    for r in chk["joints"]:
+        if r["flagged"]:
+            print(f"  warning: {r['joint']} is off by up to {r['max_deg']:.1f} deg: {FLAG_MESSAGE}")
+    if not chk["flagged"]:
+        print(f"  all joints within {chk['threshold_deg']:g} deg of the model's ranges")
+    return chk
 
 
 def cmd_replay(args: argparse.Namespace) -> int:
@@ -136,12 +180,14 @@ def cmd_replay(args: argparse.Namespace) -> int:
     ds = _load_dataset(args.repo_id)
     if ds is None:
         return 2
-    params = cmap = None
+    params = cmap = unit_map = None
     if args.lock:
         lock = server.load_lock_dict(args.lock)
         params = server.params_from_dict(lock["params"])
         cmap = server.command_map_from_lock(lock)
-    out = server.replay_episode(ds, args.episode, params, cmap, robot=args.robot)
+        unit_map = server.unit_map_from_lock(lock)
+    out = server.replay_episode(ds, args.episode, params, cmap, robot=args.robot,
+                                **({"unit_map": unit_map} if unit_map is not None else {}))
     gap = out["gap"]
     label = f"lock {args.lock}" if args.lock else "default params"
     print(f"{ds.repo_id} episode {out['episode']} ({len(out['real_q'])} frames, {label}, model {out.get('robot', 'so101')})")
@@ -162,6 +208,8 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
         stages += f" + {args.per_joint_evaluations} per-joint evaluations"
     if args.fit_sensor:
         stages += " per round, fitting the sensor calibration"
+    if args.calibration or args.robot_id:
+        stages += ", unit map from the arm's LeRobot calibration"
     print(f"calibrating {ds.repo_id}: {args.n_train} train / {args.n_eval} eval episodes, {stages}")
     last = {"n": 0, "stage": None, "seed": None}
 
@@ -197,6 +245,9 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
         fit_sensor=args.fit_sensor,
         sensor_mode=args.sensor_mode,
         n_seeds=args.seeds,
+        calibration_path=args.calibration,
+        robot_id=args.robot_id,
+        robot_type=args.robot_type,
     )
     r = result.to_dict()
     only = lock.get("dynamics_only")
@@ -232,6 +283,13 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
         print("sensor calibration (command = gain * logged + bias, dataset units):")
         print(_table(["joint", "gain", "bias"],
                      [[j, f"{g:.4f}", f"{b:+.3f}"] for j, g, b in zip(joints, cm["gain"], cm["bias"])]))
+    if lock.get("calibration"):
+        cal = lock["calibration"]
+        dis = cal.get("unit_map_disagreement_deg") or {}
+        print()
+        print(f"unit map from LeRobot calibration {cal.get('source')} (robot id {cal.get('robot_id')})")
+        print("  disagreement with the model's ranges (deg): "
+              + ", ".join(f"{j}={v:.2f}" for j, v in dis.items()))
     print(f"{r['n_evaluations']} evaluations in {r['elapsed_s']:.1f}s")
     print(f"saved lock {lock['name']} -> {path}")
     return 0
@@ -1470,8 +1528,19 @@ def build_parser() -> argparse.ArgumentParser:
     dataset_help = "Hub dataset id, upload/<name>, or a LeRobot dataset directory on disk"
     robot_help = "sim model from the registry (so101, so100); default: the dataset's family"
 
+    def add_calibration_args(p: argparse.ArgumentParser) -> None:
+        g = p.add_argument_group("LeRobot calibration (the follower arm's own tick-to-angle map)")
+        g.add_argument("--calibration", default=None, metavar="PATH",
+                       help="the follower's LeRobot calibration file (<robot.id>.json)")
+        g.add_argument("--robot-id", default=None, metavar="ID",
+                       help="LeRobot --robot.id: find ID.json under $HF_LEROBOT_CALIBRATION/robots/<robot-type>/")
+        g.add_argument("--robot-type", default="so101_follower",
+                       help="LeRobot robot type for --robot-id (default so101_follower; the so_follower "
+                       "directory of LeRobot >= 0.5 is tried too)")
+
     p = sub.add_parser("inspect", help="validate and summarize a LeRobot dataset")
     p.add_argument("repo_id", help=dataset_help)
+    add_calibration_args(p)
     p.set_defaults(func=cmd_inspect)
 
     p = sub.add_parser("replay", help="replay one episode in sim and print the gap")
@@ -1527,6 +1596,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="with --fit-sensor: fit the map through the sim, alternating with the dynamics "
         "(sim, default), or pre-fit it from still frames and freeze it (kinematic)",
     )
+    add_calibration_args(p)
     p.set_defaults(func=cmd_calibrate)
 
     p = sub.add_parser("cross", help="score locks across datasets (matrix)")
