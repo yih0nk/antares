@@ -161,6 +161,28 @@ export const compMaterial = new THREE.MeshStandardMaterial({
   depthWrite: false,
 });
 
+// The policy driving the stock sim (grey) and the calibrated sim (green):
+// where each simulator says the same policy would take the arm.
+export const policyDefaultMaterial = new THREE.MeshStandardMaterial({
+  color: "#aeb4c2",
+  emissive: "#555b68",
+  emissiveIntensity: 0.25,
+  roughness: 0.5,
+  transparent: true,
+  opacity: 0.32,
+  depthWrite: false,
+});
+
+export const policyLockMaterial = new THREE.MeshStandardMaterial({
+  color: "#6fe07a",
+  emissive: "#2f9a3c",
+  emissiveIntensity: 0.3,
+  roughness: 0.4,
+  transparent: true,
+  opacity: 0.34,
+  depthWrite: false,
+});
+
 export const ghostMaterial = new THREE.MeshStandardMaterial({
   color: "#5b8cff",
   emissive: "#2b4dbf",

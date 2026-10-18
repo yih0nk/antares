@@ -14,12 +14,19 @@ import {
   type LockSummary,
   type Params,
   type ParamValue,
+  type PolicyEvalEvent,
+  type PolicyInfo,
+  type PolicyMode,
+  type PolicyResults,
+  type PolicyTrainEvent,
+  type PolicyTrainProgress,
+  type PolicyViewer,
   type ProgressEvent,
   type Replay,
   type Residual,
   type SceneFit,
 } from "./api";
-import { Arm, compMaterial, ghostMaterial, realMaterial, type Playhead } from "./Arm";
+import { Arm, compMaterial, ghostMaterial, policyDefaultMaterial, policyLockMaterial, realMaterial, type Playhead } from "./Arm";
 import { CameraView } from "./CameraView";
 import { SceneGeometry } from "./Scene";
 import { CrossHeatmap, JointTrace, ResidualStrip, Sparkline } from "./Charts";
@@ -55,9 +62,26 @@ type Calibration = {
   error?: string;
 };
 
+// A policy training or evaluation job streamed from the API.
+type PolicyJob = {
+  jobId: string;
+  kind: "train" | "evaluate";
+  mode?: PolicyMode;
+  status: "running" | "done" | "error";
+  progress: PolicyTrainProgress[];
+  // Evaluation progress: episodes done / total.
+  i: number;
+  n: number;
+  error?: string;
+};
+
+// Epochs a UI training run asks for (early stopping usually ends it sooner).
+const POLICY_EPOCHS = 200;
+
 const short = (id: string) => id.split("/").pop() ?? id;
 
 const deg = (v: number | null | undefined, digits = 2) => (v == null || !isFinite(v) ? "--" : `${v.toFixed(digits)}°`);
+const cm = (v: number | null | undefined, digits = 1) => (v == null || !isFinite(v) ? "--" : `${v.toFixed(digits)} cm`);
 
 function fmtScalar(k: keyof Params, v: number) {
   if (k === "latency_frames") return `${Math.round(v)} fr`;
@@ -158,6 +182,16 @@ export default function App() {
   const [compBusy, setCompBusy] = useState(false);
   // The static scene (table, workspace) fitted for the camera lock, if any.
   const [scene, setScene] = useState<SceneFit | null>(null);
+  // A policy in the loop: the lock's saved policies, their evaluations, the
+  // running job, and the evaluated episode's ghosts in both sims.
+  const [policies, setPolicies] = useState<PolicyInfo[]>([]);
+  const [polResults, setPolResults] = useState<PolicyResults | null>(null);
+  const [polJob, setPolJob] = useState<PolicyJob | null>(null);
+  const [polMode, setPolMode] = useState<PolicyMode>("shadow");
+  const [showPolicy, setShowPolicy] = useState(false);
+  const [polViewer, setPolViewer] = useState<PolicyViewer | null>(null);
+  const [polViewerNote, setPolViewerNote] = useState<string | null>(null);
+  const [polViewerBusy, setPolViewerBusy] = useState(false);
 
   const playhead = useMemo<Playhead>(() => ({ frame: 0 }), []);
 
@@ -503,6 +537,114 @@ export default function App() {
     };
   }, [cameraLock]);
 
+  // ---- policy: saved policies and evaluations of the camera lock -------------
+  const policyLock = cameraLock;
+  const policy = policies[0] ?? null;
+  const refreshPolicy = useCallback((lock: string) => {
+    api.policies(lock).then((r) => setPolicies(r.policies), () => setPolicies([]));
+    api.policyResults(lock).then(setPolResults, () => setPolResults(null));
+  }, []);
+  useEffect(() => {
+    setPolicies([]);
+    setPolResults(null);
+    setPolViewer(null);
+    if (policyLock) refreshPolicy(policyLock);
+  }, [policyLock, refreshPolicy]);
+
+  // The two policy ghosts for the current episode, recomputed by the API on
+  // request (a fraction of a second): only held-out episodes have them.
+  const polBusy = polJob?.status === "running";
+  useEffect(() => {
+    if (!showPolicy || !policyLock || !policy || episode == null || polBusy) return;
+    let live = true;
+    setPolViewerBusy(true);
+    setPolViewerNote(null);
+    api
+      .policyViewer(dataset, policyLock, episode, polMode)
+      .then(
+        (v) => live && setPolViewer(v),
+        (e) => {
+          if (!live) return;
+          setPolViewer(null);
+          setPolViewerNote(e.status === 400 ? `episode ${episode} is not held out from the policy's training` : e.message);
+        },
+      )
+      .finally(() => live && setPolViewerBusy(false));
+    return () => {
+      live = false;
+    };
+  }, [showPolicy, policyLock, policy, dataset, episode, polMode, polBusy]);
+
+  const policySource = useRef<EventSource | null>(null);
+  useEffect(() => () => policySource.current?.close(), []);
+
+  const followPolicyJob = (jobId: string, kind: PolicyJob["kind"], mode?: PolicyMode) => {
+    setPolJob({ jobId, kind, mode, status: "running", progress: [], i: 0, n: 0 });
+    policySource.current?.close();
+    const src = api.jobEvents(jobId);
+    policySource.current = src;
+    src.onmessage = (msg) => {
+      const ev = JSON.parse(msg.data) as PolicyTrainEvent | PolicyEvalEvent;
+      if (ev.type === "progress") {
+        setPolJob((j) =>
+          j && j.jobId === jobId
+            ? "epoch" in ev
+              ? { ...j, progress: [...j.progress, ev] }
+              : { ...j, i: ev.i, n: ev.n }
+            : j,
+        );
+      } else if (ev.type === "done") {
+        src.close();
+        setPolJob((j) => (j && j.jobId === jobId ? { ...j, status: "done" } : j));
+        if (policyLock) refreshPolicy(policyLock);
+        if (kind === "evaluate") setShowPolicy(true);
+      } else if (ev.type === "error") {
+        src.close();
+        setPolJob((j) => (j && j.jobId === jobId ? { ...j, status: "error", error: ev.message } : j));
+      }
+    };
+    src.onerror = () => {
+      if (src.readyState === EventSource.CLOSED) {
+        setPolJob((j) => (j && j.jobId === jobId && j.status === "running" ? { ...j, status: "error", error: "lost the progress stream" } : j));
+      }
+    };
+  };
+
+  const startPolicyTraining = async () => {
+    if (!policyLock) return;
+    setError(null);
+    try {
+      const { job_id } = await api.policyTrain(dataset, policyLock, POLICY_EPOCHS);
+      followPolicyJob(job_id, "train");
+    } catch (e) {
+      setError(`Could not start training: ${(e as Error).message}`);
+    }
+  };
+
+  const startPolicyEval = async (mode: PolicyMode) => {
+    if (!policyLock) return;
+    setError(null);
+    setPolMode(mode);
+    try {
+      const { job_id } = await api.policyEvaluate(dataset, policyLock, mode);
+      followPolicyJob(job_id, "evaluate", mode);
+    } catch (e) {
+      setError(`Could not start the evaluation: ${(e as Error).message}`);
+    }
+  };
+
+  const polResult = polMode === "shadow" ? polResults?.shadow ?? null : polResults?.closedloop ?? null;
+  const polRows = polResult ? Object.entries(polResult.summary.variants) : [];
+  // Typed headline rows per mode (the table below handles both shapes per row).
+  const shadowLock = polResults?.shadow?.summary.variants["lock"] ?? null;
+  const shadowDefault = polResults?.shadow?.summary.variants["default"] ?? null;
+  const clLock = polResults?.closedloop?.summary.variants["lock"] ?? null;
+  const clDefault = polResults?.closedloop?.summary.variants["default"] ?? null;
+  const polHeldOut = policy?.eval_episodes ?? [];
+  const polPoses = (name: string) =>
+    showPolicy && polViewer && polViewer.episode === episode && !polBusy ? polViewer.sims[name]?.poses ?? null : null;
+  const lastEpoch = polJob?.progress[polJob.progress.length - 1];
+
   const seek = (f: number) => {
     playhead.frame = f;
     setFrame(Math.floor(f));
@@ -586,6 +728,8 @@ export default function App() {
                   hotSpans={hotSpans}
                 />
                 <Arm geometry={geometry} poses={compPoses} clip={clip} playhead={playhead} material={compMaterial} />
+                <Arm geometry={geometry} poses={polPoses("default")} clip={`${clip}#policy`} playhead={playhead} material={policyDefaultMaterial} />
+                <Arm geometry={geometry} poses={polPoses("lock")} clip={`${clip}#policy`} playhead={playhead} material={policyLockMaterial} />
                 <SceneGeometry scene={scene} />
               </group>
             </Suspense>
@@ -607,6 +751,18 @@ export default function App() {
               <i className="swatch comp" /> sim with lag-compensated commands (sim-validated only)
               {compBusy && <span className="dot" />}
             </span>
+          )}
+          {showPolicy && policy && (
+            <>
+              <span>
+                <i className="swatch pol-default" /> policy in the default sim
+                {polViewerBusy && <span className="dot" />}
+              </span>
+              <span>
+                <i className="swatch pol-lock" /> policy in the calibrated sim ({polMode === "shadow" ? "its commands replayed" : "closed loop"})
+              </span>
+              {polViewerNote && <span className="muted small">{polViewerNote}</span>}
+            </>
           )}
           {scene && (
             <span className="muted small">
@@ -815,6 +971,173 @@ export default function App() {
                 in the calibrated MuJoCo model, no hardware driven.
               </div>
             </div>
+          )}
+        </section>
+
+        <section>
+          <div className="label">A policy in the loop</div>
+          {!policyLock ? (
+            <div className="muted small">Calibrate first: the policy trains on a lock's training episodes and is judged on its held-out ones.</div>
+          ) : (
+            <>
+              <div className="row">
+                <button
+                  className="cta secondary"
+                  disabled={running || polBusy || dsState !== "ready"}
+                  onClick={startPolicyTraining}
+                  title="State-based chunked policy (ACT without images): the last 2 joint states and the grasp point in, the next 10 commands out. Trained on the lock's training episodes, early-stopped on its held-out ones. Seconds on a CPU; needs the [policy] extra (torch)."
+                >
+                  {polJob?.kind === "train" && polBusy ? "Training…" : policy ? "Retrain policy" : "Train policy"}
+                </button>
+                <span className="muted small">
+                  {polJob?.kind === "train" && polBusy && lastEpoch
+                    ? `epoch ${lastEpoch.epoch} · held-out mse ${lastEpoch.eval_mse.toFixed(3)} (best ${lastEpoch.best_eval_mse.toFixed(3)})`
+                    : policy
+                      ? `${policy.name} · ${policy.train_episodes.length} train / ${policy.eval_episodes.length} held-out episodes`
+                      : `on lock ${policyLock}`}
+                </span>
+              </div>
+              {polJob?.kind === "train" && polBusy && (
+                <div className="progress">
+                  <span style={{ width: `${Math.min(100, (100 * (lastEpoch?.epoch ?? 0)) / POLICY_EPOCHS)}%` }} />
+                </div>
+              )}
+              {polJob?.status === "error" && <div className="bad small">{polJob.error}</div>}
+              {policy && (
+                <div className="result">
+                  <div>
+                    <span className="muted small">held-out chunk error</span>
+                    <div className="mono">
+                      <b>{deg(policy.metrics.policy.eval.rmse_deg)}</b>
+                    </div>
+                  </div>
+                  <div>
+                    <span className="muted small">hold state / repeat command</span>
+                    <div className="mono">
+                      {deg(policy.metrics.baselines.hold_state.eval.rmse_deg)} / {deg(policy.metrics.baselines.repeat_command.eval.rmse_deg)}
+                    </div>
+                  </div>
+                </div>
+              )}
+              {policy && (
+                <>
+                  <div className="segmented">
+                    <button className={polMode === "shadow" ? "on" : ""} onClick={() => setPolMode("shadow")} disabled={polBusy}>
+                      Shadow
+                    </button>
+                    <button className={polMode === "closedloop" ? "on" : ""} onClick={() => setPolMode("closedloop")} disabled={polBusy}>
+                      Closed loop
+                    </button>
+                  </div>
+                  <div className="row">
+                    <button className="cta" disabled={running || polBusy} onClick={() => startPolicyEval(polMode)}>
+                      {polJob?.kind === "evaluate" && polBusy
+                        ? `Evaluating… ${polJob.i}/${polJob.n || polHeldOut.length}`
+                        : `Evaluate (${polMode === "shadow" ? "shadow" : "closed loop"})`}
+                    </button>
+                    <span className="muted small">
+                      {polMode === "shadow"
+                        ? "its commands on the real observations, rolled through each sim"
+                        : "the policy drives each sim from the real start, same goal"}
+                    </span>
+                  </div>
+                  {polJob?.kind === "evaluate" && polBusy && (
+                    <div className="progress">
+                      <span style={{ width: `${polJob.n ? (100 * polJob.i) / polJob.n : 5}%` }} />
+                    </div>
+                  )}
+                  {polResult && (
+                    <>
+                      <div className="subscore">
+                        {polMode === "shadow" && shadowLock && shadowDefault ? (
+                          <>
+                            <span className="mono big">{deg(shadowLock.divergence_deg)}</span>
+                            <span className="muted small">
+                              {" "}
+                              between what the stock and the calibrated sim say this policy does (sim vs real: {deg(shadowDefault.sim_vs_real_deg)} stock, {deg(shadowLock.sim_vs_real_deg)} calibrated)
+                            </span>
+                          </>
+                        ) : polMode === "closedloop" && clLock && clDefault ? (
+                          <>
+                            <span className="mono big">
+                              {clDefault.n_success}/{clDefault.n_judged} → {clLock.n_success}/{clLock.n_judged}
+                            </span>
+                            <span className="muted small">
+                              {" "}
+                              held-out episodes where the fingertip closes within 2 cm of the real grasp point: stock sim → calibrated sim
+                            </span>
+                          </>
+                        ) : null}
+                      </div>
+                      <table className="params">
+                        <thead>
+                          <tr>
+                            <th />
+                            {polMode === "shadow" ? (
+                              <>
+                                <th>sim vs real</th>
+                                <th>vs stock sim</th>
+                                <th>grasp point</th>
+                              </>
+                            ) : (
+                              <>
+                                <th>approach RMS</th>
+                                <th>grasp point</th>
+                                <th>within 2 cm</th>
+                              </>
+                            )}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {polRows.map(([name, row]) => (
+                            <tr key={name}>
+                              <td>{name === "default" ? "stock sim" : name === "lock" ? "calibrated" : name === "perjoint" ? "per-joint lock" : name}</td>
+                              {"sim_vs_real_deg" in row ? (
+                                <>
+                                  <td>{deg(row.sim_vs_real_deg)}</td>
+                                  <td>{"divergence_deg" in row ? deg(row.divergence_deg) : "–"}</td>
+                                  <td>{cm(row.grasp_error_cm)}</td>
+                                </>
+                              ) : (
+                                <>
+                                  <td>{deg(row.approach_rms_deg, 1)}</td>
+                                  <td>{cm(row.grasp_error_cm)}</td>
+                                  <td className={row.n_success > 0 ? "changed" : ""}>
+                                    {row.n_success}/{row.n_judged}
+                                  </td>
+                                </>
+                              )}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      <div className="muted small">
+                        {polResult.summary.n_episodes} held-out episodes, sim-only: nothing was driven on hardware.
+                      </div>
+                    </>
+                  )}
+                  <label className={`toggle ${polBusy ? "locked" : ""}`} title="Two more ghosts: the policy's trajectory in the stock sim (grey) and in the calibrated sim (green) for the current held-out episode">
+                    <input type="checkbox" checked={showPolicy} disabled={polBusy} onChange={(e) => setShowPolicy(e.target.checked)} />
+                    show the policy's ghosts
+                  </label>
+                  {showPolicy && episode != null && !polHeldOut.includes(episode) && polHeldOut.length > 0 && (
+                    <div className="row">
+                      <span className="muted small">episode {episode} is in the policy's training set</span>
+                      <button className="cta secondary" onClick={() => setEpisode(polHeldOut[0])}>
+                        go to held-out episode {polHeldOut[0]}
+                      </button>
+                    </div>
+                  )}
+                  {showPolicy && polViewer && polViewer.episode === episode && (
+                    <div className="muted small">
+                      {polMode === "shadow"
+                        ? `this episode: ${deg(polViewer.sims["default"]?.sim_vs_real_deg)} stock vs ${deg(polViewer.sims["lock"]?.sim_vs_real_deg)} calibrated against the real arm; ${deg(polViewer.sims["lock"]?.divergence_deg)} between the two sims`
+                        : `this episode: grasp point missed by ${cm(polViewer.sims["default"]?.grasp_error_cm)} in the stock sim, ${cm(polViewer.sims["lock"]?.grasp_error_cm)} in the calibrated one`}
+                    </div>
+                  )}
+                </>
+              )}
+            </>
           )}
         </section>
 
