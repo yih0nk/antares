@@ -56,6 +56,10 @@ class FakeParams:
     def default(cls):
         return cls()
 
+    def scalar(self, name):  # as SimParams.scalar: a per-joint value is its joint mean
+        v = getattr(self, name)
+        return float(sum(v) / len(v)) if isinstance(v, (tuple, list)) else float(v)
+
 
 class FakeCommandMap:
     def __init__(self, gain, bias):
