@@ -45,19 +45,15 @@ from typing import Any
 
 import numpy as np
 
+from antares import factors
 from antares.calibrate import PENALTY, _per_joint, _safe_score
 from antares.data import Episode
 
-#: Largest factor searched for each scaled parameter, either way.
-FACTOR_RANGE: dict[str, float] = {
-    "kp": 4.0,
-    "kv": 4.0,
-    "damping": 4.0,
-    "armature": 4.0,
-    "frictionloss": 4.0,
-}
+#: Largest factor searched for each scaled parameter, either way (from
+#: :mod:`antares.factors`).
+FACTOR_RANGE: dict[str, float] = factors.drift_factors()
 #: Frames ``latency_frames`` may shift by, (fewest, most).
-LATENCY_SHIFT: tuple[int, int] = (-2, 3)
+LATENCY_SHIFT: tuple[int, int] = factors.drift_shifts()["latency_frames"]
 FIELDS: tuple[str, ...] = (*FACTOR_RANGE, "latency_frames")
 
 #: Latency shifts (best first, by the scan with no other change) whose
