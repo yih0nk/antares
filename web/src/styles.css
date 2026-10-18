@@ -1150,6 +1150,54 @@ body {
   gap: 4px 8px;
 }
 
+/* registry grouping: one header row per robot, its lineage indented below */
+.fleet-table tr.group-head td {
+  background: var(--surface);
+}
+
+.fleet-table tr.group-head.expanded td {
+  border-bottom: 0;
+}
+
+.fleet-table tr.group-head .robot-id {
+  font-weight: 600;
+}
+
+.fleet-table .caret {
+  display: inline-block;
+  width: 10px;
+  font-size: 9px;
+  color: var(--muted);
+}
+
+.fleet-table tr.lineage td {
+  border-top: 1px dashed var(--border);
+}
+
+.fleet-table tr.lineage td:first-child {
+  padding-left: 28px;
+}
+
+.fleet-table tr.group-divider td {
+  padding: 12px 12px 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  background: var(--bg);
+  cursor: default;
+}
+
+.chip.version {
+  border-color: var(--border);
+  color: var(--muted);
+}
+
+.chip.version.active {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
 .check-cell .mono {
   white-space: nowrap;
 }

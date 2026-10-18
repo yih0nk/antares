@@ -5,6 +5,11 @@ import { HistorySpark, type HistoryPoint } from "./Charts";
 // One screen for a fleet: every saved lock as a row with its calibration
 // quality, its last `antares check` and the trend of those checks. Rows
 // expand to the check history and the per-joint error of the last check.
+//
+// When the lock directory has a registry (locks/registry.json), locks are
+// grouped under their physical robot: one header row per robot showing the
+// active lock's numbers and a "v3 of 3" badge, expandable to the lineage.
+// Locks no robot claims stay as flat rows under "unassigned".
 
 type Status = "ok" | "drifted" | "insufficient" | "never";
 
@@ -83,7 +88,7 @@ function Trend({ robot }: { robot: DashboardRobot }) {
 type SortKey = "robot" | "dataset" | "calibrated" | "error" | "gap" | "latency" | "check" | "trend" | "worst" | "pinned";
 
 const COLUMNS: { key: SortKey; label: string; title: string }[] = [
-  { key: "robot", label: "robot", title: "lock name" },
+  { key: "robot", label: "robot", title: "registered robot id, or the lock name" },
   { key: "dataset", label: "dataset", title: "the LeRobot dataset the lock was fitted on" },
   { key: "calibrated", label: "calibrated", title: "when the lock was written" },
   { key: "error", label: "default → calibrated", title: "held-out tracking RMSE, default sim → this lock" },
@@ -100,7 +105,7 @@ const STATUS_RANK: Record<Status, number> = { drifted: 0, insufficient: 1, ok: 2
 function sortValue(r: DashboardRobot, k: SortKey): number | string | null {
   switch (k) {
     case "robot":
-      return r.name;
+      return r.robot_id ?? r.name;
     case "dataset":
       return r.dataset ?? "";
     case "calibrated":
@@ -133,6 +138,28 @@ function compare(a: DashboardRobot, b: DashboardRobot, key: SortKey, dir: 1 | -1
   return c * dir || a.name.localeCompare(b.name);
 }
 
+// A registered robot: its lineage rows and the one the header row shows
+// (the active lock, or the newest version when none is active).
+type RobotGroup = { id: string; rows: DashboardRobot[]; head: DashboardRobot; nVersions: number };
+
+function groupByRobot(robots: DashboardRobot[]): { groups: RobotGroup[]; loose: DashboardRobot[]; grouped: boolean } {
+  const grouped = robots.some((r) => r.robot_id);
+  if (!grouped) return { groups: [], loose: robots, grouped };
+  const byId = new Map<string, DashboardRobot[]>();
+  const loose: DashboardRobot[] = [];
+  for (const r of robots) {
+    if (!r.robot_id) loose.push(r);
+    else byId.set(r.robot_id, [...(byId.get(r.robot_id) ?? []), r]);
+  }
+  const groups: RobotGroup[] = [];
+  for (const [id, rows] of byId) {
+    rows.sort((a, b) => (b.version ?? 0) - (a.version ?? 0)); // newest version first
+    const head = rows.find((r) => r.is_active) ?? rows[0];
+    groups.push({ id, rows, head, nVersions: Math.max(head.n_versions ?? 0, rows.length) });
+  }
+  return { groups, loose, grouped };
+}
+
 type HistoryState = LockHistory | "loading" | "error";
 
 // `initialOpen` is a lock name to expand on mount (from the `#fleet/<lock>` hash).
@@ -142,6 +169,7 @@ export function FleetView({ initialOpen = null }: { initialOpen?: string | null 
   const [busy, setBusy] = useState(false);
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: "check", dir: 1 });
   const [open, setOpen] = useState<string | null>(initialOpen);
+  const [openRobots, setOpenRobots] = useState<Set<string>>(new Set());
   const [histories, setHistories] = useState<Record<string, HistoryState>>({});
 
   const load = useCallback(() => {
@@ -166,20 +194,41 @@ export function FleetView({ initialOpen = null }: { initialOpen?: string | null 
   const showPinned = robots.some((r) => r.pinned && r.pinned.length > 0);
   const columns = showPinned ? COLUMNS : COLUMNS.filter((c) => c.key !== "pinned");
 
+  const { groups, loose, grouped } = useMemo(() => groupByRobot(robots), [robots]);
+
+  // A deep link to a lock inside a lineage opens its robot too.
+  useEffect(() => {
+    if (!initialOpen) return;
+    const g = groups.find((g) => g.rows.some((r) => r.name === initialOpen));
+    if (g) setOpenRobots((cur) => (cur.has(g.id) ? cur : new Set([...cur, g.id])));
+  }, [initialOpen, groups]);
+
   const stats = useMemo(() => {
-    const statuses = robots.map(statusOf);
+    // With a registry, a robot is judged by its active lock; without one, every lock is a robot.
+    const judged = grouped ? [...groups.map((g) => g.head), ...loose] : robots;
+    const statuses = judged.map(statusOf);
     const checked = statuses.filter((s) => s !== "never").length;
     return {
-      robots: robots.length,
+      robots: judged.length,
+      registered: groups.length,
+      locks: robots.length,
+      unassigned: loose.length,
       inFleet: robots.filter((r) => r.in_fleet).length,
-      medianGap: median(robots.map((r) => r.improvement ?? NaN)),
+      medianGap: median(judged.map((r) => r.improvement ?? NaN)),
       drifted: statuses.filter((s) => s === "drifted").length,
       checked,
       never: statuses.filter((s) => s === "never").length,
     };
-  }, [robots]);
+  }, [robots, groups, loose, grouped]);
 
-  const sorted = useMemo(() => [...robots].sort((a, b) => compare(a, b, sort.key, sort.dir)), [robots, sort]);
+  const sortedGroups = useMemo(
+    () =>
+      [...groups].sort((a, b) =>
+        sort.key === "robot" ? a.id.localeCompare(b.id) * sort.dir : compare(a.head, b.head, sort.key, sort.dir),
+      ),
+    [groups, sort],
+  );
+  const sortedLoose = useMemo(() => [...loose].sort((a, b) => compare(a, b, sort.key, sort.dir)), [loose, sort]);
 
   const sortBy = (key: SortKey) =>
     setSort((cur) => (cur.key === key ? { key, dir: cur.dir === 1 ? -1 : 1 } : { key, dir: key === "robot" || key === "dataset" ? 1 : -1 }));
@@ -202,6 +251,82 @@ export function FleetView({ initialOpen = null }: { initialOpen?: string | null 
     if (!histories[name]) fetchHistory(name);
   };
 
+  const toggleRobot = (id: string) =>
+    setOpenRobots((cur) => {
+      const next = new Set(cur);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  // One lock as a table row: a flat (unassigned) lock or a lineage member.
+  const lockRow = (r: DashboardRobot, kind: "flat" | "lineage") => {
+    const isOpen = open === r.name;
+    return [
+      <tr
+        key={r.name}
+        className={`robot ${kind} ${isOpen ? "open" : ""}`}
+        onClick={() => toggle(r.name)}
+        aria-expanded={isOpen}
+      >
+        <td>
+          <div className="robot-name">
+            {kind === "lineage" && r.version != null && (
+              <span className={`chip tiny version ${r.is_active ? "active" : ""}`} title={r.is_active ? "the active lock of this robot" : "an older calibration of this robot"}>
+                v{r.version}
+                {r.is_active && " · active"}
+              </span>
+            )}
+            <span className="mono" title={r.name}>
+              {r.name}
+            </span>
+            <LockChips r={r} />
+          </div>
+        </td>
+        <LockCells r={r} showPinned={showPinned} />
+      </tr>,
+      isOpen && (
+        <tr key={`${r.name}:detail`} className="fleet-detail">
+          <td colSpan={columns.length}>
+            <RobotDetail robot={r} history={histories[r.name]} />
+          </td>
+        </tr>
+      ),
+    ];
+  };
+
+  // A registered robot: the active lock's numbers, expandable to its lineage.
+  const robotRows = (g: RobotGroup) => {
+    const expanded = openRobots.has(g.id);
+    const head = g.head;
+    const version = head.version != null ? `v${head.version} of ${g.nVersions}` : `${g.nVersions} lock${g.nVersions === 1 ? "" : "s"}`;
+    return [
+      <tr key={`robot:${g.id}`} className={`robot group-head ${expanded ? "expanded" : ""}`} onClick={() => toggleRobot(g.id)} aria-expanded={expanded}>
+        <td>
+          <div className="robot-name">
+            <span className="caret" aria-hidden="true">
+              {expanded ? "▾" : "▸"}
+            </span>
+            <span className="robot-id" title={`robot ${g.id}; active lock ${head.name}`}>
+              {g.id}
+            </span>
+            <span className="chip tiny version active" title={head.is_active ? `active lock ${head.name}, version ${head.version} of ${g.nVersions}` : `no active lock; showing ${head.name}`}>
+              {version}
+            </span>
+            {!head.is_active && (
+              <span className="chip tiny warn" title="the registry has no active lock for this robot">
+                no active lock
+              </span>
+            )}
+            <LockChips r={head} />
+          </div>
+        </td>
+        <LockCells r={head} showPinned={showPinned} />
+      </tr>,
+      ...(expanded ? g.rows.flatMap((r) => lockRow(r, "lineage")) : []),
+    ];
+  };
+
   return (
     <main className="fleet">
       <div className="fleet-head">
@@ -213,6 +338,15 @@ export function FleetView({ initialOpen = null }: { initialOpen?: string | null 
               : busy
                 ? "loading…"
                 : "no data"}
+            {data && grouped && (
+              <>
+                {" · "}
+                <span title="locks/registry.json: one id per physical robot, its lock lineage and the active lock">
+                  {stats.registered} registered robot{stats.registered === 1 ? "" : "s"}
+                  {stats.unassigned ? `, ${stats.unassigned} unassigned lock${stats.unassigned === 1 ? "" : "s"}` : ""}
+                </span>
+              </>
+            )}
             {data?.fleet && (
               <>
                 {" · "}
@@ -235,12 +369,18 @@ export function FleetView({ initialOpen = null }: { initialOpen?: string | null 
         <div className="tile">
           <span className="label">robots</span>
           <span className="value">{stats.robots}</span>
-          <span className="small muted">{stats.inFleet ? `${stats.inFleet} from the fleet scan` : "saved locks"}</span>
+          <span className="small muted">
+            {grouped
+              ? `${stats.registered} registered · ${stats.locks} lock${stats.locks === 1 ? "" : "s"}`
+              : stats.inFleet
+                ? `${stats.inFleet} from the fleet scan`
+                : "saved locks"}
+          </span>
         </div>
         <div className="tile">
           <span className="label">median gap closed</span>
           <span className="value">{pct(stats.medianGap)}</span>
-          <span className="small muted">held-out error, default → calibrated</span>
+          <span className="small muted">held-out error, default → calibrated{grouped ? " (active locks)" : ""}</span>
         </div>
         <div className="tile">
           <span className="label">drifted at last check</span>
@@ -276,88 +416,87 @@ export function FleetView({ initialOpen = null }: { initialOpen?: string | null 
               </tr>
             </thead>
             <tbody>
-              {sorted.map((r) => {
-                const status = statusOf(r);
-                const latest = r.history.latest;
-                const isOpen = open === r.name;
-                return [
-                  <tr
-                    key={r.name}
-                    className={`robot ${isOpen ? "open" : ""}`}
-                    onClick={() => toggle(r.name)}
-                    aria-expanded={isOpen}
-                  >
-                    <td>
-                      <div className="robot-name">
-                        <span className="mono" title={r.name}>
-                          {r.name}
-                        </span>
-                        {r.in_fleet && (
-                          <span className="chip tiny" title="calibrated by `antares fleet scan`">
-                            fleet
-                          </span>
-                        )}
-                        {r.space === "per_joint" && (
-                          <span className="chip tiny" title="per-joint parameters">
-                            per joint
-                          </span>
-                        )}
-                        {r.drift.exists && (
-                          <span
-                            className={`chip tiny ${r.drift.verdict && /^drift/i.test(r.drift.verdict) ? "warn" : ""}`}
-                            title={r.drift.verdict ?? "a drift scan exists for this lock"}
-                          >
-                            session drift
-                          </span>
-                        )}
-                      </div>
-                    </td>
-                    <td title={r.dataset ?? undefined}>{r.dataset ? short(r.dataset) : "--"}</td>
-                    <td className="mono nowrap">{date(r.created_at)}</td>
-                    <td className="mono nowrap">
-                      <span className="muted">{deg(r.baseline_eval_score)}</span> → {deg(r.eval_score)}
-                    </td>
-                    <td className="mono nowrap">{pct(r.improvement)}</td>
-                    <td className="mono nowrap">{fmtLatency(r)}</td>
-                    <td>
-                      <div className="check-cell">
-                        <span className={`chip verdict ${status}`}>{STATUS_LABEL[status]}</span>
-                        {latest && (
-                          <span className="small muted mono" title={`${latest.n_episodes} episodes from ${latest.dataset}`}>
-                            {date(latest.at)} · {deg(latest.score)}
-                            {latest.limit != null && <> / {deg(latest.limit)}</>}
-                          </span>
-                        )}
-                      </div>
-                    </td>
-                    <td className="mono nowrap">
-                      <Trend robot={r} />
-                    </td>
-                    <td className="nowrap">
-                      {r.worst_joint ? (
-                        <>
-                          {r.worst_joint} <span className="mono muted">{deg(r.worst_joint_deg)}</span>
-                        </>
-                      ) : (
-                        "--"
-                      )}
-                    </td>
-                    {showPinned && <td className="mono">{r.pinned && r.pinned.length ? r.pinned.join(", ") : "--"}</td>}
-                  </tr>,
-                  isOpen && (
-                    <tr key={`${r.name}:detail`} className="fleet-detail">
-                      <td colSpan={columns.length}>
-                        <RobotDetail robot={r} history={histories[r.name]} />
-                      </td>
-                    </tr>
-                  ),
-                ];
-              })}
+              {sortedGroups.flatMap(robotRows)}
+              {grouped && sortedLoose.length > 0 && (
+                <tr className="group-divider" key="divider:unassigned">
+                  <td colSpan={columns.length} title="locks no registered robot claims; `antares robots register <id> --lock <name>` assigns one">
+                    unassigned · {sortedLoose.length} lock{sortedLoose.length === 1 ? "" : "s"}
+                  </td>
+                </tr>
+              )}
+              {sortedLoose.flatMap((r) => lockRow(r, "flat"))}
             </tbody>
           </table>
         </div>
       )}
     </main>
+  );
+}
+
+// The badges that describe a lock, after its name.
+function LockChips({ r }: { r: DashboardRobot }) {
+  return (
+    <>
+      {r.in_fleet && (
+        <span className="chip tiny" title="calibrated by `antares fleet scan`">
+          fleet
+        </span>
+      )}
+      {r.space === "per_joint" && (
+        <span className="chip tiny" title="per-joint parameters">
+          per joint
+        </span>
+      )}
+      {r.drift.exists && (
+        <span
+          className={`chip tiny ${r.drift.verdict && /^drift/i.test(r.drift.verdict) ? "warn" : ""}`}
+          title={r.drift.verdict ?? "a drift scan exists for this lock"}
+        >
+          session drift
+        </span>
+      )}
+    </>
+  );
+}
+
+// Every column after the name, for one lock.
+function LockCells({ r, showPinned }: { r: DashboardRobot; showPinned: boolean }) {
+  const status = statusOf(r);
+  const latest = r.history.latest;
+  return (
+    <>
+      <td title={r.dataset ?? undefined}>{r.dataset ? short(r.dataset) : "--"}</td>
+      <td className="mono nowrap">{date(r.created_at)}</td>
+      <td className="mono nowrap">
+        <span className="muted">{deg(r.baseline_eval_score)}</span> → {deg(r.eval_score)}
+      </td>
+      <td className="mono nowrap">{pct(r.improvement)}</td>
+      <td className="mono nowrap">{fmtLatency(r)}</td>
+      <td>
+        <div className="check-cell">
+          <span className={`chip verdict ${status}`}>{STATUS_LABEL[status]}</span>
+          {latest && (
+            <span className="small muted mono" title={`${latest.n_episodes} episodes from ${latest.dataset}`}>
+              {date(latest.at)} · {deg(latest.score)}
+              {latest.limit != null && <> / {deg(latest.limit)}</>}
+            </span>
+          )}
+        </div>
+      </td>
+      <td className="mono nowrap">
+        <Trend robot={r} />
+      </td>
+      <td className="nowrap">
+        {r.worst_joint ? (
+          <>
+            {r.worst_joint} <span className="mono muted">{deg(r.worst_joint_deg)}</span>
+          </>
+        ) : (
+          "--"
+        )}
+      </td>
+      {showPinned && <td className="mono">{r.pinned && r.pinned.length ? r.pinned.join(", ") : "--"}</td>}
+    </>
   );
 }
 
@@ -376,6 +515,7 @@ function RobotDetail({ robot: r, history }: { robot: DashboardRobot; history: Hi
     1e-6,
     ...joints.map((j) => Math.max(reference[j] ?? 0, latest?.per_joint?.[j] ?? 0)),
   );
+  const checkRef = r.robot_id && r.is_active ? `@${r.robot_id}` : r.name;
 
   return (
     <div className="detail-grid">
@@ -387,7 +527,7 @@ function RobotDetail({ robot: r, history }: { robot: DashboardRobot; history: Hi
           <span className="small muted">history unavailable</span>
         ) : !points.length ? (
           <span className="small muted">
-            never checked · <span className="mono">antares check &lt;dataset&gt; --lock {r.name}</span>
+            never checked · <span className="mono">antares check &lt;dataset&gt; --lock {checkRef}</span>
           </span>
         ) : (
           <>
@@ -457,8 +597,17 @@ function RobotDetail({ robot: r, history }: { robot: DashboardRobot; history: Hi
         </div>
       </section>
 
-      {(r.drift.exists || (r.pinned && r.pinned.length > 0)) && (
+      {(r.drift.exists || (r.pinned && r.pinned.length > 0) || r.robot_id) && (
         <section className="detail-notes small">
+          {r.robot_id && (
+            <div>
+              <span className="label">robot</span>
+              <div>
+                <span className="mono">{r.robot_id}</span> · version {r.version ?? "?"} of {r.n_versions ?? "?"}
+                {r.is_active ? " · active" : " · not active"}
+              </div>
+            </div>
+          )}
           {r.drift.exists && (
             <div>
               <span className="label">session drift</span>
