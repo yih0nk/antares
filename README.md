@@ -1031,6 +1031,106 @@ against field of view (a farther camera with a narrower fov looks nearly
 the same), so expect the position to be loose along the optical axis;
 wrist cameras are skipped; the sim is the SO-101 model for both datasets.
 
+## Scene from the logs
+
+With the cameras fitted, the rest of what they see is static, and the
+logs say where it is. `antares scene-fit` recovers the table, the
+workspace and the camera backdrops, so the exported `scene.xml` looks
+like the real cell and the UI can show the sim's own view next to the
+real frame.
+
+```sh
+.venv/bin/antares scene-fit lerobot/svla_so101_pickplace --lock svla_so101_pickplace
+.venv/bin/antares export svla_so101_pickplace      # scene.xml now has the table and backdrops
+python -m mujoco.viewer --mjcf export/svla_so101_pickplace/scene.xml   # look through camera "up"
+```
+
+How it works (`antares/scene.py`, FK and OpenCV only):
+
+1. **Table height from grasps.** The gripper command closing is a grasp
+   (`antares.events`), and at a grasp the fingertips are on an object that
+   sits on the table. `Arm.fk` at every grasp instant gives the fingertip
+   (the MJCF's `gripperframe` site, between the jaws) in the base frame.
+   Grasps within 15 mm of the lowest decile of fingertip height are "on
+   the table"; the rest are re-grasps in the air or at a container. The
+   median of that cluster minus an **assumed object half-height of 15 mm**
+   is the table. The assumption is stated in the result, not hidden: the
+   raw fingertip-height percentiles, the lowest hull vertex of the jaws
+   at each grasp, and the lowest fingertip over every frame of every
+   episode (the arm never goes below the table) are all saved alongside.
+2. **Plane normal.** The SO-101 base is bolted to the table, so the plane
+   is **assumed horizontal**. A plane is still fitted through the on-table
+   grasp points and its tilt reported; it replaces the assumption only
+   when it exceeds 5 degrees with the points spread at least 10 cm in both
+   x and y.
+3. **Workspace.** The bounding box and xy convex hull of the fingertip
+   positions over all episodes, plus the grasp and release points: where
+   objects were picked and where they were put down.
+4. **Backdrops.** Each fitted camera's background model (the per-pixel
+   median, so the moving arm is gone) is saved as
+   `locks/scene/<lock>_<camera>_backdrop.jpg`. The estimated table
+   rectangle (workspace plus 10 cm) is projected into the camera with
+   `antares.project` and compared with the dominant colour region of the
+   backdrop (k-means on Lab, k=4, largest component): the honest check
+   that the geometric table and the visual one agree.
+
+The demo datasets, with their committed locks and cameras:
+
+| dataset | table z | on-table grasps | lowest fingertip ever | per-episode min spread | tilt | workspace (cm) | picks / places |
+|---|---|---|---|---|---|---|---|
+| svla_so101_pickplace | -22.1 mm | 51 of 68 at -7.1 mm (p10 -8.7, median -6.6, p90 +66.1) | -23.7 mm | 16 mm | 0.6° | 24 x 33 x 12 | 68 / 68 |
+| svla_so100_pickplace | -10.6 mm | 39 of 89 at +4.4 mm (p10 +2.1, median +74.3, p90 +95.9) | -5.7 mm | 17 mm | 1.4° | 27 x 31 x 14 | 89 / 89 |
+
+Heights are in the base frame (z = 0 at the base body origin; the base
+mesh's underside is at -2.4 mm). Both fits land where a table under the
+base should be. The SO-100 grasps are bimodal: half close at the table
+and half 7-9 cm up, at the container the objects are dropped into (its
+releases sit at +53 to +88 mm). The SO-101's lowest-ever fingertip
+(-23.7 mm, one episode) is 1.6 mm below its table estimate, so the
+15 mm half-height is on the small side there.
+
+Table plane against the backdrop image, per camera:
+
+| dataset | camera | plane on table colour | region covered | IoU | note |
+|---|---|---|---|---|---|
+| svla_so101_pickplace | `up` | 0.85 | 0.64 | 0.57 | the far edge of the projected rectangle coincides with the real table edge; the colour region also takes in the near-white wall |
+| svla_so101_pickplace | `side` | 0.96 | 0.55 | 0.54 | same; the real table is larger than the workspace rectangle, which caps the coverage |
+| svla_so100_pickplace | `top` | 0.44 | 0.84 | 0.40 | the lighting gradient splits the black table into two colour clusters, so the region is the evenly lit half |
+
+The numbers are what they are: a projected rectangle sized to the
+workspace against a colour blob. The composite below is the better check.
+
+Outputs: `locks/<lock>.scene.json` (the full fit), the backdrops, and a
+compact `scene` entry in the lock (table height, normal, workspace box,
+counts, backdrop paths; old locks load with none). `antares export` then
+writes into `scene.xml` a translucent `<geom type="plane">` at the table
+height sized to the workspace, and per camera a `2d` texture of its
+backdrop on an unlit plane 3 m down the optical axis, sized to fill the
+camera's view, so `python -m mujoco.viewer` looking through `up`, `side`
+or `top` shows the real cell behind the sim arm (checked with MuJoCo's
+offscreen renderer; the translucent table is what lets a top-down camera
+see its own backdrop through it). The checker floor is dropped when a
+table exists.
+
+**Sim view.** `GET /api/scene/view?dataset=&camera=&episode=&frame=&lock=`
+composites what a policy camera would see in the sim, with no OpenGL:
+the backdrop, the table rectangle as a faint tint, and the sim arm's
+hull polygons filled far to near with flat shading (nearer parts
+lighter, a per-body step so neighbouring parts read as separate,
+outlined). It returns `real_image` and `sim_image` (JPEG data URLs),
+the IoU of the sim arm against the segmented real one, and the table
+polygon. The UI's Camera section has a Scene block: "Fit scene from
+logs", the table and workspace numbers, and a real + outline | sim view
+| side by side toggle on the viewer; the 3D viewer draws the table as a
+thin dark plane and the workspace as a faint box. Other routes:
+`POST /api/scene/fit {dataset, lock}` (synchronous, a few seconds) and
+`GET /api/scene?lock=`.
+
+Caveats: the median background keeps whatever the arm did most, so the
+SO-101 backdrops carry a ghost of its rest pose and the SO-100's the base;
+the object half-height is a guess; the workspace is where the fingertips
+went, not the table's extent; the grasp label is the command, not contact.
+
 ## Layout
 
 | Path | What |
@@ -1068,6 +1168,7 @@ wrist cameras are skipped; the sim is the SO-101 model for both datasets.
 | `antares/silhouette.py` | Real arm mask: median background, colour model, static-arm region |
 | `antares/project.py` | Sim arm silhouette: mesh hulls, pinhole camera, polygon fill |
 | `antares/camera.py` | Fixed-camera fit (CMA-ES over look-at coordinates), `locks/*.camera.json` |
+| `antares/scene.py` | Table, workspace and backdrops from the logs; sim-view composite (`locks/*.scene.json`, `locks/scene/`) |
 | `locks/` | Committed locks for the demo arms; `locks/fleet/` for the fleet scan |
 | `web/` | React + three.js viewer |
 
