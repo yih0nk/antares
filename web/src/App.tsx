@@ -22,6 +22,7 @@ import { Arm, compMaterial, ghostMaterial, realMaterial, type Playhead } from ".
 import { CameraView } from "./CameraView";
 import { CrossHeatmap, JointTrace, ResidualStrip, Sparkline } from "./Charts";
 import { AddDataset } from "./AddDataset";
+import { Factors } from "./Factors";
 
 // Layout: 3D viewer (real arm + ghost sim arm) on the left, gap panel on
 // the right, episode timeline along the bottom. The ghost is the simulator
@@ -131,6 +132,8 @@ export default function App() {
   const [joint, setJoint] = useState("shoulder_pan");
   const [calib, setCalib] = useState<Calibration | null>(null);
   const [perJoint, setPerJoint] = useState(false);
+  // null: the built-in factors; otherwise the shared-stage names to fit.
+  const [fitFactors, setFitFactors] = useState<string[] | null>(null);
   const [residual, setResidual] = useState<Residual | null>(null);
   const [crossOpen, setCrossOpen] = useState(false);
   // Cached per (loaded datasets × saved locks); cleared when either changes.
@@ -346,6 +349,7 @@ export default function App() {
         name,
         MAX_EVALUATIONS,
         perJoint ? { maxEvaluations: PER_JOINT_EVALUATIONS } : undefined,
+        fitFactors,
       ));
     } catch (e) {
       setError(`Could not start calibration: ${(e as Error).message}`);
@@ -651,7 +655,7 @@ export default function App() {
               return (
                 <button
                   key={j}
-                  className={`bar-row ${j === joint ? "sel" : ""} ${scored.has(j) ? "" : "unscored"}`}
+                  className={`bar-row ${j === jointNames[jIndex] ? "sel" : ""} ${scored.has(j) ? "" : "unscored"}`}
                   onClick={() => setJoint(j)}
                   title={scored.has(j) ? "" : "not scored (gripper contact isn't simulated)"}
                 >
@@ -682,6 +686,7 @@ export default function App() {
             per-joint refinement
             <span className="muted">+{PER_JOINT_EVALUATIONS} evals</span>
           </label>
+          <Factors selected={fitFactors} onChange={setFitFactors} disabled={running} />
           {calib && (
             <div className="calib-body">
               <div className="row">
