@@ -27,9 +27,11 @@ import numpy as np
 from antares.data import Episode
 from antares.sim import GRIPPER_INDEX, JOINTS, Arm
 
-#: Joints whose holding torque varies less than this (N*m, std) have no
-#: load signal to regress on (the pan axis is vertical, the roll axis nearly).
-MIN_TORQUE_STD = 0.01
+#: Joints whose holding torque varies less than this (N*m, std) have too
+#: little load signal to regress on: the pan axis is vertical, the roll axis
+#: nearly, and in pick-and-place logs the elbow's load barely changes (std
+#: about 0.02-0.04 N*m on the demo arms), so its slope is mostly noise.
+MIN_TORQUE_STD = 0.05
 
 #: Quantile bins of holding torque shown per joint.
 N_BINS = 5
@@ -69,7 +71,10 @@ class JointSag:
     #: intercept and velocity (partial R^2, 0..1).
     partial_r2: float
     rms_deg: float  # residual RMS as replayed
-    rms_corrected_deg: float  # after removing the fitted torque term
+    #: After removing the fitted torque term around the mean torque. A
+    #: constant sag at a nearly constant load is indistinguishable from an
+    #: offset, so this only credits the part that varies with pose.
+    rms_corrected_deg: float
     torque_std_nm: float
     #: ``gravity_scale`` that would cancel the slope on this joint alone.
     implied_gravity_scale: float | None
@@ -161,7 +166,7 @@ def sag_report(arm: Arm, episodes: Sequence[Episode]) -> SagReport:
         slope = float(coef[2])
         t_std = float(np.std(t))
         partial = 0.0 if rss0 <= 0 else max(0.0, 1.0 - rss1 / rss0)
-        corrected = y - slope * t  # no torque, no sag
+        corrected = y - slope * (t - t.mean())
         # At rest sim_q ~= cmd - tau / kp with tau measured at ``scale``, and the
         # real arm settles at cmd - (s_real / scale) * tau / kp, so the residual
         # slope b (rad per N*m) is (s_real - scale) / (scale * kp).

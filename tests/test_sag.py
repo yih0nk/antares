@@ -47,7 +47,7 @@ def test_sag_report_recovers_the_true_gravity_scale():
     assert rep.joints["shoulder_pan"].implied_gravity_scale is None  # no load signal
     elbow = rep.joints["elbow_flex"]
     assert elbow.partial_r2 > 0.5
-    assert elbow.rms_corrected_deg < 0.5 * elbow.rms_deg
+    assert elbow.rms_corrected_deg < elbow.rms_deg  # only the pose-varying part comes off
     assert elbow.implied_gravity_scale == pytest.approx(0.4, abs=0.05)
     assert rep.implied_gravity_scale == pytest.approx(0.4, abs=0.05)
     # residual mean moves with the holding torque, bin by bin
