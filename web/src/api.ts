@@ -74,7 +74,7 @@ export type ProgressEvent = {
   type: "progress";
   // Which CMA-ES search space produced this evaluation; `evaluation` keeps
   // counting across stages.
-  stage: "shared" | "per_joint";
+  stage: "shared" | "per_joint" | "command_map";
   evaluation: number;
   generation: number;
   candidate_score: number | null;

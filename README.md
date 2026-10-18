@@ -529,13 +529,18 @@ the SO-101 lock's dynamics, 0.2-unit state noise and teleop-style pauses,
 
 | hidden arm | default sim | dynamics only | `sim` mode | `kinematic` mode |
 |---|---|---|---|---|
-| calibration mismatch (bias up to 3 units, gain ±4%) | 7.50 | 2.30 | **0.40** | 0.48 |
-| no mismatch (control) | 7.11 | **1.08** | 1.11 | 1.17 |
+| calibration mismatch (bias up to 3 units, gain ±4%) | 7.40 | 2.34 | **0.51** | 1.56 |
+| no mismatch (control) | 7.15 | 0.46 | **0.40** | 1.58 |
 
-Both modes recover the hidden bias to within 0.35 units and the gain to
-within 0.007. On an arm with no mismatch the map stays within 0.35 units
-of identity, at a small held-out cost (0.03° for `sim`, 0.09° for
-`kinematic`), mostly on the gravity-loaded shoulder and elbow. 
+(Measured with the current SO-101 lock, whose refit `kp` of about 10
+makes the arm sag a lot under gravity.) `sim` mode recovers the hidden
+bias to within 0.06 units and the gain to within 0.004, and on the arm
+with no mismatch keeps the map within 0.08 units of identity. `kinematic`
+mode's sag caveat bites on this arm: it reads the gravity sag as a bias
+(+3.0 units on the shoulder lift and +2.6 on the elbow of the arm with
+no mismatch, and the hidden -3.0 shoulder-lift bias comes out as -0.1),
+and the dynamics then refit around that, so it ends worse than fitting
+the dynamics alone.
 On the two demo datasets (20 train / 10 held-out episodes, seed 0, two
 rounds of 150 evaluations, with the wider `kp` range), held-out RMSE in degrees.
 "Dynamics only" is a fresh shared fit given the same 300 evaluations under
