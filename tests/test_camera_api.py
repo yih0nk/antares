@@ -175,3 +175,32 @@ def test_cli_camera_fit_prints_result(monkeypatch, capsys, tmp_path):
     assert "fit IoU 0.700" in out and "held-out IoU 0.650" in out and "ds.camera.json" in out
     assert cli.main(["camera-fit", "fake/ds", "--camera", "wrist"]) == 1
     assert cli.main(["camera-fit", "fake/ds", "--camera", "nope"]) == 1
+
+
+def test_camera_clip_serves_the_episode_mp4(client, monkeypatch, tmp_path):
+    from antares import video
+
+    clip = tmp_path / "ep.mp4"
+    clip.write_bytes(b"\x00" * 1000)
+    seen = {}
+
+    def fake_clip(repo, camera, episode, ds=None, fmt="mp4"):
+        seen.update(repo=repo, camera=camera, episode=episode, fmt=fmt)
+        return clip
+
+    monkeypatch.setattr(video, "episode_clip", fake_clip)
+    r = client.get("/api/camera/clip", params={"dataset": "fake/ds", "camera": "up", "episode": 2})
+    assert r.status_code == 200 and r.headers["content-type"] == "video/mp4" and len(r.content) == 1000
+    assert seen == {"repo": "fake/ds", "camera": "up", "episode": 2, "fmt": "mp4"}
+    r = client.get("/api/camera/clip", params={"dataset": "fake/ds", "camera": "up", "episode": 2, "format": "webm"})
+    assert r.headers["content-type"] == "video/webm" and seen["fmt"] == "webm"
+    assert client.get("/api/camera/clip", params={"dataset": "fake/ds", "camera": "up", "episode": 2, "format": "gif"}).status_code == 422
+    # Seeking in the browser needs byte ranges.
+    r = client.get("/api/camera/clip", params={"dataset": "fake/ds", "camera": "up", "episode": 2}, headers={"Range": "bytes=10-19"})
+    assert r.status_code == 206 and len(r.content) == 10
+
+    def missing(*a, **k):
+        raise video.VideoUnavailable("fake/ds has no camera 'side'")
+
+    monkeypatch.setattr(video, "episode_clip", missing)
+    assert client.get("/api/camera/clip", params={"dataset": "fake/ds", "camera": "side", "episode": 0}).status_code == 400

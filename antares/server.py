@@ -3108,6 +3108,25 @@ def camera_overlay_get(
         raise _video_error(e)
 
 
+@app.get("/api/camera/clip")
+def camera_clip_get(
+    dataset: str = Query(...),
+    camera: str = Query(...),
+    episode: int = Query(...),
+    format: Literal["mp4", "webm"] = Query("mp4"),
+) -> FileResponse:
+    """One episode of a camera as a clip starting at the episode's frame 0,
+    for the viewer's video underlay (encoded once, then cached)."""
+    from antares import video
+
+    ds = get_dataset(dataset)
+    try:
+        path = video.episode_clip(ds.repo_id, camera, episode, ds, fmt=format)
+    except Exception as e:  # noqa: BLE001 - missing PyAV / camera / decoding errors
+        raise _video_error(e)
+    return FileResponse(path, media_type=f"video/{format}")
+
+
 # ==========================================================================
 # Scene (antares.scene)
 #
