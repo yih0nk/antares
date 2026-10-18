@@ -64,3 +64,19 @@ def test_sag_report_recovers_the_true_gravity_scale():
 def test_sag_report_needs_episodes():
     with pytest.raises(ValueError):
         sag_report(Arm(SOFT), [])
+
+
+def test_deadband_shows_up_as_an_offset_not_a_slope():
+    band = float(np.radians(1.0))
+    eps = [sweep_episode(Arm(SOFT.replace(deadband=band)), i) for i in range(3)]
+    rep = sag_report(Arm(SOFT), eps)
+    # Gravity keeps the loaded elbow pressed to one edge of the band: a constant
+    # offset of about the band whether still or moving, and no torque slope.
+    elbow = rep.joints["elbow_flex"]
+    assert set(elbow.by_motion) == {"still", "up", "down"}
+    for v in elbow.by_motion.values():
+        assert v == pytest.approx(-np.degrees(band), abs=0.15)
+    assert elbow.partial_r2 < 0.1
+    # The lightly loaded wrist trails its motion instead, so the sign flips.
+    wrist = rep.joints["wrist_flex"].by_motion
+    assert wrist["up"] > 0.3 and wrist["down"] < -0.3

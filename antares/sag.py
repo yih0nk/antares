@@ -34,6 +34,10 @@ MIN_TORQUE_STD = 0.01
 #: Quantile bins of holding torque shown per joint.
 N_BINS = 5
 
+#: A joint counts as still below this speed (deg/s) when splitting the
+#: residual by motion.
+STILL_DEG_S = 2.0
+
 
 def holding_torque(arm: Arm, q: np.ndarray) -> np.ndarray:
     """Torque (N*m) each joint needs to hold pose ``q`` (rad) still against gravity.
@@ -71,6 +75,10 @@ class JointSag:
     implied_gravity_scale: float | None
     #: ``[mean torque N*m, mean residual deg, frames]`` per torque quantile bin.
     bins: list[list[float]]
+    #: Mean residual (deg) while the real joint is ``still``, moving ``up``
+    #: (positive velocity) or ``down``. Sag tracks the torque bins above; a
+    #: deadband or backlash shows as a jump between these instead.
+    by_motion: dict[str, float | None]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -82,6 +90,7 @@ class JointSag:
             "torque_std_nm": self.torque_std_nm,
             "implied_gravity_scale": self.implied_gravity_scale,
             "bins": self.bins,
+            "by_motion": dict(self.by_motion),
         }
 
 
@@ -168,6 +177,9 @@ def sag_report(arm: Arm, episodes: Sequence[Episode]) -> SagReport:
             for b in range(N_BINS)
             if np.any(idx == b)
         ]
+        v = np.degrees(vel_a[:, j])
+        masks = {"still": np.abs(v) < STILL_DEG_S, "up": v >= STILL_DEG_S, "down": v <= -STILL_DEG_S}
+        by_motion = {k: (float(y[mk].mean()) if np.any(mk) else None) for k, mk in masks.items()}
         joints[name] = JointSag(
             joint=name,
             slope_deg_per_nm=slope,
@@ -177,6 +189,7 @@ def sag_report(arm: Arm, episodes: Sequence[Episode]) -> SagReport:
             torque_std_nm=t_std,
             implied_gravity_scale=imp,
             bins=bins,
+            by_motion=by_motion,
         )
     overall = float(np.average(implied, weights=weights)) if implied else None
     return SagReport(
@@ -188,4 +201,4 @@ def sag_report(arm: Arm, episodes: Sequence[Episode]) -> SagReport:
     )
 
 
-__all__ = ["JointSag", "SagReport", "holding_torque", "sag_report", "MIN_TORQUE_STD"]
+__all__ = ["JointSag", "SagReport", "holding_torque", "sag_report", "MIN_TORQUE_STD", "STILL_DEG_S"]
