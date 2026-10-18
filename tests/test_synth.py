@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from antares import synth
+from antares.data import read_local
 from antares.sim import SimParams
 
 
@@ -54,6 +55,25 @@ def test_synthesize_tracks_its_own_params():
     simulate = default_simulate()
     assert score(params, ds.episodes, simulate).overall_deg < 1e-6
     assert score(SimParams(), ds.episodes, simulate).overall_deg > 1.0
+
+
+def test_write_local_roundtrip(tmp_path):
+    rng = np.random.default_rng(0)
+    eps = tuple(
+        synth.Episode(index=i, fps=30.0, joint_names=synth.JOINTS,
+                      state=rng.normal(size=(5 + i, 6)), action=rng.normal(size=(5 + i, 6)))
+        for i in range(3)
+    )
+    ds = synth.Dataset(repo_id="synthetic/x", robot_type="so101_follower", fps=30.0,
+                       joint_names=synth.JOINTS, episodes=eps)
+    synth.write_local(ds, tmp_path / "x")
+    back = read_local(tmp_path / "x", repo_id="synthetic/x")
+    assert back.joint_names == synth.JOINTS and back.fps == 30.0
+    assert back.robot_type == "so101_follower"
+    assert [e.index for e in back.episodes] == [0, 1, 2]
+    for a, b in zip(eps, back.episodes):
+        np.testing.assert_allclose(a.state, b.state)
+        np.testing.assert_allclose(a.action, b.action)
 
 
 def test_worn_keeps_per_joint_shape():

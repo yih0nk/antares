@@ -5,11 +5,17 @@ random reaching motions in dataset units; the "measured" state is the
 MuJoCo arm simulated with the given :class:`~antares.sim.SimParams`, mapped
 back to dataset units, plus sensor noise. Because the true parameters are
 known, a refit can be checked against them.
+
+:func:`write_local` saves a dataset in LeRobot layout (``meta/info.json``
+plus ``data/**.parquet``) so every command that takes a dataset can read it
+with :func:`antares.data.read_local`.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Mapping
+from pathlib import Path
 
 import numpy as np
 
@@ -113,4 +119,43 @@ def parse_changes(spec: str, parse: Callable[[str], float] = float) -> dict[str,
     return out
 
 
-__all__ = ["JOINTS", "command_trajectory", "parse_changes", "synthesize", "worn"]
+def write_local(ds: Dataset, root: str | Path) -> Path:
+    """Write ``ds`` in LeRobot layout under ``root``; readable by ``read_local``."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    root = Path(root)
+    names = [f"{j}.pos" for j in ds.joint_names]
+    info = {
+        "robot_type": ds.robot_type,
+        "fps": ds.fps,
+        "total_episodes": len(ds.episodes),
+        "total_frames": sum(len(e) for e in ds.episodes),
+        "features": {
+            "observation.state": {"dtype": "float64", "shape": [len(names)], "names": names},
+            "action": {"dtype": "float64", "shape": [len(names)], "names": names},
+        },
+        "source": "antares.synth",
+    }
+    (root / "meta").mkdir(parents=True, exist_ok=True)
+    (root / "meta" / "info.json").write_text(json.dumps(info, indent=2) + "\n")
+
+    columns: dict[str, list] = {
+        "episode_index": [],
+        "frame_index": [],
+        "observation.state": [],
+        "action": [],
+    }
+    for ep in ds.episodes:
+        n = len(ep)
+        columns["episode_index"].extend([ep.index] * n)
+        columns["frame_index"].extend(range(n))
+        columns["observation.state"].extend(ep.state.tolist())
+        columns["action"].extend(ep.action.tolist())
+    path = root / "data" / "chunk-000" / "file-000.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(pa.table(columns), path)
+    return root
+
+
+__all__ = ["JOINTS", "command_trajectory", "parse_changes", "synthesize", "worn", "write_local"]
