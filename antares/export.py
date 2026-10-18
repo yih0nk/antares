@@ -15,7 +15,7 @@ model can be dropped into any MuJoCo or RL pipeline without Antares:
 * A header comment records the lock (name, dataset, created_at, held-out
   score before/after, latency).
 
-MJCF cannot express command latency, so a sidecar ``<name>.antares.json``
+MJCF cannot express command latency or a servo deadband, so a sidecar ``<name>.antares.json``
 is written next to the model with the full parameters (including
 ``latency_frames``) and the dataset-unit -> radian map, for a consumer to
 apply in its control loop. :func:`load_exported_arm` builds an
@@ -363,14 +363,17 @@ def read_sidecar(xml_path: Path) -> dict[str, Any]:
 
 def load_exported_arm(xml_path: Path, contacts: bool = False) -> Arm:
     """An :class:`Arm` driven by an exported model: gains/joint values come
-    from the XML, ``latency_frames`` from the sidecar (0 if it is missing)."""
+    from the XML, ``latency_frames`` and the servo ``deadband`` (which MJCF
+    cannot express) from the sidecar (0 if it is missing)."""
     xml_path = Path(xml_path)
-    latency = 0
+    latency, deadband = 0, 0.0
     sc = sidecar_path(xml_path)
     if sc.is_file():
-        latency = int(json.loads(sc.read_text()).get("latency_frames", 0))
+        side = json.loads(sc.read_text())
+        latency = int(side.get("latency_frames", 0))
+        deadband = side.get("params", {}).get("deadband", 0.0)
     arm = Arm(model_path=xml_path, contacts=contacts)
-    arm.apply(SimParams.from_model(arm.model, latency_frames=latency))
+    arm.apply(SimParams.from_model(arm.model, latency_frames=latency).replace(deadband=deadband))
     return arm
 
 

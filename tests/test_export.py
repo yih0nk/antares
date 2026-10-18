@@ -322,3 +322,12 @@ def test_gravity_scale_is_baked_into_option_and_replays_identically(tmp_path):
     ref = Arm(params=lock.params).replay(ep)
     np.testing.assert_allclose(arm.replay(ep), ref, rtol=0, atol=1e-9)
     assert not np.allclose(Arm(params=FITTED).replay(ep), ref, atol=1e-4)
+
+
+def test_deadband_travels_in_the_sidecar(tmp_path):
+    lock = make_lock(params=FITTED.replace(deadband=[0.0, 0.0, 0.01, 0.0, 0.0, 0.0]))
+    out = export_mjcf(lock, tmp_path / "d.xml")
+    arm = load_exported_arm(out)
+    assert arm.params.per_joint("deadband").tolist() == [0.0, 0.0, 0.01, 0.0, 0.0, 0.0]
+    ep = synthetic_episode()
+    np.testing.assert_allclose(arm.replay(ep), Arm(params=lock.params).replay(ep), rtol=0, atol=1e-9)
