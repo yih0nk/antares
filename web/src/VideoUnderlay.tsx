@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useThree } from "@react-three/fiber";
 import * as THREE from "three";
-import { api, type CameraFit, type CameraInfo, type CameraJobEvent, type CameraProgressEvent, pickCamera } from "./api";
+import { api, followJob, type CameraFit, type CameraInfo, type CameraJobEvent, type CameraProgressEvent, pickCamera } from "./api";
 import type { Playhead } from "./Arm";
 
 // The dataset's own video drawn behind the 3D view. With a fitted camera (the
@@ -139,8 +139,7 @@ export function useUnderlay(
         const src = api.jobEvents(jobId);
         sourceRef.current = src;
         const update = (f: (l: LineUp) => LineUp | null) => setLineUp((l) => (l && l.jobId === jobId ? f(l) : l));
-        src.onmessage = (msg) => {
-          const ev = JSON.parse(msg.data) as CameraJobEvent;
+        followJob<CameraJobEvent>(src, (ev) => {
           if (ev.type === "progress") {
             update((l) => ({ ...l, last: ev }));
           } else if (ev.type === "pass") {
@@ -153,11 +152,26 @@ export function useUnderlay(
             src.close();
             update((l) => ({ ...l, status: "error", error: ev.message }));
           }
-        };
+        });
         src.onerror = () => {
-          if (src.readyState === EventSource.CLOSED) {
-            update((l) => (l.status === "running" ? { ...l, status: "error", error: "lost the progress stream" } : l));
-          }
+          // EventSource reconnects on its own; once it gives up, the server
+          // says how the fit ended.
+          if (src.readyState !== EventSource.CLOSED) return;
+          const lost = (l: LineUp) =>
+            l.status === "running" || l.status === "cancelled" ? { ...l, status: "error" as const, error: "lost the progress stream" } : l;
+          api.jobStatus(jobId).then(
+            (st) => {
+              if (st.status === "done") {
+                update((l) => ({ ...l, status: "done" }));
+                setLineUpRev((r) => r + 1);
+              } else if (st.status === "error") {
+                update((l) => ({ ...l, status: "error", error: st.error ?? "the fit failed" }));
+              } else {
+                update(lost);
+              }
+            },
+            () => update(lost),
+          );
         };
       },
       (e) => setLineUp({ jobId: null, dataset, camera, status: "error", error: (e as Error).message }),
