@@ -1768,3 +1768,162 @@ def test_dashboard_reads_check_history_when_available(client, monkeypatch, tmp_p
     monkeypatch.setitem(sys.modules, "antares.history", _module("antares.history", history_index=broken))
     r = client.get("/api/dashboard")
     assert r.status_code == 200 and all(x["history"]["latest"] is None for x in r.json()["robots"])
+
+
+# --------------------------------------------------------------------------
+# robot registry: /api/registry, @<robot> on every lock route, dashboard fields
+# --------------------------------------------------------------------------
+
+
+def _register(client, robot, lock, **body):
+    r = client.post(f"/api/registry/{robot}/register", json={"lock": lock, **body})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_registry_routes_register_activate_rollback_remove(client, fakes):
+    assert client.get("/api/registry").json() == {"version": 1, "path": str(fakes / "locks" / "registry.json"), "robots": []}
+    assert client.get("/api/registry/arm_a").status_code == 404
+    write_lock(fakes, "v1", kp=50.0)
+    write_lock(fakes, "v2", kp=60.0)
+    write_lock(fakes, "v3", kp=70.0)
+
+    out = _register(client, "arm_a", "v1", note="first")
+    reg = out["registration"]
+    assert reg["activated"] and reg["version"] == 1 and reg["n_versions"] == 1 and reg["summary"].endswith("(first lock of this robot)")
+    assert out["robot_id"] == "arm_a" and out["active"] == "v1" and out["robot_type"] == "so101_follower"
+    assert out["lineage"][0]["note"] == "first" and out["lineage"][0]["is_active"] and out["lineage"][0]["exists"]
+    assert out["lineage"][0]["pinned"] == ["latency_frames"]  # the stubbed lock module's answer
+    assert out["lineage"][0]["params"]["kp"] == 50.0
+
+    # the fake locks all score 1.2: the newcomer is within 10 % and takes over
+    out = _register(client, "arm_a", "v2")
+    assert out["registration"]["activated"] and out["active"] == "v2" and out["version"] == 2
+    # activate=false registers without activating; a 404 for a lock that does not exist
+    out = _register(client, "arm_a", "v3", activate=False)
+    assert not out["registration"]["activated"] and out["active"] == "v2" and out["n_versions"] == 3
+    assert client.post("/api/registry/arm_a/register", json={"lock": "ghost"}).status_code == 404
+    assert client.post("/api/registry/bad%2Fid/register", json={"lock": "v1"}).status_code in (400, 404)
+    assert client.post("/api/registry/arm_a/register", json={"lock": "v1", "max_regression": -1}).status_code == 422
+
+    listing = client.get("/api/registry").json()
+    (row,) = listing["robots"]
+    assert row["robot_id"] == "arm_a" and row["active"] == "v2" and row["version"] == 2 and row["n_versions"] == 3
+    assert [l["name"] for l in row["locks"]] == ["v1", "v2", "v3"]
+    detail = client.get("/api/registry/arm_a").json()
+    assert [l["version"] for l in detail["lineage"]] == [1, 2, 3]
+    assert len(detail["param_drift"]["comparable"]["latency_frames"]["values"]) == 3
+    assert "kp" in detail["param_drift"]["not_comparable"]
+
+    r = client.post("/api/registry/arm_a/rollback")
+    assert r.status_code == 200 and r.json()["active"] == "v1" and r.json()["previous_active"] == "v2"
+    assert client.post("/api/registry/arm_a/rollback").status_code == 409  # oldest already
+    r = client.post("/api/registry/arm_a/activate", json={"lock": "v3"})
+    assert r.status_code == 200 and r.json()["active"] == "v3" and r.json()["previous_active"] == "v1"
+    assert client.post("/api/registry/arm_a/activate", json={"lock": "nope"}).status_code == 400
+    assert client.post("/api/registry/ghost/activate", json={"lock": "v1"}).status_code == 404
+    assert client.post("/api/registry/ghost/rollback").status_code == 404
+
+    r = client.delete("/api/registry/arm_a")
+    assert r.status_code == 200 and r.json() == {"removed": "arm_a", "locks": ["v1", "v2", "v3"]}
+    assert client.delete("/api/registry/arm_a").status_code == 404
+    assert (fakes / "locks" / "v1.lock.json").is_file()
+    assert client.get("/api/registry").json()["robots"] == []
+
+
+def test_lock_routes_accept_a_robot_reference(client, fakes):
+    write_lock(fakes, "unit-a", kp=50.0)
+    write_lock(fakes, "unit-b", kp=60.0)
+    _register(client, "arm_a", "unit-a")
+
+    assert client.get("/api/locks/@arm_a").json()["name"] == "unit-a"
+    assert client.get("/api/locks/@ghost").status_code == 404
+    assert "unknown robot" in client.get("/api/locks/@ghost").json()["detail"]
+
+    out = client.post("/api/check", json={"dataset": FAKE_DS, "lock": "@arm_a"}).json()
+    assert out["lock"] == "unit-a" and out["verdict"] == "ok"
+    (rec,) = _history_lines(fakes, "unit-a")
+    assert rec["lock"] == "unit-a" and not (fakes / "locks" / "@arm_a.history.jsonl").exists()
+    h = client.get("/api/history/@arm_a").json()
+    assert h["lock"] == "unit-a" and len(h["entries"]) == 1
+    assert client.get("/api/history/@ghost").status_code == 404
+    assert client.post("/api/check", json={"dataset": FAKE_DS, "lock": "@ghost"}).status_code == 404
+
+    r = client.get(f"/api/replay?dataset={FAKE_DS}&episode=0&lock=%40arm_a")
+    assert r.status_code == 200 and r.json()["lock"] == "@arm_a"
+    assert client.get(f"/api/compensate?dataset={FAKE_DS}&episode=0&lock=%40arm_a").status_code == 200
+    assert client.post("/api/drift", json={"dataset": FAKE_DS, "lock": "@ghost"}).status_code == 404
+    assert client.post("/api/diagnose", json={"dataset": FAKE_DS, "lock": "@ghost"}).status_code == 404
+
+    # the reference follows the active lock
+    _register(client, "arm_a", "unit-b", activate=True)
+    assert client.get("/api/locks/@arm_a").json()["name"] == "unit-b"
+    # a plain name never touches the registry, and a lock can not be deleted through a reference
+    assert client.get("/api/locks/unit-a").json()["name"] == "unit-a"
+    assert client.delete("/api/locks/@arm_a").status_code == 400
+    assert (fakes / "locks" / "unit-b.lock.json").is_file()
+
+
+def test_calibrate_with_robot_id_registers_the_lock(client, fakes):
+    assert client.post("/api/calibrate", json={"dataset": FAKE_DS, "robot_id": "bad/id"}).status_code == 400
+    r = client.post("/api/calibrate", json={"dataset": FAKE_DS, "name": "unit-a", "robot_id": "arm_a"})
+    assert r.status_code == 200
+    job = r.json()["job_id"]
+    with client.stream("GET", f"/api/calibrate/{job}/events") as resp:
+        events = sse_events(resp)
+    done = events[-1]
+    assert done["type"] == "done" and done["lock"]["name"] == "unit-a"
+    reg = done["registration"]
+    assert reg["robot_id"] == "arm_a" and reg["lock"] == "unit-a" and reg["activated"] and reg["version"] == 1
+    st = client.get(f"/api/jobs/{job}").json()
+    assert st["status"] == "done" and st["registration"]["active"] == "unit-a"
+    detail = client.get("/api/registry/arm_a").json()
+    assert detail["active"] == "unit-a" and detail["lineage"][0]["dataset"] == FAKE_DS
+    assert client.get("/api/locks/@arm_a").json()["name"] == "unit-a"
+
+    # a second calibration of the same robot: same score, so it takes over by the rule
+    r = client.post("/api/calibrate", json={"dataset": FAKE_DS, "name": "unit-b", "robot_id": "arm_a"})
+    with client.stream("GET", f"/api/calibrate/{r.json()['job_id']}/events") as resp:
+        done = sse_events(resp)[-1]
+    assert done["registration"]["version"] == 2 and done["registration"]["activated"]
+    # ...unless told not to
+    r = client.post("/api/calibrate", json={"dataset": FAKE_DS, "name": "unit-c", "robot_id": "arm_a", "activate": False})
+    with client.stream("GET", f"/api/calibrate/{r.json()['job_id']}/events") as resp:
+        done = sse_events(resp)[-1]
+    assert not done["registration"]["activated"] and client.get("/api/locks/@arm_a").json()["name"] == "unit-b"
+    # without robot_id the done event has no registration key, as before
+    r = client.post("/api/calibrate", json={"dataset": FAKE_DS, "name": "unit-d"})
+    with client.stream("GET", f"/api/calibrate/{r.json()['job_id']}/events") as resp:
+        done = sse_events(resp)[-1]
+    assert "registration" not in done
+
+
+def test_dashboard_rows_carry_registry_fields(client, monkeypatch, tmp_path):
+    lock_dir = tmp_path / "locks"
+    monkeypatch.setattr(server, "LOCK_DIR", lock_dir)
+    monkeypatch.setattr(server, "LOCK_SUFFIX", LOCK_SUFFIX)
+    monkeypatch.setattr(server, "FLEET_DIR", lock_dir / "fleet")
+    monkeypatch.setattr(server, "_DATASETS", {})
+    monkeypatch.setitem(sys.modules, "antares.history", None)
+    _copy_lock(lock_dir, "arm-a-v1", created_at="2026-10-01T00:00:00Z")
+    _copy_lock(lock_dir, "arm-a-v2", created_at="2026-10-08T00:00:00Z")
+    _copy_lock(lock_dir, "loose", created_at="2026-10-09T00:00:00Z")
+
+    # no registry file: every row unregistered, as before
+    by = {r["name"]: r for r in client.get("/api/dashboard").json()["robots"]}
+    assert all(r["robot_id"] is None and r["is_active"] is None and r["version"] is None and r["n_versions"] is None
+               for r in by.values())
+
+    assert client.post("/api/registry/arm_a/register", json={"lock": "arm-a-v1"}).status_code == 200
+    assert client.post("/api/registry/arm_a/register", json={"lock": "arm-a-v2"}).status_code == 200
+    by = {r["name"]: r for r in client.get("/api/dashboard").json()["robots"]}
+    assert by["arm-a-v1"]["robot_id"] == "arm_a" and by["arm-a-v1"]["is_active"] is False
+    assert by["arm-a-v1"]["version"] == 1 and by["arm-a-v1"]["n_versions"] == 2
+    assert by["arm-a-v2"]["robot_id"] == "arm_a" and by["arm-a-v2"]["is_active"] is True and by["arm-a-v2"]["version"] == 2
+    assert by["loose"]["robot_id"] is None and by["loose"]["version"] is None
+
+    # a corrupt registry must not take the dashboard down
+    (lock_dir / "registry.json").write_text("{nope")
+    r = client.get("/api/dashboard")
+    assert r.status_code == 200 and all(x["robot_id"] is None for x in r.json()["robots"])
+    assert client.get("/api/registry").status_code == 500

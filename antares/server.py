@@ -818,10 +818,77 @@ def list_lock_dicts() -> list[dict]:
 
 
 def load_lock_dict(name: str, lock_dir: Path | str | None = None) -> dict:
+    name = resolve_lock_ref(name, lock_dir)  # @<robot> -> its active lock
     p = _lock_path(name, lock_dir)
     if not p.is_file():
         raise HTTPException(status_code=404, detail=f"no lock named {name!r}")
     return json.loads(p.read_text())
+
+
+# Robot registry (``LOCK_DIR/registry.json``): one id per physical robot, a
+# lineage of its locks and the active one. ``@<robot>`` stands for the
+# active lock wherever a lock name is accepted; every read goes through
+# ``resolve_lock_ref`` so an unregistered lock name passes through unchanged.
+
+
+def registry_path(lock_dir: Path | str | None = None) -> Path:
+    from antares.registry import registry_path as _rp
+
+    return _rp(lock_dir if lock_dir is not None else LOCK_DIR)
+
+
+def load_registry(lock_dir: Path | str | None = None):
+    """The registry in ``lock_dir`` (default LOCK_DIR); a missing file is empty."""
+    from antares.registry import Registry, RegistryError
+
+    try:
+        return Registry.load(registry_path(lock_dir))
+    except RegistryError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def resolve_lock_ref(ref: str, lock_dir: Path | str | None = None) -> str:
+    """A lock name (or path) passes through; ``@<robot>`` becomes the robot's
+    active lock name, 404 when the robot is unknown or has no active lock."""
+    from antares.registry import RegistryError, UnknownRobot, is_robot_ref
+
+    if not is_robot_ref(ref):
+        return ref
+    try:
+        return load_registry(lock_dir).resolve(ref)
+    except UnknownRobot as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RegistryError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+def register_lock(
+    robot_id: str,
+    lock: Any,
+    *,
+    activate: bool | None = None,
+    note: str | None = None,
+    max_regression: float | None = None,
+) -> dict:
+    """Register ``lock`` (a name, dict or RobotLock) for ``robot_id`` in
+    LOCK_DIR's registry, save, and return the ``RegistrationResult`` dict."""
+    from antares.registry import DEFAULT_MAX_REGRESSION, RegistryError
+
+    reg = load_registry()
+    try:
+        res = reg.register(
+            robot_id,
+            lock,
+            activate=activate,
+            note=note,
+            max_regression=DEFAULT_MAX_REGRESSION if max_regression is None else max_regression,
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RegistryError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    reg.save()
+    return res.to_dict()
 
 
 def save_lock(lock) -> Path:
@@ -961,6 +1028,7 @@ def run_drift(
     """Sliding-window refits of ``lock_name`` over ``ds``; saves and returns (DriftScan, path)."""
     from antares.drift import drift_scan
 
+    lock_name = resolve_lock_ref(lock_name)
     lock = load_lock(lock_name)
     path = _drift_path(lock_name)
     sim = simulate_for(dataset_robot(ds))
@@ -1139,6 +1207,8 @@ def job_status_dict(job: Job) -> dict:
             out["lock"] = job.lock
         if job.error is not None:
             out["error"] = job.error
+        if getattr(job, "registration", None) is not None:  # calibrate with robot_id
+            out["registration"] = job.registration
     return out
 
 
@@ -1265,8 +1335,11 @@ def _job_worker(job: Job, req: "CalibrateRequest") -> None:
             n_seeds=req.n_seeds,
         )
         result_d = result.to_dict()
-        job.push({"type": "done", "lock": lock, "result": result_d})
-        job.finish("done", result=result_d, lock=lock)
+        extra: dict[str, Any] = {}
+        if req.robot_id:
+            extra["registration"] = register_lock(req.robot_id, lock, activate=req.activate)
+        job.push({"type": "done", "lock": lock, "result": result_d, **extra})
+        job.finish("done", result=result_d, lock=lock, **extra)
     except Exception as e:  # noqa: BLE001 - report to the client
         job_fail(job, e)
 
@@ -1296,6 +1369,7 @@ def run_dr(
         raise HTTPException(status_code=400, detail="n_fits must be >= 1")
     if n_train < 1:
         raise HTTPException(status_code=400, detail="n_train must be >= 1")
+    lock_name = resolve_lock_ref(lock_name)
     name = name or lock_name
     _dr_path(name)  # validate the name before spending time fitting
     lock = load_lock_dict(lock_name)
@@ -1834,12 +1908,24 @@ class CalibrateRequest(BaseModel):
     sensor_mode: Literal["sim", "kinematic"] = "sim"
     # Sim model override (registry name); default: the dataset's family.
     robot: str | None = None
+    # Physical robot id (LeRobot's, e.g. "arm_a"): the saved lock is registered
+    # in locks/registry.json for it and activated by the registry's rule.
+    robot_id: str | None = None
+    # With robot_id: None applies the rule, True/False forces it.
+    activate: bool | None = None
 
 
 @app.post("/api/calibrate")
 def calibrate_start(req: CalibrateRequest) -> dict:
     if req.name is not None:
         _lock_path(req.name)  # validate early
+    if req.robot_id is not None:
+        from antares.registry import RegistryError, validate_robot_id
+
+        try:
+            validate_robot_id(req.robot_id)
+        except RegistryError as e:
+            raise HTTPException(status_code=400, detail=str(e))
     check_robot(req.robot)
     job = start_job("calibrate", req.dataset, _job_worker, req)
     return {"job_id": job.id}
@@ -1892,7 +1978,7 @@ class DRRequest(BaseModel):
 
 @app.post("/api/dr")
 def dr_start(req: DRRequest) -> dict:
-    lock_name = req.lock or _slug(req.dataset)
+    lock_name = resolve_lock_ref(req.lock or _slug(req.dataset))
     load_lock_dict(lock_name)  # 404 now rather than as a job error
     _dr_path(req.name or lock_name)
     job = Job(id=uuid.uuid4().hex[:12], dataset=req.dataset, kind="dr")
@@ -1934,6 +2020,7 @@ def _attachment(filename: str) -> dict[str, str]:
 def lock_export(name: str) -> Response:
     """Calibrated MJCF as a download. ``meshdir`` is the absolute package
     assets dir; use ``export.zip`` for a self-contained bundle."""
+    name = resolve_lock_ref(name)
     return Response(
         export_lock_xml(name),
         media_type="application/xml",
@@ -1945,6 +2032,7 @@ def lock_export(name: str) -> Response:
 def lock_export_zip(name: str) -> Response:
     """Zip of ``<name>/<name>.xml``, ``<name>.antares.json``, ``scene.xml``
     and ``assets/*.stl``."""
+    name = resolve_lock_ref(name)
     return Response(
         export_lock_zip(name),
         media_type="application/zip",
@@ -2136,12 +2224,22 @@ def _dataset_fps(dataset: str | None, fleet_robot: dict | None) -> float | None:
     return None
 
 
+def _registry_index() -> dict[str, dict]:
+    """lock name -> ``{"robot_id", "is_active", "version", "n_versions"}`` from
+    the registry; empty (never an error) when there is none or it is unreadable."""
+    try:
+        return load_registry().index_by_lock()
+    except Exception:  # noqa: BLE001 - a broken registry must not take the dashboard down
+        return {}
+
+
 def dashboard_robot(
     lock: dict,
     *,
     drift: dict[str, str | None],
     history: dict[str, dict],
     fleet_by_lock: dict[str, dict],
+    registry: dict[str, dict] | None = None,
 ) -> dict:
     """One dashboard row for a lock dict."""
     name = str(lock.get("name") or "")
@@ -2157,8 +2255,15 @@ def dashboard_robot(
     pinned = seeds.get("pinned") if seeds else None
     hist = history.get(name) or {}
     fleet_robot = fleet_by_lock.get(name)
+    reg = (registry or {}).get(name) or {}
     return {
         "name": name,
+        # registry: which physical robot this lock belongs to, and where it
+        # sits in that robot's lineage (all null/None when unregistered)
+        "robot_id": reg.get("robot_id"),
+        "is_active": reg.get("is_active"),
+        "version": reg.get("version"),
+        "n_versions": reg.get("n_versions"),
         "dataset": lock.get("dataset"),
         "robot_type": lock.get("robot_type"),
         "robot": lock.get("robot") or DEFAULT_ROBOT,
@@ -2184,8 +2289,9 @@ def dashboard() -> dict:
     drift = _drift_verdicts()
     history = _history_index()
     fleet, fleet_by_lock = _fleet_index()
+    registry = _registry_index()
     robots = [
-        dashboard_robot(l, drift=drift, history=history, fleet_by_lock=fleet_by_lock)
+        dashboard_robot(l, drift=drift, history=history, fleet_by_lock=fleet_by_lock, registry=registry)
         for l in list_lock_dicts()
         if l.get("name")
     ]
@@ -2249,11 +2355,12 @@ def check_drift(req: CheckRequest) -> dict:
     Unless ``record`` is false the result (insufficient data included) is
     appended to ``LOCK_DIR/<lock>.history.jsonl``; see ``GET /api/history``.
     """
-    _lock_path(req.lock)  # validate the name before loading a dataset
+    lock_name = resolve_lock_ref(req.lock)  # @<robot> -> its active lock
+    _lock_path(lock_name)  # validate the name before loading a dataset
     ds = get_dataset(req.dataset)
     result = run_check(
         ds,
-        req.lock,
+        lock_name,
         threshold_deg=req.threshold_deg,
         ratio=req.ratio,
         last=req.last,
@@ -2264,13 +2371,13 @@ def check_drift(req: CheckRequest) -> dict:
         from antares import history
 
         try:
-            history.append(result, LOCK_DIR, name=req.lock)
+            history.append(result, LOCK_DIR, name=lock_name)
         except OSError as e:  # the verdict stands; say why it was not recorded
             out["history_error"] = str(e)
     if req.explain and result.verdict == "drifted":
         try:
             out["diagnosis"] = run_diagnose(
-                ds, req.lock, last=req.last, max_evaluations=req.explain_evaluations
+                ds, lock_name, last=req.last, max_evaluations=req.explain_evaluations
             ).to_dict()
         except HTTPException as e:  # the verdict stands; say why it has no diagnosis
             out["diagnosis"] = None
@@ -2307,9 +2414,118 @@ def history_get(lock: str) -> dict:
     """
     from antares import history
 
+    lock = resolve_lock_ref(lock)
     if not _lock_path(lock).is_file():  # 400 on a bad name
         raise HTTPException(status_code=404, detail=f"no lock named {lock!r}")
     return history.report(lock, LOCK_DIR)
+
+
+# --------------------------------------------------------------------------
+# Robot registry routes (see antares.registry)
+# --------------------------------------------------------------------------
+
+
+def registry_robot(reg, robot_id: str) -> dict:
+    """``GET /api/registry/{robot_id}``: the summary plus the lineage with pinned flags."""
+    from antares.registry import UnknownRobot, param_drift
+
+    try:
+        out = reg.summary(robot_id)
+        lineage = reg.lineage(robot_id)
+    except UnknownRobot as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    out["lineage"] = lineage
+    out["param_drift"] = param_drift(lineage)
+    return out
+
+
+@app.get("/api/registry")
+def registry_list() -> dict:
+    """Every registered robot: active lock, version, held-out score, lineage entries."""
+    reg = load_registry()
+    return {
+        "version": reg.version,
+        "path": str(reg.path),
+        "robots": [reg.summary(rid) for rid in reg.robots()],
+    }
+
+
+@app.get("/api/registry/{robot_id}")
+def registry_get(robot_id: str) -> dict:
+    return registry_robot(load_registry(), robot_id)
+
+
+class RegisterRequest(BaseModel):
+    lock: str
+    activate: bool | None = None
+    note: str | None = None
+    max_regression: float | None = Field(None, ge=0)
+
+
+@app.post("/api/registry/{robot_id}/register")
+def registry_register(robot_id: str, req: RegisterRequest) -> dict:
+    """Add a saved lock to the robot's lineage; the activation rule decides
+    whether it becomes active (see ``registration.reason``)."""
+    registration = register_lock(
+        robot_id, req.lock, activate=req.activate, note=req.note, max_regression=req.max_regression
+    )
+    out = registry_robot(load_registry(), robot_id)
+    out["registration"] = registration
+    return out
+
+
+class ActivateRequest(BaseModel):
+    lock: str
+
+
+@app.post("/api/registry/{robot_id}/activate")
+def registry_activate(robot_id: str, req: ActivateRequest) -> dict:
+    from antares.registry import RegistryError, UnknownRobot
+
+    reg = load_registry()
+    try:
+        previous = reg.activate(robot_id, req.lock)
+    except UnknownRobot as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RegistryError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    reg.save()
+    out = registry_robot(reg, robot_id)
+    out["previous_active"] = previous
+    return out
+
+
+@app.post("/api/registry/{robot_id}/rollback")
+def registry_rollback(robot_id: str) -> dict:
+    from antares.registry import RegistryError, UnknownRobot
+
+    reg = load_registry()
+    try:
+        previous, _ = reg.rollback(robot_id)
+    except UnknownRobot as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RegistryError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    reg.save()
+    out = registry_robot(reg, robot_id)
+    out["previous_active"] = previous
+    return out
+
+
+@app.delete("/api/registry/{robot_id}")
+def registry_delete(robot_id: str) -> dict:
+    """Forget the robot; its lock files stay."""
+    from antares.registry import RegistryError, UnknownRobot
+
+    reg = load_registry()
+    try:
+        entry = reg.remove(robot_id)
+    except UnknownRobot as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RegistryError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    reg.save()
+    return {"removed": robot_id, "locks": entry.names}
 
 
 class DiagnoseRequest(BaseModel):
@@ -2407,6 +2623,7 @@ def load_camera_fit_dicts(lock_name: str) -> dict[str, dict]:
     """Camera fits for a lock from ``<lock>.camera.json`` (falls back to the lock's ``cameras``)."""
     from antares.camera import load_camera_fits
 
+    lock_name = resolve_lock_ref(lock_name)
     _lock_path(lock_name)  # validates the name
     fits = {name: f.to_dict() for name, f in load_camera_fits(lock_name, LOCK_DIR).items()}
     if not fits:
@@ -2432,6 +2649,7 @@ def run_camera_fit(
     from antares.camera import fit_camera, save_camera_fit
     from antares.sim import Arm
 
+    lock_name = resolve_lock_ref(lock_name)
     _lock_path(lock_name)
     # A fit runs for a minute; it gets its own Arm so overlay requests
     # (which share ``_camera_arm``) are not blocked behind it.
@@ -2542,7 +2760,7 @@ def camera_cameras(dataset: str = Query(...)) -> list[dict]:
 
 @app.post("/api/camera/fit")
 def camera_fit_start(req: CameraFitRequest) -> dict:
-    _lock_path(req.lock)  # validate early
+    _lock_path(resolve_lock_ref(req.lock))  # validate early
     job = start_job("camera", req.dataset, _camera_job_worker, req)
     return {"job_id": job.id}
 
