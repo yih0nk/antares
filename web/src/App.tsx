@@ -722,9 +722,13 @@ export default function App() {
   // ---- calibration -----------------------------------------------------------
   const sourceRef = useRef<EventSource | null>(null);
   useEffect(() => () => sourceRef.current?.close(), []);
+  // Set while the start request is in flight, so a double click cannot start
+  // two jobs under the same (to-the-second) lock name.
+  const starting = useRef(false);
 
   const startCalibration = async () => {
-    if (!dataset) return;
+    if (!dataset || starting.current) return;
+    starting.current = true;
     setError(null);
     const name = lockNameFor(dataset);
     let jobId: string;
@@ -741,6 +745,8 @@ export default function App() {
     } catch (e) {
       setError(`Could not start calibration: ${(e as Error).message}`);
       return;
+    } finally {
+      starting.current = false;
     }
     setCalib({ jobId, name, total, perJoint, status: "running", progress: [], best: [] });
     liveWanted.current = null;
@@ -777,10 +783,13 @@ export default function App() {
       } else if (ev.type === "done") {
         src.close();
         setCalib((c) => (c && c.jobId === jobId ? { ...c, status: "done", result: ev.result } : c));
-        api.locks().then((ls) => {
-          setLocks(ls);
-          setGhost(ev.lock.name);
-        });
+        api.locks().then(
+          (ls) => {
+            setLocks(ls);
+            setGhost(ev.lock.name);
+          },
+          (e) => setError(`Saved ${ev.lock.name}, but could not reload the lock list: ${(e as Error).message}`),
+        );
       } else if (ev.type === "error") {
         src.close();
         setCalib((c) => (c && c.jobId === jobId ? { ...c, status: "error", error: ev.message } : c));
