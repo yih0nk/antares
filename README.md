@@ -708,28 +708,24 @@ back in raw units), `export` (in the sidecar) and the drift and DR refits
 | `antares/calibrate.py` | CMA-ES parameter fit |
 | `antares/sensor.py` | Per-joint command offset/scale fit |
 | `antares/gap.py` | Tracking-error metrics |
-| `antares/lock.py` | Calibrated sim saved per robot as a lock file |
-| `antares/export.py` | Lock -> standalone MJCF, sidecar, scene, zip |
-
-| `antares/drift.py` | Sliding-window refits and trend statistics over a session |
-
 | `antares/lock.py` | Calibrated sim saved per robot (`locks/*.lock.json`) |
+| `antares/export.py` | Lock -> standalone MJCF, sidecar, scene, zip |
+| `antares/drift.py` | Sliding-window refits and trend statistics over a session |
 | `antares/dr.py` | Domain-randomization ranges derived from refits (`locks/*.dr.json`) |
-
 | `antares/check.py` | Pre-deploy drift gate (`antares check`, `/api/check`) |
 | `antares/diagnose.py` | Names the parameter change behind a drift (`check --explain`) |
 | `antares/synth.py` | Synthetic recordings of an arm with known wear (`antares synth`) |
 | `action.yml` | Composite GitHub Action running the gate in CI |
-
+| `.github/workflows/` | Tests on every push (`ci.yml`) and an example weekly drift gate on the SO-101 demo lock (`robot-check.yml`) |
 | `antares/events.py` | Contact events from the real-sim residual |
-
 | `antares/compensate.py` | Lag compensation (shift, ILC), sim-validated |
 | `antares/specificity.py` | Cross-arm verdict, identifiability, swap and same-arm checks |
 | `antares/synthetic.py` | Simulated arm datasets with known parameters |
 | `results/` | Robot-specificity reports (`antares specificity`) |
+| `antares/cli.py` | The `antares` command line |
 | `antares/server.py` | FastAPI backend for the UI |
 | `examples/` | `randomize_env.py`: DR ranges in a training loop |
-
+| `scripts/` | `sensor_synthetic.py` (synthetic sensor-fit check), `dr_compare.py` (derived vs hand-picked DR ranges) |
 | `antares/fleet.py` | Hub discovery, fleet scan, fleet statistics |
 | `locks/` | Committed locks for the demo arms; `locks/fleet/` for the fleet scan |
 | `web/` | React + three.js viewer |
