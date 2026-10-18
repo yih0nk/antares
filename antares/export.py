@@ -42,7 +42,7 @@ from typing import Any
 import mujoco
 import numpy as np
 
-from antares import __version__
+from antares import __version__, factors
 from antares.lock import RobotLock
 from antares.sim import JOINTS, MESH_DIR, MODEL_PATH, Arm, CommandMap, SimParams, UnitMap
 
@@ -54,8 +54,8 @@ EXPORT_FORMAT = "antares.export/1"
 
 #: Default class in the MJCF that all six servos share.
 SERVO_CLASS = "sts3215"
-JOINT_PARAMS: tuple[str, ...] = ("damping", "armature", "frictionloss")
-ACTUATOR_PARAMS: tuple[str, ...] = ("kp", "kv")
+JOINT_PARAMS: tuple[str, ...] = factors.mjcf_attrs("joint")
+ACTUATOR_PARAMS: tuple[str, ...] = factors.mjcf_attrs("position")
 BAKED_PARAMS: tuple[str, ...] = JOINT_PARAMS + ACTUATOR_PARAMS
 
 ParamValue = float | Sequence[float]
