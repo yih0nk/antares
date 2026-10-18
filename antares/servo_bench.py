@@ -168,7 +168,12 @@ def timing_report(run: Run) -> dict:
 
 def import_runs(paths: Sequence[str | Path], servo: str, out: str | Path,
                 seconds: float = EPISODE_SECONDS) -> tuple[Path, PotFit, list[dict]]:
-    """Write ``paths`` (one servo's runs) as one dataset under ``out``."""
+    """Write ``paths`` (one servo's runs) as one dataset under ``out``.
+
+    Returns the dataset directory, the pot conversion and one
+    :func:`timing_report` per run, each with the ``episodes`` it yielded
+    (whole ``seconds`` windows; a run's tail shorter than that is dropped).
+    """
     from antares.synth import write_local
 
     runs = [read_run(p) for p in paths]
@@ -176,8 +181,9 @@ def import_runs(paths: Sequence[str | Path], servo: str, out: str | Path,
     episodes: list[Episode] = []
     timing = []
     for run in runs:
-        episodes += episodes_from_run(run, servo, pot, start_index=len(episodes), seconds=seconds)
-        timing.append({"file": Path(run.path).name, **timing_report(run)})
+        eps = episodes_from_run(run, servo, pot, start_index=len(episodes), seconds=seconds)
+        episodes += eps
+        timing.append({"file": Path(run.path).name, **timing_report(run), "episodes": len(eps)})
     out = Path(out)
     ds = Dataset(repo_id=str(out), robot_type=ROBOT_TYPE, fps=FPS, joint_names=(JOINT,), episodes=tuple(episodes))
     write_local(ds, out)
@@ -230,14 +236,39 @@ def simulate_run(path: str | Path, params=None, *, servo: str = "a", pot_scale: 
 # --------------------------------------------------------------------------
 
 
-def load_lock(name_or_path: str | Path):
-    """A lock by file path or by name in :data:`antares.lock.LOCK_DIR`."""
-    from antares.lock import LOCK_DIR, LOCK_SUFFIX, RobotLock
+def lock_file(ref: str | Path) -> Path:
+    """Where the lock ``ref`` lives, by the CLI's rules (:func:`antares.cli._load_lock_arg`):
+    a file path as given, else ``<name>.lock.json`` in the lock directory
+    (``ANTARES_LOCK_DIR``, default ``locks/``); ``@<robot>`` is that robot's
+    active lock. ``SystemExit`` with the reason when there is no such lock.
+    """
+    from antares import server
+    from antares.lock import LOCK_SUFFIX
 
-    p = Path(name_or_path)
-    if not p.is_file():
-        p = LOCK_DIR / f"{name_or_path}{LOCK_SUFFIX}"
-    return RobotLock.load(p)
+    p = Path(ref)
+    if p.is_file():
+        return p
+    if len(p.parts) > 1 or p.name.endswith(LOCK_SUFFIX):  # meant as a path
+        raise SystemExit(f"error: no such lock file: {p}")
+    try:
+        name = server.resolve_lock_ref(str(ref))
+        path = server._lock_path(name)
+    except server.HTTPException as e:
+        raise SystemExit(f"error: lock {str(ref)!r}: {e.detail}") from None
+    if not path.is_file():
+        raise SystemExit(f"error: no lock named {name!r} in {path.parent} (and {ref} is not a file)")
+    return path
+
+
+def load_lock(ref: str | Path):
+    """The :class:`~antares.lock.RobotLock` at :func:`lock_file` ``(ref)``."""
+    from antares.lock import RobotLock
+
+    path = lock_file(ref)
+    try:
+        return RobotLock.load(path)
+    except (KeyError, TypeError, ValueError) as e:
+        raise SystemExit(f"error: lock {path} is malformed: {e}") from None
 
 
 def cross_scores(datasets: dict[str, Dataset], locks: dict[str, object]) -> dict[str, dict[str, float]]:
@@ -263,7 +294,7 @@ def payload_check(ds: Dataset, lock, ratio: float = 1.5):
 
 __all__ = [
     "FPS", "HOLDS", "JOINT", "PotFit", "ROBOT", "ROBOT_TYPE", "Run", "command_at", "cross_scores",
-    "episodes_from_run", "fit_pot", "import_runs", "load_lock", "payload_check", "program", "read_run",
+    "episodes_from_run", "fit_pot", "import_runs", "load_lock", "lock_file", "payload_check", "program", "read_run",
     "simulate_run", "timing_report",
 ]
 
@@ -285,14 +316,14 @@ def _pairs(items: Sequence[str], what: str) -> dict[str, str]:
 
 def cmd_import(args) -> int:
     out, pot, timing = import_runs(args.csv, args.servo, args.out, seconds=args.episode_seconds)
-    n_eps = sum(t["frames"] for t in timing) // int(round(args.episode_seconds * FPS))
+    n_eps = sum(t["episodes"] for t in timing)
     print(f"wrote {out}: {len(timing)} run(s), {n_eps} episodes of {args.episode_seconds:g} s")
     print(f"pot: deg = {pot.scale:.4f} * counts + {pot.offset:.2f}  (holds fit to {pot.rms_deg:.2f} deg RMS)")
     for counts, deg in pot.points[:5]:
         print(f"  {deg:5.0f} deg  <-  {counts:6.1f} counts")
     for t in timing:
         flag = "" if t["late_ticks"] == 0 else f"  ({t['late_ticks']} ticks over 25 ms)"
-        print(f"  {t['file']}: {t['frames']} frames, median tick {t['dt_ms_median']:.1f} ms{flag}")
+        print(f"  {t['file']}: {t['frames']} frames -> {t['episodes']} episodes, median tick {t['dt_ms_median']:.1f} ms{flag}")
     if pot.rms_deg > 3.0:
         print("warning: the holds do not sit on a line; check the feedback wire and that the servo reached each hold")
     return 0
@@ -340,81 +371,45 @@ def cmd_demo(args) -> int:
             raise SystemExit(f"error: --payload names servo {key!r} but there is no --lock {key}=...")
         res = payload_check(read_local(path, repo_id=path), locks[key], ratio=args.ratio)
         print()
-        print(f"payload check, servo {key} with the coin ({path}): {res.score:.3f} deg vs its lock's "
-              f"{res.reference:.3f} deg, limit {res.limit:.3f} -> {res.verdict.upper()}")
+        print(f"payload check, servo {key} with the coin ({path}): {_verdict_line(res)}")
         if args.fresh:
             fres = payload_check(read_local(args.fresh, repo_id=args.fresh), locks[key], ratio=args.ratio)
-            print(f"same servo, no coin ({args.fresh}): {fres.score:.3f} deg -> {fres.verdict.upper()}")
+            print(f"same servo, no coin ({args.fresh}): {_verdict_line(fres, short=True)}")
     return 0
 
 
-def add_parser(sub) -> None:
-    """Register ``antares bench`` on the CLI's subparsers."""
-    p = sub.add_parser("bench", help="a hobby servo on an Arduino as a one-joint robot (import, simulate, demo, live)")
-    bsub = p.add_subparsers(dest="bench_cmd", required=True)
-
-    b = bsub.add_parser("import", help="turn bench CSVs (bench/capture.py) into a dataset for one servo")
-    b.add_argument("csv", nargs="+", help="runs of the same servo")
-    b.add_argument("--servo", default="a", help="which raw_<servo> column (default a)")
-    b.add_argument("--out", required=True, help="dataset directory to write")
-    b.add_argument("--episode-seconds", type=float, default=EPISODE_SECONDS)
-    b.set_defaults(func=cmd_import)
-
-    b = bsub.add_parser("simulate", help="write the CSV a servo with given parameters would log (no hardware)")
-    b.add_argument("out")
-    b.add_argument("--servo", default="a")
-    b.add_argument("--set", action="append", default=[], metavar="PARAM=VALUE",
-                   help="change a parameter from the sg92r model's defaults, e.g. --set armature=0.0005")
-    b.add_argument("--pot-scale", type=float, default=0.28, help="degrees per pot count")
-    b.add_argument("--pot-offset", type=float, default=-40.0, help="degrees at zero counts")
-    b.add_argument("--noise", type=float, default=1.0, help="pot noise, counts (std)")
-    b.add_argument("--seed", type=int, default=0)
-    b.set_defaults(func=cmd_simulate)
-
-    b = bsub.add_parser("demo", help="every servo's recording through every lock, then the payload check")
-    b.add_argument("--servo", action="append", required=True, metavar="NAME=DATASET",
-                   help="a servo's held-out recording (e.g. a=datasets/servo_a_test); repeat per servo")
-    b.add_argument("--lock", action="append", required=True, metavar="NAME=LOCK",
-                   help="that servo's lock (name or path); same NAME as --servo")
-    b.add_argument("--payload", metavar="NAME=DATASET", help="a recording of servo NAME with the coin taped on")
-    b.add_argument("--fresh", metavar="DATASET", help="a recording of the same servo without the coin, for contrast")
-    b.add_argument("--ratio", type=float, default=1.5, help="drift limit as a multiple of the lock's held-out score")
-    b.set_defaults(func=cmd_demo)
-
-    _add_live_parser(bsub)
+def _verdict_line(res, short: bool = False) -> str:
+    """A check result for the demo's log; the insufficient-data verdict (too
+    few episodes: no score, reference or limit) falls back to its own summary."""
+    if res.score is None or res.reference is None or res.limit is None:
+        return res.summary()
+    if short:
+        return f"{res.score:.3f} deg -> {res.verdict.upper()}"
+    return f"{res.score:.3f} deg vs its lock's {res.reference:.3f} deg, limit {res.limit:.3f} -> {res.verdict.upper()}"
 
 
 def cmd_live(args) -> int:
+    """Everything that can fail (lock, pot conversion, the CSV or the port)
+    is opened here, before :func:`antares.servo_live.serve` binds the page."""
     from antares import servo_live
+    from antares.lock import RobotLock
 
-    lock = load_lock(args.lock)
-    lock_file = Path(args.lock)
-    pot = servo_live.pot_for_lock(lock, args.dataset, lock_file if lock_file.is_file() else None)
+    path = lock_file(args.lock)
+    lock = RobotLock.load(path)
+    pot = servo_live.pot_for_lock(lock, args.dataset, lock_path=path)
     if args.replay:
         ticks = servo_live.csv_ticks(args.replay, args.servo)
     else:
-        port = args.port or _find_port()
+        from antares.servo_serial import BenchSerialError, find_port
+
+        try:
+            port = args.port or find_port()
+        except BenchSerialError as e:
+            raise SystemExit(f"error: {e}") from None
         ticks = servo_live.serial_ticks(port, args.servo)
-    servo_live.serve(ticks, pot, lock, host=args.host, port=args.http_port)
-    return 0
+    return servo_live.serve(ticks, pot, lock, host=args.host, port=args.http_port)
 
 
-def _find_port() -> str:
-    import glob
-
-    ports = glob.glob("/dev/cu.usbmodem*") + glob.glob("/dev/cu.usbserial*") + glob.glob("/dev/ttyACM*") + glob.glob("/dev/ttyUSB*")
-    if not ports:
-        raise SystemExit("error: no Arduino found; pass --port (Arduino IDE > Tools > Port shows it)")
-    return ports[0]
-
-
-def _add_live_parser(bsub) -> None:
-    b = bsub.add_parser("live", help="watch the real stick and its sim ghosts move together in the browser")
-    b.add_argument("--lock", required=True, help="the servo's lock (name or path)")
-    b.add_argument("--servo", default="a", help="which raw_<servo> column to follow (default a)")
-    b.add_argument("--port", help="the Arduino's serial port (default: the first one found)")
-    b.add_argument("--replay", metavar="CSV", help="play a recorded run at real speed instead of the Arduino")
-    b.add_argument("--dataset", help="dataset whose pot conversion to use (default: the one the lock was fitted on)")
-    b.add_argument("--host", default="127.0.0.1")
-    b.add_argument("--http-port", type=int, default=8010)
-    b.set_defaults(func=cmd_live)
+#: ``antares bench <sub>`` -> its handler; the argparse side lives in :mod:`antares.cli`
+#: so registering the command does not import this module (numpy, pyarrow).
+COMMANDS = {"import": cmd_import, "simulate": cmd_simulate, "demo": cmd_demo, "live": cmd_live}

@@ -41,7 +41,7 @@ bench/pipeline.sh recordings          # about 2 min per servo at 300 evaluations
 antares bench live --lock recordings/locks/servo_a.lock.json
 ```
 
-`pipeline.sh` prints the pot conversion for each servo (check the five holds sit on a line), the calibration before and after, then the demo table: each servo's held-out run through its own lock, the other servo's lock and the uncalibrated model, and the payload check. `bench live` opens a page on http://127.0.0.1:8010 with the real stick and both sim ghosts moving together; `--replay recordings/servo_a_run3.csv` plays a recording instead of the Arduino.
+`pipeline.sh` prints the pot conversion for each servo (check the five holds sit on a line), the calibration before and after, then the demo table: each servo's held-out run through its own lock, the other servo's lock and the uncalibrated model, and the payload check. `bench live` opens a page on http://127.0.0.1:8010 with the real stick and both sim ghosts moving together; `--replay recordings/servo_a_run3.csv` plays a recording instead of the Arduino. The lock's pot conversion is read from its dataset, found next to the lock (`recordings/ds_a`), so both commands run from any directory; `--dataset` points elsewhere. If the Arduino goes quiet or the recording ends, the page stops with the reason instead of staying up over a stick that no longer moves.
 
 The datasets also open in the main viewer like any other: `antares serve`, then "+ add dataset" with the dataset folder's full path (for example `/Users/you/antares/recordings/ds_a`), and the Calibrate button fits the servo live.
 
