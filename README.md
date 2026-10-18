@@ -966,23 +966,28 @@ and the dynamics then refit around that, so it ends worse than fitting
 the dynamics alone.
 On the two demo datasets (20 train / 10 held-out episodes, seed 0, two
 rounds of 150 evaluations, with the wider `kp` range), held-out RMSE in degrees.
-"Dynamics only" is a fresh shared fit given the same 300 evaluations under
-the identity map, which is why it beats the committed shared locks (0.736
-SO-101 at 200 evaluations, 0.787 SO-100 at 150):
+"Dynamics only" is a fresh shared fit given the same budget under the
+identity map (300 evaluations plus the map fits' simulations), which is
+why it beats the committed shared locks (0.736 SO-101 at 200 evaluations,
+0.787 SO-100 at 150). The `sim` columns are the committed
+`locks/svla_so101_pickplace_sensor_sim.lock.json` and
+`locks/svla_so100_pickplace_sensor_sim.lock.json` (`_sim` is the sensor
+mode, not a simulated robot), which a test replays against their stored
+scores:
 
 | | SO-101 dynamics only | SO-101 `sim` | SO-101 `kinematic` | SO-100 dynamics only | SO-100 `sim` | SO-100 `kinematic` |
 |---|---|---|---|---|---|---|
-| **overall** | 0.708 | **0.624** | 0.633 | 0.745 | **0.399** | 0.480 |
-| shoulder_pan | 0.407 | 0.376 | 0.368 | 0.326 | 0.313 | 0.311 |
-| shoulder_lift | 0.801 | 0.651 | 0.665 | 0.854 | 0.431 | 0.504 |
-| elbow_flex | 1.145 | 1.026 | 1.049 | 1.248 | 0.580 | 0.701 |
-| wrist_flex | 0.485 | 0.426 | 0.420 | 0.416 | 0.253 | 0.308 |
-| wrist_roll | 0.394 | 0.388 | 0.383 | 0.458 | 0.335 | 0.465 |
+| **overall** | 0.708 | **0.624** | 0.633 | 0.745 | **0.466** | 0.480 |
+| shoulder_pan | 0.407 | 0.373 | 0.368 | 0.326 | 0.317 | 0.311 |
+| shoulder_lift | 0.801 | 0.651 | 0.665 | 0.854 | 0.462 | 0.504 |
+| elbow_flex | 1.145 | 1.027 | 1.049 | 1.248 | 0.683 | 0.701 |
+| wrist_flex | 0.485 | 0.425 | 0.420 | 0.416 | 0.312 | 0.308 |
+| wrist_roll | 0.394 | 0.385 | 0.383 | 0.458 | 0.458 | 0.465 |
 
 Both real arms carry a real mismatch, mostly on the elbow (`sim` bias
 +1.6 units on SO-101 and +2.2 on SO-100, gain about 0.98) and, on the
-SO-100, the shoulder lift (+1.3 units, gain 1.013). The fitted map cuts
-the SO-100's held-out error by 46% and the SO-101's by 12%. `kinematic`
+SO-100, the shoulder lift (+1.1 units, gain 1.010). The fitted map cuts
+the SO-100's held-out error by 37% and the SO-101's by 12%. `kinematic`
 puts more into the gravity-loaded joints (an SO-101 elbow bias of +3.5),
 as its sag caveat predicts, and is never better overall.
 
