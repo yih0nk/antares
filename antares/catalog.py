@@ -76,11 +76,28 @@ CATALOG: tuple[CatalogEntry, ...] = (
 )
 
 _BY_ID = {e.repo_id: e for e in CATALOG}
+#: Datasets given a robot at run time (``--robot`` on a dataset the catalog
+#: doesn't list, or a different model for one it does).
+_ASSIGNED: dict[str, str] = {}
+
+
+def assign(repo_id: str, robot: str | None) -> None:
+    """Replay ``repo_id`` on ``robot`` from now on (``None`` drops the
+    assignment). Used by ``--robot`` so validation checks the dataset's
+    columns against the model it will run on."""
+    if robot is None:
+        _ASSIGNED.pop(repo_id, None)
+    else:
+        _ASSIGNED[repo_id] = robot
 
 
 def robot_for_dataset(repo_id: str | None) -> str | None:
-    """The robot the catalog assigns to ``repo_id`` (``None`` if not listed)."""
-    e = _BY_ID.get(str(repo_id or ""))
+    """The robot assigned to ``repo_id``, else the catalog's (``None`` if
+    neither)."""
+    key = str(repo_id or "")
+    if key in _ASSIGNED:
+        return _ASSIGNED[key]
+    e = _BY_ID.get(key)
     return e.robot if e else None
 
 
@@ -88,4 +105,4 @@ def entries() -> list[dict]:
     return [e.to_dict() for e in CATALOG]
 
 
-__all__ = ["CATALOG", "CatalogEntry", "entries", "robot_for_dataset"]
+__all__ = ["CATALOG", "CatalogEntry", "assign", "entries", "robot_for_dataset"]
