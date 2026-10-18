@@ -36,6 +36,9 @@ GRIPPER_INDEX = JOINTS.index("gripper")
 
 MODEL_PATH: Path = Path(__file__).resolve().parent / "assets" / "so101" / "so101.xml"
 
+#: |gravity| in the stock MJCF (m/s^2); ``gravity_scale`` multiplies it.
+STANDARD_GRAVITY = 9.81
+
 # Physics step the MJCF was tuned for; replay picks a substep count so the
 # effective timestep stays close to this.
 BASE_TIMESTEP = 0.005
@@ -81,12 +84,23 @@ class SimParams:
     frictionloss: ParamValue = 0.052
     latency_frames: ParamValue = 0  # command delay in dataset frames (>= 0)
     forcerange: ParamValue = 2.94  # actuator force limit, symmetric (N*m)
+    #: Gravity load the servos feel, as a fraction of the MJCF's link weights.
+    #: The position servo's static error under load is about ``gravity_scale *
+    #: g(q) / kp``, so this sets how much the arm sags in a given pose
+    #: independently of how fast ``kp`` makes it track. 1.0 is the stock model.
+    #: Shared by all joints (it scales the gravity vector).
+    gravity_scale: ParamValue = 1.0
 
     def __post_init__(self) -> None:
         for f in fields(self):
             object.__setattr__(self, f.name, _coerce(f.name, getattr(self, f.name)))
         if np.any(self.per_joint("latency_frames") < 0):
             raise ValueError("latency_frames must be >= 0")
+        g = self.per_joint("gravity_scale")
+        if np.any(g != g[0]):
+            raise ValueError("gravity_scale is shared by all joints; per-joint values must be equal")
+        if g[0] < 0:
+            raise ValueError("gravity_scale must be >= 0")
 
     @classmethod
     def default(cls) -> SimParams:
@@ -98,9 +112,11 @@ class SimParams:
 
         Uses the first actuator and dof (the SO-101 shares one ``sts3215``
         class across all six). The model cannot carry command latency, so
-        it is passed in (default 0).
+        it is passed in (default 0). ``gravity_scale`` is the model's gravity
+        relative to :data:`STANDARD_GRAVITY`.
         """
         return cls(
+            gravity_scale=float(np.linalg.norm(model.opt.gravity)) / STANDARD_GRAVITY,
             kp=float(model.actuator_gainprm[0, 0]),
             kv=float(-model.actuator_biasprm[0, 2]),
             damping=float(model.dof_damping[0]),
@@ -138,10 +154,16 @@ class SimParams:
     # -- serialization ------------------------------------------------------
 
     def to_dict(self) -> dict[str, Any]:
-        """Scalars stay scalars; per-joint values become 6-element lists."""
+        """Scalars stay scalars; per-joint values become 6-element lists.
+
+        ``gravity_scale`` is left out at its default of 1.0, so locks fitted
+        without it serialize exactly as before.
+        """
         out: dict[str, Any] = {}
         for n in self.field_names():
             v = getattr(self, n)
+            if n == "gravity_scale" and self.per_joint(n)[0] == 1.0:
+                continue
             out[n] = list(v) if isinstance(v, tuple) else v
         return out
 
@@ -273,6 +295,11 @@ class Arm:
         self._ctrl_lo = self.model.actuator_ctrlrange[:, 0].copy()
         self._ctrl_hi = self.model.actuator_ctrlrange[:, 1].copy()
         self._base_timestep = float(self.model.opt.timestep)
+        # Unit-length-of-9.81 gravity, so gravity_scale=1 is the stock model
+        # whatever gravity an exported model was baked with.
+        g = self.model.opt.gravity.copy()
+        norm = float(np.linalg.norm(g))
+        self._base_gravity = g / norm * STANDARD_GRAVITY if norm > 0 else np.array([0.0, 0.0, -STANDARD_GRAVITY])
         if params is None:
             params = SimParams.from_model(self.model)
         self.params = params
@@ -301,6 +328,7 @@ class Arm:
         m.dof_damping[:] = params.per_joint("damping")
         m.dof_armature[:] = params.per_joint("armature")
         m.dof_frictionloss[:] = params.per_joint("frictionloss")
+        m.opt.gravity[:] = self._base_gravity * params.per_joint("gravity_scale")[0]
         mujoco.mj_setConst(m, self.data)  # ~20 us; uses self.data as scratch
         self.params = params
 

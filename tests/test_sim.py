@@ -552,3 +552,43 @@ def test_model_geometry_poses_place_raw_stl_files(arm):
         got = place(out["pos"], out["quat"], _read_binary_stl(MESH_DIR / out["mesh"]))
         np.testing.assert_allclose(got.min(0), want.min(0), atol=1e-6)
         np.testing.assert_allclose(got.max(0), want.max(0), atol=1e-6)
+
+
+# -- gravity_scale ---------------------------------------------------------
+
+
+def test_gravity_scale_defaults_and_serializes_only_when_fitted():
+    p = SimParams()
+    assert p.gravity_scale == 1.0
+    assert "gravity_scale" not in p.to_dict()  # old lock format, byte for byte
+    q = p.replace(gravity_scale=0.4)
+    assert q.to_dict()["gravity_scale"] == 0.4
+    assert SimParams.from_dict(q.to_dict()) == q
+    assert SimParams.from_dict({"kp": 50.0}).gravity_scale == 1.0  # old locks load
+
+
+def test_gravity_scale_is_shared_and_non_negative():
+    assert SimParams(gravity_scale=[0.5] * 6).per_joint("gravity_scale").tolist() == [0.5] * 6
+    with pytest.raises(ValueError):
+        SimParams(gravity_scale=[0.5, 1, 1, 1, 1, 1])
+    with pytest.raises(ValueError):
+        SimParams(gravity_scale=-0.1)
+
+
+def test_gravity_scale_sets_the_static_sag():
+    soft = SimParams(kp=10.0, kv=0.5)
+    ep = Episode(index=0, fps=30.0, joint_names=JOINTS,
+                 state=np.zeros((60, 6)), action=np.zeros((60, 6)))
+    arm = Arm(soft)
+    stock = arm.replay(ep)[-1]
+    np.testing.assert_array_equal(Arm(soft.replace(gravity_scale=1.0)).replay(ep)[-1], stock)
+    arm.apply(soft.replace(gravity_scale=0.0))
+    weightless = arm.replay(ep)[-1]
+    arm.apply(soft.replace(gravity_scale=0.5))
+    half = arm.replay(ep)[-1]
+    lift = JOINTS.index("shoulder_lift")
+    sag = abs(stock[lift] - weightless[lift])
+    assert sag > np.radians(1.0)  # a soft servo droops by degrees
+    assert abs(half[lift] - weightless[lift]) == pytest.approx(sag / 2, rel=0.1)
+    arm.apply(soft)
+    np.testing.assert_array_equal(arm.replay(ep)[-1], stock)  # apply restores gravity
