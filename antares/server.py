@@ -2889,8 +2889,21 @@ BACKGROUND_FRAMES = 60
 
 
 def _video_error(e: Exception) -> HTTPException:
-    """Map a missing video dependency / camera to a client-readable error."""
-    return HTTPException(status_code=400 if "camera" in str(e) else 501, detail=str(e))
+    """Map a video error to a status the client can act on: 501 only when
+    decoding is impossible here (PyAV missing), 404 for an episode, file or
+    frames the dataset does not have, 400 for a camera it does not have, and
+    500 (with the message) when a file could not be decoded."""
+    from antares import video
+
+    if isinstance(e, video.VideoUnsupported):
+        status = 501
+    elif isinstance(e, video.VideoNotFound):
+        status = 404
+    elif isinstance(e, video.VideoUnavailable) and not isinstance(e, video.VideoDecodeError):
+        status = 400
+    else:
+        status = 500
+    return HTTPException(status_code=status, detail=str(e))
 
 
 def _camera_arm():

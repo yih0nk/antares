@@ -134,7 +134,7 @@ def test_camera_overlay_reports_missing_video_support(client, monkeypatch):
     from antares import video
 
     def boom(*a, **k):
-        raise video.VideoUnavailable("video decoding needs PyAV")
+        raise video.VideoUnsupported("video decoding needs PyAV")
 
     monkeypatch.setattr(video, "frames", boom)
     r = client.get("/api/camera/overlay", params={"dataset": "fake/ds", "camera": "up", "episode": 0, "frame": 0})
@@ -204,6 +204,29 @@ def test_camera_clip_serves_the_episode_mp4(client, monkeypatch, tmp_path):
 
     monkeypatch.setattr(video, "episode_clip", missing)
     assert client.get("/api/camera/clip", params={"dataset": "fake/ds", "camera": "side", "episode": 0}).status_code == 400
+
+
+@pytest.mark.parametrize(
+    "error,status",
+    [
+        ("VideoUnsupported", 501),  # PyAV missing: the only unsupported case
+        ("VideoNotFound", 404),  # unknown episode, missing file, no frames
+        ("VideoUnavailable", 400),  # unknown camera
+        ("VideoDecodeError", 500),  # the file is there but will not decode
+        ("RuntimeError", 500),
+    ],
+)
+def test_camera_clip_errors_say_what_went_wrong(client, monkeypatch, error, status):
+    from antares import video
+
+    exc = getattr(video, error, None) or RuntimeError
+
+    def fail(*a, **k):
+        raise exc(f"{error} happened")
+
+    monkeypatch.setattr(video, "episode_clip", fail)
+    r = client.get("/api/camera/clip", params={"dataset": "fake/ds", "camera": "up", "episode": 0})
+    assert r.status_code == status and r.json()["detail"] == f"{error} happened"
 
 
 def test_camera_fits_for_dataset_take_the_best_fit_over_its_locks(client, tmp_path):

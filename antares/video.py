@@ -32,14 +32,27 @@ VIDEO_PREFIX = "observation.images."
 
 
 class VideoUnavailable(RuntimeError):
-    """A video dependency is missing or the dataset has no such camera."""
+    """A video dependency is missing, the dataset has no such camera or
+    episode, or a file could not be decoded (see the subclasses)."""
+
+
+class VideoUnsupported(VideoUnavailable):
+    """Decoding is impossible in this environment (PyAV is not installed)."""
+
+
+class VideoNotFound(VideoUnavailable):
+    """The dataset has no such episode, video file or frames."""
+
+
+class VideoDecodeError(VideoUnavailable):
+    """The video file is there but could not be decoded or re-encoded."""
 
 
 def _require_av():
     try:
         import av  # noqa: F401
     except ImportError as e:  # pragma: no cover - depends on the environment
-        raise VideoUnavailable(
+        raise VideoUnsupported(
             "video decoding needs PyAV: pip install 'antares[video]' (av, opencv-python-headless, scipy)"
         ) from e
     return av
@@ -58,7 +71,7 @@ def _hub_file(repo_id: str, filename: str) -> Path:
     if _is_local(repo_id):
         p = Path(repo_id) / filename
         if not p.is_file():
-            raise VideoUnavailable(f"{repo_id} has no {filename}")
+            raise VideoNotFound(f"{repo_id} has no {filename}")
         return p
     from huggingface_hub import hf_hub_download
     from huggingface_hub.utils import EntryNotFoundError
@@ -66,7 +79,7 @@ def _hub_file(repo_id: str, filename: str) -> Path:
     try:
         return Path(hf_hub_download(repo_id, filename, repo_type="dataset"))
     except EntryNotFoundError as e:
-        raise VideoUnavailable(f"{repo_id} has no {filename}") from e
+        raise VideoNotFound(f"{repo_id} has no {filename}") from e
 
 
 def dataset_info(repo_id: str) -> dict[str, Any]:
@@ -238,29 +251,32 @@ def decode_at(path: Path, times: Sequence[float], fps: float) -> np.ndarray:
     targets = [float(times[i]) for i in order]
     half = 0.5 / float(fps)
     out: list[np.ndarray | None] = [None] * len(targets)
-    with av.open(str(path)) as container:
-        stream = container.streams.video[0]
-        stream.thread_type = "AUTO"
-        container.seek(int(max(0.0, targets[0] - half) / stream.time_base), stream=stream, backward=True)
-        j = 0
-        last = None
-        for frame in container.decode(stream):
-            if frame.time is None:
-                continue
-            last = frame
-            while j < len(targets) and frame.time >= targets[j] - half:
-                out[j] = frame.to_ndarray(format="rgb24")
-                j += 1
-            if j >= len(targets):
-                break
-        # Past the end of the file: repeat the last frame rather than fail.
-        if j < len(targets) and last is not None:
-            arr = last.to_ndarray(format="rgb24")
-            while j < len(targets):
-                out[j] = arr
-                j += 1
+    try:
+        with av.open(str(path)) as container:
+            stream = container.streams.video[0]
+            stream.thread_type = "AUTO"
+            container.seek(int(max(0.0, targets[0] - half) / stream.time_base), stream=stream, backward=True)
+            j = 0
+            last = None
+            for frame in container.decode(stream):
+                if frame.time is None:
+                    continue
+                last = frame
+                while j < len(targets) and frame.time >= targets[j] - half:
+                    out[j] = frame.to_ndarray(format="rgb24")
+                    j += 1
+                if j >= len(targets):
+                    break
+            # Past the end of the file: repeat the last frame rather than fail.
+            if j < len(targets) and last is not None:
+                arr = last.to_ndarray(format="rgb24")
+                while j < len(targets):
+                    out[j] = arr
+                    j += 1
+    except av.FFmpegError as e:
+        raise VideoDecodeError(f"could not decode {path}: {e}") from e
     if any(o is None for o in out):
-        raise VideoUnavailable(f"could not decode frames at {targets[:3]}... from {path}")
+        raise VideoDecodeError(f"could not decode frames at {targets[:3]}... from {path}")
     result = np.empty(len(targets), dtype=object)
     for k, i in enumerate(order):
         result[i] = out[k]
@@ -300,12 +316,12 @@ def frames(
     if missing:
         segs = episode_segments(repo_id, camera, dataset)
         if episode not in segs:
-            raise VideoUnavailable(f"episode {episode} not in {repo_id}'s {camera} video index")
+            raise VideoNotFound(f"episode {episode} not in {repo_id}'s {camera} video index")
         seg = segs[episode]
         cam = find_camera(repo_id, camera)
         bad = [i for i in missing if i < 0 or i >= seg.length]
         if bad:
-            raise VideoUnavailable(f"frames {bad[:5]} out of range for episode {episode} ({seg.length} frames)")
+            raise VideoNotFound(f"frames {bad[:5]} out of range for episode {episode} ({seg.length} frames)")
         path = video_file(repo_id, camera, seg.chunk, seg.file)
         uniq = sorted(set(missing))
         times = [seg.from_ts + i / cam.fps for i in uniq]
@@ -342,6 +358,58 @@ CLIP_FORMATS = {
 }
 
 
+# Resolved clip per (clip cache, dataset, camera, episode, format): its path,
+# the source file with the size and mtime it had, and what encoding it needs.
+# A byte-range request for a clip already encoded then costs one stat, not a
+# parquet read of meta/episodes and a read of info.json.
+_CLIP_INDEX: dict[tuple[str, str, str, int, str], tuple[Path, Path, str, Segment, CameraInfo]] = {}
+# One encode per clip: a second request for a clip being encoded waits for
+# the first's file instead of encoding it again.
+_CLIP_LOCKS: dict[Path, threading.Lock] = {}
+_CLIP_LOCK = threading.Lock()
+
+
+def _source_stamp(src: Path) -> str:
+    st = src.stat()
+    return f"{st.st_size}:{st.st_mtime_ns}"
+
+
+def _resolve_clip(
+    repo_id: str, camera: str, episode: int, dataset: Dataset | None, fmt: str
+) -> tuple[Path, Path, Segment, CameraInfo]:
+    """Where ``episode``'s clip lives, its source file and what encoding it
+    needs; the dataset's metadata is read once per clip, then only the
+    source is stat'ed (a re-recorded local dataset changes it)."""
+    key = (str(CLIP_CACHE), repo_id, camera_name(camera), int(episode), fmt)
+    hit = _CLIP_INDEX.get(key)
+    if hit is not None:
+        out, src, stamp, seg, cam = hit
+        try:
+            if _source_stamp(src) == stamp:
+                return out, src, seg, cam
+        except OSError:
+            pass
+    segs = episode_segments(repo_id, camera, dataset)
+    if episode not in segs:
+        raise VideoNotFound(f"episode {episode} not in {repo_id}'s {camera} video index")
+    seg = segs[episode]
+    cam = find_camera(repo_id, camera)
+    src = video_file(repo_id, camera, seg.chunk, seg.file)
+    # Keyed by the full dataset id (fleet datasets share names across
+    # accounts) and the source file, so a re-recorded local dataset re-encodes.
+    full_id = str(Path(repo_id).resolve()) if _is_local(repo_id) else repo_id
+    stamp = _source_stamp(src)
+    source = f"{stamp}:{seg.from_ts}:{seg.length}:{cam.width}x{cam.height}@{cam.fps}"
+    out = (
+        CLIP_CACHE
+        / f"{slug(repo_id)}-{hashlib.sha1(full_id.encode()).hexdigest()[:10]}"
+        / camera_name(camera)
+        / f"ep{episode:05d}-{hashlib.sha1(source.encode()).hexdigest()[:10]}.{fmt}"
+    )
+    _CLIP_INDEX[key] = (out, src, stamp, seg, cam)
+    return out, src, seg, cam
+
+
 def episode_clip(repo_id: str, camera: str, episode: int, dataset: Dataset | None = None, fmt: str = "mp4") -> Path:
     """``episode`` of ``camera`` as its own clip (``fmt`` mp4 or webm) whose
     frame 0 is the episode's frame 0, for the viewer's video underlay.
@@ -350,31 +418,27 @@ def episode_clip(repo_id: str, camera: str, episode: int, dataset: Dataset | Non
     browser decodes AV1 (Safari before M3 Macs does not), so the episode is
     re-encoded once and kept under ``.cache/antares/clips/``.
     """
+    _require_av()
+    if fmt not in CLIP_FORMATS:
+        raise ValueError(f"clip format must be one of {sorted(CLIP_FORMATS)}, not {fmt!r}")
+    out, src, seg, cam = _resolve_clip(repo_id, camera, episode, dataset, fmt)
+    if out.is_file():
+        return out
+    with _CLIP_LOCK:
+        lock = _CLIP_LOCKS.setdefault(out, threading.Lock())
+    with lock:
+        if not out.is_file():  # unless another request encoded it meanwhile
+            _encode_clip(src, out, seg, cam, fmt)
+    return out
+
+
+def _encode_clip(src: Path, out: Path, seg: Segment, cam: CameraInfo, fmt: str) -> None:
+    """Re-encode the ``seg`` window of ``src`` into ``out``, one output frame
+    per wanted frame of the episode."""
     av = _require_av()
     from fractions import Fraction
 
-    if fmt not in CLIP_FORMATS:
-        raise ValueError(f"clip format must be one of {sorted(CLIP_FORMATS)}, not {fmt!r}")
     codec, codec_options = CLIP_FORMATS[fmt]
-    segs = episode_segments(repo_id, camera, dataset)
-    if episode not in segs:
-        raise VideoUnavailable(f"episode {episode} not in {repo_id}'s {camera} video index")
-    seg = segs[episode]
-    cam = find_camera(repo_id, camera)
-    src = video_file(repo_id, camera, seg.chunk, seg.file)
-    # Keyed by the full dataset id (fleet datasets share names across
-    # accounts) and the source file, so a re-recorded local dataset re-encodes.
-    full_id = str(Path(repo_id).resolve()) if _is_local(repo_id) else repo_id
-    st = src.stat()
-    source = f"{st.st_size}:{st.st_mtime_ns}:{seg.from_ts}:{seg.length}:{cam.width}x{cam.height}@{cam.fps}"
-    out = (
-        CLIP_CACHE
-        / f"{slug(repo_id)}-{hashlib.sha1(full_id.encode()).hexdigest()[:10]}"
-        / camera_name(camera)
-        / f"ep{episode:05d}-{hashlib.sha1(source.encode()).hexdigest()[:10]}.{fmt}"
-    )
-    if out.is_file():
-        return out
     rate = Fraction(cam.fps).limit_denominator(1001)
     half = 0.5 / cam.fps
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -391,19 +455,20 @@ def episode_clip(repo_id: str, camera: str, episode: int, dataset: Dataset | Non
             enc.pix_fmt = "yuv420p"
             enc.options = dict(codec_options)
             inp.seek(int(max(0.0, seg.from_ts - half) / stream.time_base), stream=stream, backward=True)
-            last = None
+            last = None  # the last frame written, always one of the episode's own
             for frame in inp.decode(stream):
                 t = frame.time  # read before encoding, which restamps the frame
                 if t is None:
                     continue
-                # Wanted frames this one has skipped past (dropped in the
-                # source) repeat the frame before it ...
-                while last is not None and written < seg.length and seg.from_ts + written / cam.fps < t - half:
-                    written = _encode(enc, dst, last, written, 1 / rate)
-                # ... and this frame stands for every wanted frame it reaches.
+                # The first decoded frame whose time reaches a wanted frame
+                # stands for it, and for every wanted frame it has skipped
+                # past (dropped in the source): decode_at's choice, so the
+                # underlay shows the frame the Camera panel shows. A frame
+                # before the episode's window (the previous episode's last)
+                # is never used, even when the episode's own frame 0 is missing.
                 while written < seg.length and t >= seg.from_ts + written / cam.fps - half:
                     written = _encode(enc, dst, frame, written, 1 / rate)
-                last = frame
+                    last = frame
                 if written >= seg.length:
                     break
             while last is not None and written < seg.length:  # past the end of the file
@@ -411,11 +476,12 @@ def episode_clip(repo_id: str, camera: str, episode: int, dataset: Dataset | Non
             for packet in enc.encode():
                 dst.mux(packet)
         if written == 0:
-            raise VideoUnavailable(f"no frames for episode {episode} in {src}")
+            raise VideoNotFound(f"no frames for episode {seg.episode} in {src}")
         os.replace(tmp, out)
+    except av.FFmpegError as e:
+        raise VideoDecodeError(f"could not re-encode episode {seg.episode} from {src}: {e}") from e
     finally:
         tmp.unlink(missing_ok=True)
-    return out
 
 
 def _encode(enc, dst, frame, i: int, time_base) -> int:
@@ -433,7 +499,10 @@ __all__ = [
     "FRAME_CACHE",
     "CameraInfo",
     "Segment",
+    "VideoDecodeError",
+    "VideoNotFound",
     "VideoUnavailable",
+    "VideoUnsupported",
     "camera_key",
     "camera_name",
     "cameras_from_info",
