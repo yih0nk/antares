@@ -2026,6 +2026,9 @@ class CheckRequest(BaseModel):
     min_episodes: int = Field(5, ge=1)
     explain: bool = False
     explain_evaluations: int = Field(240, ge=10, le=2000)
+    notify_url: str | None = None
+    notify_when: Literal["drifted", "failure", "always"] = "drifted"
+    notify_format: Literal["auto", "slack", "json"] = "auto"
 
 
 @app.post("/api/check")
@@ -2034,6 +2037,11 @@ def check_drift(req: CheckRequest) -> dict:
 
     With ``explain`` a drifted result also carries ``diagnosis``: the
     parameter changes a refit found and which of them explain the drift.
+
+    With ``notify_url`` the verdict is posted to that webhook (Slack blocks
+    for ``hooks.slack.com``, a generic JSON envelope otherwise) when
+    ``notify_when`` says so; ``notified`` is True/False, or None when no
+    URL was given, and ``notify_error`` says why a POST failed.
     """
     _lock_path(req.lock)  # validate the name before loading a dataset
     ds = get_dataset(req.dataset)
@@ -2054,6 +2062,18 @@ def check_drift(req: CheckRequest) -> dict:
         except HTTPException as e:  # the verdict stands; say why it has no diagnosis
             out["diagnosis"] = None
             out["diagnosis_error"] = str(e.detail)
+    out["notified"] = None
+    out["notify_error"] = None
+    if req.notify_url:
+        from antares import notify
+
+        try:
+            out["notified"] = notify.notify(
+                result, req.notify_url, when=req.notify_when, fmt=req.notify_format
+            )
+        except Exception as e:  # noqa: BLE001 - the verdict stands; say why nobody was told
+            out["notified"] = False
+            out["notify_error"] = str(e)
     return out
 
 
