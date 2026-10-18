@@ -89,7 +89,9 @@ def synthesize(
 def worn(params, changes: Mapping[str, float]):
     """``params`` with wear applied: ``latency_frames`` is shifted by its
     value, every other parameter is multiplied by its value. Per-joint
-    fields are changed on every joint alike.
+    fields are changed on every joint alike: a negative latency shift is
+    limited so that no joint goes below zero, and the (limited) shift is
+    then the same on every joint.
 
     ``worn(p, {"kp": 0.7, "frictionloss": 2.0, "latency_frames": 1})`` is a
     weaker, stickier arm that reacts one frame later.
@@ -102,7 +104,8 @@ def worn(params, changes: Mapping[str, float]):
         current = getattr(params, name)
         values = np.asarray(current, dtype=np.float64)
         if name == "latency_frames":
-            new = np.maximum(values + int(round(v)), 0).astype(np.int64)
+            shift = max(int(round(v)), -int(values.min()))
+            new = (values + shift).astype(np.int64)
         else:
             new = values * float(v)
         out[name] = tuple(new.tolist()) if isinstance(current, tuple) else new.item()

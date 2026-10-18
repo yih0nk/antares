@@ -314,6 +314,7 @@ def cmd_dr(args: argparse.Namespace) -> int:
 EXIT_PASS = 0
 EXIT_DRIFT = 1
 EXIT_USAGE = 2  # bad arguments, missing lock/dataset, or too few episodes
+MIN_EXPLAIN_EVALUATIONS = 10  # as POST /api/check validates explain_evaluations
 
 
 def _fmt(v, nd: int = 3) -> str:
@@ -351,6 +352,9 @@ def cmd_check(args: argparse.Namespace) -> int:
     if os.path.isfile(args.lock):
         with open(args.lock) as f:
             lock = json.load(f)
+    if args.explain and args.explain_evaluations < MIN_EXPLAIN_EVALUATIONS:
+        print(f"error: --explain-evaluations must be >= {MIN_EXPLAIN_EVALUATIONS}", file=sys.stderr)
+        return EXIT_USAGE
     try:
         ds = server.get_dataset(args.dataset)
         res = server.run_check(
@@ -576,11 +580,31 @@ def cmd_compensate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_lock_arg(lock: str) -> dict:
+    """A lock given on the command line: a file path or a saved lock's name."""
+    import json
+    import os
+
+    from antares import server
+
+    if os.path.isfile(lock):
+        with open(lock) as f:
+            return json.load(f)
+    return server.load_lock_dict(lock)
+
+
 def cmd_synth(args: argparse.Namespace) -> int:
     from antares import server, synth
 
     if args.lock:
-        params = server.params_from_dict(server.load_lock_dict(args.lock)["params"])
+        from antares.check import _lock_view
+
+        try:
+            params = _lock_view(_load_lock_arg(args.lock))[2]
+        except Exception as e:  # noqa: BLE001 - HTTPException, bad JSON or a lock without params
+            detail = getattr(e, "detail", None) or f"{type(e).__name__}: {e}"
+            print(f"--lock: {detail}", file=sys.stderr)
+            return EXIT_USAGE
     else:
         params = server.default_params()
     try:
@@ -1133,7 +1157,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--explain", action="store_true",
                    help="on drift, refit and name the parameter change that explains it")
     p.add_argument("--explain-evaluations", type=int, default=240, metavar="N",
-                   help="refit budget for --explain (default 240)")
+                   help="refit budget for --explain (default 240, at least 10)")
     p.set_defaults(func=cmd_check)
 
 
@@ -1198,7 +1222,8 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument("out", help="output directory (LeRobot layout)")
-    p.add_argument("--lock", default=None, help="start from a lock's params (default: MJCF defaults)")
+    p.add_argument("--lock", default=None,
+                   help="start from a lock's params, by name or file path (default: MJCF defaults)")
     p.add_argument("--wear", default="", metavar="CHANGES",
                    help='factors, and a frame shift for latency: "kp=0.7,frictionloss=2,latency_frames=1"')
     p.add_argument("--episodes", type=int, default=20)

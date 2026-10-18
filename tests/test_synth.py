@@ -78,6 +78,10 @@ def test_write_local_roundtrip(tmp_path):
 
 def test_worn_keeps_per_joint_shape():
     p = SimParams(kp=(100.0, 200.0, 300.0, 400.0, 500.0, 600.0), latency_frames=(0, 1, 2, 3, 4, 0))
-    w = synth.worn(p, {"kp": 0.5, "latency_frames": -1})
+    w = synth.worn(p, {"kp": 0.5, "latency_frames": 1})
     assert w.kp == (50.0, 100.0, 150.0, 200.0, 250.0, 300.0)
-    assert w.latency_frames == (0, 0, 1, 2, 3, 0)  # never below zero
+    assert w.latency_frames == (1, 2, 3, 4, 5, 1)
+    # a shift down is the same on every joint, limited so none goes below zero
+    assert synth.worn(p, {"latency_frames": -1}).latency_frames == (0, 1, 2, 3, 4, 0)
+    assert synth.worn(p.replace(latency_frames=(1, 2, 3, 4, 5, 1)), {"latency_frames": -3}).latency_frames \
+        == (0, 1, 2, 3, 4, 0)

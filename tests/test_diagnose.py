@@ -167,7 +167,79 @@ def test_refit_and_held_out_halves_are_disjoint():
     eps = make_episodes(TRUE.replace(latency_frames=2), n=6)
     d = diagnose(eps, lock_of(), simulate=toy_simulate, max_evaluations=20)
     assert d.refit_episodes == [0, 2, 4] and d.held_out_episodes == [1, 3, 5]
-    assert d.n_evaluations <= 20 + 12  # one generation may overshoot the budget
+    assert d.n_evaluations == 20  # the budget is exact: no generation overshoots it
+
+
+def test_budget_is_exact_and_bounded_below():
+    eps = make_episodes(TRUE.replace(latency_frames=2), n=4)
+    calls = []
+    d = diagnose(eps, lock_of(), simulate=lambda p, e: calls.append(1) or toy_simulate(p, e),
+                 max_evaluations=37, on_progress=lambda n, best: calls.append(("p", n, best)))
+    assert d.n_evaluations == 37
+    progress = [c for c in calls if isinstance(c, tuple)]
+    assert [n for _, n, _ in progress] == list(range(1, 38))
+    assert all(b2 <= b1 for (_, _, b1), (_, _, b2) in zip(progress, progress[1:]))  # best never worsens
+    with pytest.raises(ValueError, match="max_evaluations must be >= 10"):
+        diagnose(eps, lock_of(), simulate=toy_simulate, max_evaluations=9)
+
+
+def test_should_stop_ends_the_search_with_the_best_so_far():
+    eps = make_episodes(TRUE.replace(latency_frames=3), n=4, seed=1)
+    seen = {"n": 0}
+
+    def counting(p, e):
+        seen["n"] += 1
+        return toy_simulate(p, e)
+
+    # stop after the latency scan (6 shifts x 2 refit episodes)
+    d = diagnose(eps, lock_of(), simulate=counting, max_evaluations=200, should_stop=lambda: seen["n"] >= 12)
+    assert d.n_evaluations <= 7
+    by = {c.name: c for c in d.changes}
+    assert by["latency_frames"].value == 2  # the scan alone already found the lag
+    assert all(c.value == 1.0 for c in d.changes if c.name != "latency_frames")
+
+
+def test_causes_are_empty_when_not_explained():
+    """Consumers that read only `causes` (the Action's output) must agree with the summary."""
+    changes = [ParamChange(f, 0 if f == "latency_frames" else 1.0, alone_deg=4.0, stale_deg=4.0) for f in FIELDS]
+    changes[0] = ParamChange("kp", 0.7, alone_deg=3.6, stale_deg=4.0)  # alone recovers 0.4 of a 1.0 gap
+    from antares.diagnose import Diagnosis
+
+    d = Diagnosis(lock="l", dataset="d", reference_deg=1.0, stale_deg=4.0, refit_deg=3.0,
+                  per_joint_stale={}, per_joint_refit={}, changes=changes, refit_episodes=[0],
+                  held_out_episodes=[1], n_evaluations=0, elapsed_s=0.0)
+    assert d.recovered == pytest.approx(1.0 / 3.0) and not d.explained
+    assert d.causes == [] and d.to_dict()["causes"] == []
+    assert "not explained" in d.summary()
+    explained = Diagnosis(**{**d.__dict__, "refit_deg": 2.5})  # gap 1.5 = half the excess
+    assert explained.explained and [c.name for c in explained.causes] == ["kp"]
+
+
+def test_lock_without_a_reference_cannot_be_judged():
+    eps = make_episodes(TRUE.replace(latency_frames=3), seed=1)
+    lock = {"name": "hand", "dataset": "fake/hand", "params": TRUE.to_dict(), "result": {}}
+    d = diagnose(eps, lock, simulate=toy_simulate, max_evaluations=40)
+    assert d.gap_deg > 1.0  # the refit itself works
+    assert d.reference_deg is None and d.excess_deg is None and d.recovered is None
+    assert not d.explained and d.causes == []
+    assert "reference unknown" in d.summary() and "cannot be judged" in d.summary()
+    out = json.loads(json.dumps(d.to_dict()))
+    assert out["recovered"] is None and out["excess_deg"] is None and out["causes"] == []
+
+
+def test_latency_shifts_the_lock_clamps_alike_are_scanned_once():
+    from antares.diagnose import effective_shift
+
+    p = TRUE.replace(latency_frames=1)
+    assert [effective_shift(s, p) for s in range(-2, 4)] == [-1, -1, 0, 1, 2, 3]
+    pj = TRUE.replace(latency_frames=(0, 1, 2, 3, 4, 0))
+    assert effective_shift(-2, pj) == 0  # one joint is already at zero: no uniform shift down exists
+    eps = make_episodes(p, n=4)
+    scanned = []
+    d = diagnose(eps, lock_of(p), simulate=lambda q, e: scanned.append(q.latency_frames) or toy_simulate(q, e),
+                 max_evaluations=10)
+    assert d.n_evaluations == 10  # 5 distinct shifts scanned, not 6, then the refit
+    assert set(scanned[:10]) == {0, 2, 4, 6, 8} or sorted(set(scanned[:10])) == [0, 1, 2, 3, 4]
 
 
 def test_accepts_a_robot_lock_and_serializes():

@@ -661,11 +661,11 @@ def dr_summary(ranges: dict) -> dict:
 
 @dataclass
 class Job:
-    """A background fit streamed to the UI; ``kind`` is ``calibrate`` or ``drift``."""
+    """A background fit streamed to the UI; see ``kind``."""
 
     id: str
     dataset: str
-    kind: str = "calibrate"  # calibrate | dr | drift
+    kind: str = "calibrate"  # calibrate | dr | drift | diagnose
     status: str = "running"  # running | done | error
     events: list[dict] = field(default_factory=list)
     cond: threading.Condition = field(default_factory=threading.Condition)
@@ -1044,32 +1044,59 @@ def run_diagnose(
     last: int | None = None,
     max_evaluations: int = 240,
     seed: int = 0,
+    should_stop: Callable[[], bool] | None = None,
+    on_progress: Callable[[int, float], None] | None = None,
 ):
     """Name what changed since ``lock`` was fitted, from the same episodes
-    :func:`run_check` scores; returns an :class:`antares.diagnose.Diagnosis`."""
+    :func:`run_check` scores; returns an :class:`antares.diagnose.Diagnosis`.
+
+    The refit runs on its own MuJoCo arm (with the lock's command map held
+    fixed and the real trajectories cached), not under the shared arm's
+    lock, so the other endpoints keep answering while it runs.
+    """
+    from antares.calibrate import default_simulate
     from antares.check import select_episodes
     from antares.diagnose import diagnose
 
     lock_d = lock if isinstance(lock, dict) else load_lock_dict(lock)
-    arm = get_arm()
-
-    def simulate(params, ep):
-        arm.apply(params)
-        return np.asarray(arm.real_q(ep)), np.asarray(arm.replay(ep))
-
+    simulate = lock_simulate(lock_d) or default_simulate()
     try:
         eps = select_episodes(ds.episodes, last)
-        with _ARM_LOCK:
-            return diagnose(
-                eps,
-                lock_d,
-                simulate=simulate,
-                max_evaluations=max_evaluations,
-                seed=seed,
-                dataset=ds.repo_id,
-            )
+        return diagnose(
+            eps,
+            lock_d,
+            simulate=simulate,
+            max_evaluations=max_evaluations,
+            seed=seed,
+            dataset=ds.repo_id,
+            should_stop=should_stop,
+            on_progress=on_progress,
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+def _diagnose_worker(job: Job, req: "DiagnoseRequest") -> None:
+    try:
+        ds = get_dataset(req.dataset)
+
+        def on_progress(evaluation: int, best_score: float) -> None:
+            job.push({"type": "fit", "evaluation": evaluation, "best_score": best_score})
+
+        d = run_diagnose(
+            ds,
+            req.lock,
+            last=req.last,
+            max_evaluations=req.max_evaluations,
+            seed=req.seed,
+            should_stop=job.stop.is_set,
+            on_progress=on_progress,
+        )
+        d_dict = d.to_dict()
+        job.push({"type": "done", "diagnosis": d_dict})
+        job.finish("done", result=d_dict)
+    except Exception as e:  # noqa: BLE001 - report to the client
+        job_fail(job, e)
 
 
 # Lag compensation (sim-only validation)
@@ -1546,10 +1573,35 @@ def check_drift(req: CheckRequest) -> dict:
     )
     out = result.to_dict()
     if req.explain and result.verdict == "drifted":
-        out["diagnosis"] = run_diagnose(
-            ds, req.lock, last=req.last, max_evaluations=req.explain_evaluations
-        ).to_dict()
+        try:
+            out["diagnosis"] = run_diagnose(
+                ds, req.lock, last=req.last, max_evaluations=req.explain_evaluations
+            ).to_dict()
+        except HTTPException as e:  # the verdict stands; say why it has no diagnosis
+            out["diagnosis"] = None
+            out["diagnosis_error"] = str(e.detail)
     return out
+
+
+class DiagnoseRequest(BaseModel):
+    dataset: str
+    lock: str
+    last: int | None = Field(None, ge=1)
+    max_evaluations: int = Field(240, ge=10, le=2000)
+    seed: int = 0
+
+
+@app.post("/api/diagnose")
+def diagnose_start(req: DiagnoseRequest) -> dict:
+    """Start a cancellable diagnosis job (``POST /api/jobs/{id}/cancel``);
+    its ``done`` event and ``result`` carry the diagnosis."""
+    load_lock_dict(req.lock)  # 400/404 before a thread is spent
+    job = start_job("diagnose", req.dataset, _diagnose_worker, req)
+    return {
+        "job_id": job.id,
+        "status_url": f"/api/jobs/{job.id}",
+        "events_url": f"/api/jobs/{job.id}/events",
+    }
 
 
 # Built frontend, mounted after the API routes so `antares serve` alone demos.

@@ -839,6 +839,45 @@ def test_synth_rejects_bad_wear(capsys):
     assert "unknown parameter 'stiffness'" in capsys.readouterr().err
 
 
+def test_synth_lock_takes_a_name_or_a_path_and_fails_cleanly(monkeypatch, tmp_path, capsys):
+    from antares import server, synth
+
+    seen = {}
+
+    def fake_synthesize(params, **kw):
+        seen["kp"] = params.kp
+        raise SystemExit(99)  # stop before MuJoCo; the params are what matters
+
+    monkeypatch.setattr(synth, "synthesize", fake_synthesize)
+    monkeypatch.setattr(server, "LOCK_DIR", tmp_path)
+    monkeypatch.setattr(server, "LOCK_SUFFIX", ".lock.json")
+    path = tmp_path / "unit-a.lock.json"
+    path.write_text(json.dumps({"name": "unit-a", "params": {"kp": 123.0}, "result": {}}))
+    with pytest.raises(SystemExit, match="99"):
+        cli.main(["synth", str(tmp_path / "out"), "--lock", str(path)])
+    assert seen["kp"] == 123.0
+    with pytest.raises(SystemExit, match="99"):
+        cli.main(["synth", str(tmp_path / "out"), "--lock", "unit-a"])
+    # a lock without a top-level "params" still works (older locks carry them in result)
+    path.write_text(json.dumps({"name": "unit-a", "result": {"params": {"kp": 77.0}}}))
+    with pytest.raises(SystemExit, match="99"):
+        cli.main(["synth", str(tmp_path / "out"), "--lock", "unit-a"])
+    assert seen["kp"] == 77.0
+    assert cli.main(["synth", str(tmp_path / "out"), "--lock", "ghost"]) == 2
+    assert "no lock named 'ghost'" in capsys.readouterr().err
+    assert cli.main(["synth", str(tmp_path / "out"), "--lock", "locks/with/slash.json"]) == 2
+    assert "invalid lock name" in capsys.readouterr().err
+
+
+def test_check_explain_evaluations_has_a_floor(monkeypatch, capsys):
+    calls = []
+    _patch_check(monkeypatch, _check_result(3.0))
+    _patch_diagnose(monkeypatch, calls)
+    assert cli.main(["check", "fake/robot", "--lock", "unit-a", "--explain", "--explain-evaluations", "0"]) == 2
+    assert "--explain-evaluations must be >= 10" in capsys.readouterr().err
+    assert calls == []
+
+
 @pytest.mark.slow
 def test_synth_writes_a_dataset_check_reads(tmp_path, capsys):
     from antares.data import read_local

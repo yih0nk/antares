@@ -418,9 +418,15 @@ week  error (deg)  limit  verdict  named cause                                  
 ```
 
 The weaker gain is real but small next to the lag and friction, so it is
-not named on its own. `POST /api/check` takes `"explain": true` and adds a
-`diagnosis` object to a drifted result; the GitHub Action takes
-`explain: "true"` and sets a `cause` output.
+not named on its own. Causes are only named when the drift is explained,
+so the summary, the table and the Action's output agree; a lock without
+a held-out score of its own cannot be judged and says so. `POST
+/api/check` takes `"explain": true` and adds a `diagnosis` object to a
+drifted result (or `diagnosis_error` when the refit could not run, the
+verdict standing either way); `POST /api/diagnose` runs the same refit
+as a cancellable job with progress events, on its own MuJoCo arm so the
+other endpoints keep answering. The GitHub Action takes `explain: "true"`
+and sets a `cause` output.
 
 ## Contact detection from the residual
 

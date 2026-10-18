@@ -39,6 +39,7 @@ from typing import Any
 
 import numpy as np
 
+from antares.calibrate import PENALTY, _per_joint, _safe_score
 from antares.data import Episode
 
 #: Largest factor searched for each scaled parameter, either way.
@@ -63,6 +64,10 @@ MIN_GAP_DEG = 0.05
 #: Below this share of the excess error recovered, the drift is reported as
 #: something the dynamics parameters cannot explain.
 EXPLAINED_FRACTION = 0.5
+#: Smallest refit budget: the latency scan plus a few CMA-ES evaluations.
+MIN_EVALUATIONS = 10
+#: A factor this close to 1 is "no change" (it would print as +0%).
+NEUTRAL_TOL = 0.005
 
 
 # --------------------------------------------------------------------------
@@ -113,7 +118,13 @@ def describe_change(name: str, value: float) -> str:
 
 
 def _is_neutral(name: str, value: float) -> bool:
-    return int(value) == 0 if name == "latency_frames" else abs(float(value) - 1.0) < 1e-9
+    return int(value) == 0 if name == "latency_frames" else abs(float(value) - 1.0) < NEUTRAL_TOL
+
+
+def effective_shift(shift: int, params) -> int:
+    """The latency shift :func:`antares.synth.worn` really applies to ``params``:
+    the same on every joint, limited so none goes below zero."""
+    return max(int(shift), -int(np.min(np.asarray(params.latency_frames))))
 
 
 # --------------------------------------------------------------------------
@@ -175,38 +186,56 @@ class Diagnosis:
         return self.stale_deg - self.refit_deg
 
     @property
-    def excess_deg(self) -> float:
-        """How far the lock is above its own reference on the fresh episodes."""
-        ref = self.reference_deg if self.reference_deg is not None else self.refit_deg
-        return self.stale_deg - ref
+    def excess_deg(self) -> float | None:
+        """How far the lock is above its own reference on the fresh episodes;
+        None for a lock that carries no reference score."""
+        if self.reference_deg is None:
+            return None
+        return self.stale_deg - self.reference_deg
 
     @property
-    def recovered(self) -> float:
-        """Share of the excess error the refit removes (1.0 = all of it)."""
-        if not math.isfinite(self.excess_deg) or self.excess_deg <= 0:
+    def recovered(self) -> float | None:
+        """Share of the excess error the refit removes (1.0 = all of it);
+        None when the lock has no reference to measure the excess against."""
+        excess = self.excess_deg
+        if excess is None:
+            return None
+        if not math.isfinite(excess) or excess <= 0:
             return 1.0
-        return max(0.0, min(1.0, self.gap_deg / self.excess_deg))
+        return max(0.0, min(1.0, self.gap_deg / excess))
 
     @property
     def explained(self) -> bool:
-        """True when the dynamics parameters can account for the drift."""
-        return self.gap_deg > MIN_GAP_DEG and self.recovered >= EXPLAINED_FRACTION
+        """True when the dynamics parameters can account for the drift. A lock
+        without a reference score cannot be judged, so this is False for it."""
+        return (
+            self.gap_deg > MIN_GAP_DEG
+            and self.recovered is not None
+            and self.recovered >= EXPLAINED_FRACTION
+        )
 
     @property
     def causes(self) -> list[ParamChange]:
-        """Changes that alone recover a real share of the gap, largest first."""
-        if self.gap_deg <= MIN_GAP_DEG:
+        """Changes that alone recover a real share of the gap, largest first.
+        Empty unless the drift is :attr:`explained`, so a consumer that reads
+        only the causes agrees with the summary."""
+        if not self.explained:
             return []
         cut = CAUSE_FRACTION * self.gap_deg
         hits = [c for c in self.changes if math.isfinite(c.recovers_deg) and c.recovers_deg >= cut]
         return sorted(hits, key=lambda c: -c.recovers_deg)
 
     def summary(self) -> str:
+        recovered = (
+            "reference unknown" if self.recovered is None
+            else f"{100 * self.recovered:.0f}% of the excess recovered"
+        )
         head = (
             f"lock {self.lock} on {self.dataset}: {self.stale_deg:.3f} deg, "
-            f"{self.refit_deg:.3f} deg after refitting the changes "
-            f"({100 * self.recovered:.0f}% of the excess recovered)"
+            f"{self.refit_deg:.3f} deg after refitting the changes ({recovered})"
         )
+        if self.recovered is None:
+            return f"{head}; the lock carries no held-out score, so the drift cannot be judged"
         if not self.explained:
             return (
                 f"{head}; not explained by the sim's dynamics parameters "
@@ -228,6 +257,7 @@ class Diagnosis:
             "stale_deg": _json_float(self.stale_deg),
             "refit_deg": _json_float(self.refit_deg),
             "gap_deg": _json_float(self.gap_deg),
+            "excess_deg": _json_float(self.excess_deg),
             "recovered": _json_float(self.recovered),
             "explained": bool(self.explained),
             "causes": [c.name for c in self.causes],
@@ -244,6 +274,7 @@ class Diagnosis:
 
 
 def _json_float(v: float | None) -> float | None:
+    """Like :func:`antares.calibrate._json_float`, but None passes through."""
     if v is None:
         return None
     v = float(v)
@@ -269,17 +300,26 @@ def diagnose(
     sigma0: float = 0.15,
     seed: int = 0,
     dataset: str | None = None,
+    should_stop: Callable[[], bool] | None = None,
+    on_progress: Callable[[int, float], None] | None = None,
 ) -> Diagnosis:
     """Refit ``lock`` as per-parameter changes on fresh ``episodes`` and name
     the changes that explain the drift.
 
     ``lock`` is a :class:`~antares.lock.RobotLock` or its JSON dict. Needs at
     least two episodes, split alternately into refit and held-out halves.
+    ``max_evaluations`` (at least :data:`MIN_EVALUATIONS`) is an exact cap on
+    the objective evaluations spent. ``should_stop`` is polled between
+    evaluations; when it returns True the search ends and the best change
+    so far is scored. ``on_progress(evaluations, best_value)`` is called
+    after every evaluation.
     """
     import cma
 
     from antares.check import _lock_view
 
+    if max_evaluations < MIN_EVALUATIONS:
+        raise ValueError(f"max_evaluations must be >= {MIN_EVALUATIONS}, got {max_evaluations}")
     t0 = time.perf_counter()
     name, lock_dataset, params, reference, _ = _lock_view(lock)
     refit_eps, held_out = split_alternating(episodes)
@@ -289,9 +329,20 @@ def diagnose(
         from antares.calibrate import default_simulate
 
         simulate = default_simulate()
+    stop = should_stop or (lambda: False)
+
+    evaluations = 0
+    best: dict[str, float] = neutral()
+    best_value = math.inf
 
     def objective(change: Mapping[str, float]) -> float:
+        nonlocal evaluations, best, best_value
         _, value = _safe_score(apply_change(params, change), refit_eps, simulate)
+        evaluations += 1
+        if value < best_value:
+            best, best_value = dict(change), value
+        if on_progress is not None:
+            on_progress(evaluations, best_value)
         return value
 
     # Latency is a handful of whole frames, which CMA-ES steps over poorly,
@@ -299,17 +350,25 @@ def diagnose(
     # refitted by CMA-ES separately for each of the most promising shifts.
     # A slower servo and extra lag look alike until the factors move, so
     # the best shift before the refit is not always the best one after it.
+    # Shifts that the lock's latency clamps to the same value are scanned once.
     lo, hi = LATENCY_SHIFT
     scanned = []
+    seen: set[int] = set()
     for shift in range(lo, hi + 1):
+        shift = effective_shift(shift, params)
+        if shift in seen:
+            continue
+        seen.add(shift)
         change = {**neutral(), "latency_frames": shift}
         scanned.append((objective(change), shift != 0, change))
-    evaluations = len(scanned)
+        if stop():
+            break
     scanned.sort(key=lambda t: (t[0], t[1]))
-    best_value, _, best = scanned[0]
     candidates = [c for _, _, c in scanned[:SHIFT_CANDIDATES]]
     factors = list(FACTOR_RANGE)
     for i, start in enumerate(candidates):
+        if stop():
+            break
         budget = (max_evaluations - evaluations) // (len(candidates) - i)
         if budget < 1:
             continue
@@ -326,19 +385,21 @@ def diagnose(
             },
         )
         spent = 0
-        while spent < budget and not es.stop():
+        while spent < budget and not es.stop() and not stop():
             xs = es.ask()
             values = []
-            for x in xs:
+            # Never past the budget; a partial generation still counts toward
+            # the best but is not fed back to CMA-ES (as in calibrate).
+            for x in xs[: budget - spent]:
                 change = decode_change(np.append(x, 0.0))
                 change["latency_frames"] = shift
-                v = objective(change)
-                values.append(v)
+                values.append(objective(change))
                 spent += 1
-                if v < best_value:
-                    best, best_value = change, v
+                if spent < budget and stop():
+                    break
+            if len(values) != len(xs):
+                break
             es.tell(xs, values)
-        evaluations += spent
 
     stale_report, stale = _safe_score(params, held_out, simulate)
     refit_params = apply_change(params, best)
@@ -372,35 +433,16 @@ def diagnose(
     )
 
 
-#: Objective value for a change that makes the sim unstable (NaN/inf).
-PENALTY = 1e3
-
-
-def _safe_score(params, episodes: Sequence[Episode], simulate: Callable[..., Any]):
-    """``(report, overall_deg)``; an unstable or failing sim scores PENALTY."""
-    from antares.gap import aggregate, tracking_error
-
-    try:
-        report = aggregate([tracking_error(*simulate(params, ep)) for ep in episodes])
-    except (FloatingPointError, ValueError, ArithmeticError):
-        return None, PENALTY
-    v = float(report.overall_deg)
-    return report, (v if math.isfinite(v) else PENALTY)
-
-
-def _per_joint(report: Any) -> dict[str, float]:
-    if report is None:
-        return {}
-    return {k: float(v) for k, v in report.per_joint_deg.items()}
-
-
 __all__ = [
     "CAUSE_FRACTION",
     "EXPLAINED_FRACTION",
     "FACTOR_RANGE",
     "FIELDS",
     "LATENCY_SHIFT",
+    "MIN_EVALUATIONS",
     "MIN_GAP_DEG",
+    "NEUTRAL_TOL",
+    "PENALTY",
     "SHIFT_CANDIDATES",
     "Diagnosis",
     "ParamChange",
@@ -408,6 +450,7 @@ __all__ = [
     "decode_change",
     "describe_change",
     "diagnose",
+    "effective_shift",
     "encode_change",
     "neutral",
     "split_alternating",
