@@ -257,6 +257,7 @@ def calibrate_with_sensor(
     rounds: int = 2,
     fit_gain: bool = True,
     mode: str = "sim",
+    fair_baseline: bool = True,
     seed: int = 0,
     on_progress: Callable[[ProgressEvent], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
@@ -272,7 +273,12 @@ def calibrate_with_sensor(
 
     ``mode="kinematic"`` instead pre-fits the map from still frames
     (:func:`prefit_command_map`), freezes it, and refits the dynamics once
-    under it, so the map cannot absorb dynamics error. ``calibrate_kwargs``
+    under it, so the map cannot absorb dynamics error.
+
+    With ``fair_baseline`` (default) the dynamics-only side gets the same
+    budget: it is refit round for round under the identity map, so any gain
+    reported for the command map is not just extra CMA-ES evaluations.
+    ``calibrate_kwargs``
     (e.g. ``per_joint=True``) go to every dynamics fit.
     """
     if mode not in ("sim", "kinematic"):
@@ -318,6 +324,26 @@ def calibrate_with_sensor(
     if mode == "sim":
         cmap = fit_command_map(params, train, simulate, start=cmap, fit_gain=fit_gain).command_map
 
+    only = first
+    if fair_baseline:
+        n_rounds = rounds if mode == "sim" else 2
+        for k in range(1, n_rounds):
+            if stop():
+                break
+            nxt = calibrate(
+                train, eval, simulate=with_map(ident), start=only.params, max_evaluations=max_evaluations,
+                sigma0=0.15, seed=seed + k, should_stop=stop, **calibrate_kwargs,
+            )
+            only = replace(
+                nxt,
+                baseline=first.baseline,
+                baseline_train_score=first.baseline_train_score,
+                baseline_eval_score=first.baseline_eval_score,
+                per_joint_before=first.per_joint_before,
+                history=list(only.history) + [(i + only.n_evaluations, s) for i, s in nxt.history[1:]],
+                n_evaluations=only.n_evaluations + nxt.n_evaluations,
+            )
+
     from antares.calibrate import _per_joint, _safe_score
 
     sim = with_map(cmap)
@@ -337,7 +363,7 @@ def calibrate_with_sensor(
         n_evaluations=n_evals,
         elapsed_s=time.perf_counter() - t0,
     )
-    return SensorCalibrationResult(result=final, command_map=cmap, dynamics_only=first)
+    return SensorCalibrationResult(result=final, command_map=cmap, dynamics_only=only)
 
 
 __all__ = [

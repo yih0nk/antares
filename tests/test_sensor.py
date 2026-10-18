@@ -95,7 +95,10 @@ def test_calibrate_with_sensor_beats_dynamics_only():
     assert out.result.eval_score < 0.5 * out.dynamics_only.eval_score
     # baseline of the combined result is still the default sim
     assert out.result.baseline_eval_score == out.dynamics_only.baseline_eval_score
-    assert out.result.n_evaluations > out.dynamics_only.n_evaluations
+    # fair baseline: the dynamics-only side gets the same CMA-ES budget
+    assert out.result.n_evaluations == out.dynamics_only.n_evaluations
+    unfair = calibrate_with_sensor(train, eval_, simulate=toy_simulate, max_evaluations=60, fair_baseline=False)
+    assert unfair.dynamics_only.n_evaluations < unfair.result.n_evaluations
     evals = [e.evaluation for e in events]
     assert evals == sorted(evals) and evals[-1] == out.result.n_evaluations
     d = out.to_dict()
