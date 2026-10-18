@@ -392,32 +392,20 @@ def test_scan_rejects_wrong_joints_and_unusable_episodes(tmp_path):
     assert rep.robots[0].dataset == "b/y" and rep.robots[0].n_episodes == 12  # the two unusable episodes dropped
 
 
-def test_command_state_gap_is_zero_when_commands_are_the_measurements():
-    ds = make_dataset("a/x", seed=4)
-    assert fleet.command_state_gap(ds.episodes) > 0.3  # the toy servo lags its commands
-    same = [Episode(index=e.index, fps=e.fps, joint_names=e.joint_names, state=e.state, action=e.state.copy())
-            for e in ds.episodes]
-    assert fleet.command_state_gap(same) == 0.0
-    # a log that stores a later state as its action, in other units, reads the same
-    ahead = [Episode(index=e.index, fps=e.fps, joint_names=e.joint_names, state=100 * e.state,
-                     action=100 * np.vstack([e.state[2:], e.state[-1:], e.state[-1:]])) for e in ds.episodes]
-    assert fleet.command_state_gap(ahead) < 0.005
+def test_scan_rejects_logs_the_default_sim_already_matches(tmp_path):
+    from antares.sim import SimParams
 
-
-def test_scan_rejects_logs_whose_commands_are_the_measurements(tmp_path):
-    ds = make_dataset("a/x", seed=5)
-    auto = Dataset(repo_id="b/auto", robot_type="so101", fps=30.0, joint_names=fleet.JOINTS,
-                   episodes=tuple(Episode(index=e.index, fps=e.fps, joint_names=e.joint_names, state=e.state,
-                                          action=e.state.copy()) for e in ds.episodes))
-    loads = {"a/x": ds, "b/auto": auto}
+    real = make_dataset("a/x", seed=5)
+    simmed = make_dataset("b/simmed", seed=6, true=SimParams.default())  # "recorded" with the defaults
+    loads = {"a/x": real, "b/simmed": simmed}
     events = []
-    rep = scan([cand("a/x"), cand("b/auto")], max_evaluations=2, lock_dir=tmp_path, on_progress=events.append,
+    rep = scan([cand("a/x"), cand("b/simmed")], max_evaluations=2, lock_dir=tmp_path, on_progress=events.append,
                load=lambda rid: loads[rid], simulate=toy_simulate, cross_n=0)
     assert [r.dataset for r in rep.robots] == ["a/x"]
-    assert [r["dataset"] for r in rep.rejected] == ["b/auto"]
-    assert "not a teleoperation log" in rep.rejected[0]["reason"]
-    assert not (tmp_path / "b__auto.lock.json").exists()
-    assert any(ev["type"] == "rejected" and ev["dataset"] == "b/auto" for ev in events)
+    assert [r["dataset"] for r in rep.rejected] == ["b/simmed"]
+    assert "likely recorded in a simulator" in rep.rejected[0]["reason"]
+    assert not (tmp_path / "b__simmed.lock.json").exists()
+    assert any(ev["type"] == "rejected" and ev["dataset"] == "b/simmed" for ev in events)
 
 
 def entry(dataset, n_episodes=50, fps=30.0, baseline=5.0, calibrated=2.0, **params):
