@@ -15,6 +15,7 @@ import re
 import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -64,6 +65,8 @@ class RobotLock:
     result: CalibrationResult
     created_at: str
     antares_version: str
+    command_map: dict[str, Any] | None = None  # CommandMap.to_dict(); None = identity
+    dynamics_only: dict[str, Any] | None = None  # CalibrationResult.to_dict()
 
     @classmethod
     def create(
@@ -73,6 +76,8 @@ class RobotLock:
         train_episodes: Sequence[Episode],
         result: CalibrationResult,
         name: str | None = None,
+        command_map: dict[str, Any] | None = None,
+        dynamics_only: dict[str, Any] | None = None,
     ) -> "RobotLock":
         """Build a lock for a finished calibration, stamping time and version."""
         return cls(
@@ -84,10 +89,12 @@ class RobotLock:
             result=result,
             created_at=_now_iso(),
             antares_version=__version__,
+            command_map=command_map,
+            dynamics_only=dynamics_only,
         )
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "name": self.name,
             "dataset": self.dataset,
             "robot_type": self.robot_type,
@@ -97,6 +104,11 @@ class RobotLock:
             "created_at": self.created_at,
             "antares_version": self.antares_version,
         }
+        if self.command_map is not None:
+            d["command_map"] = self.command_map
+        if self.dynamics_only is not None:
+            d["dynamics_only"] = self.dynamics_only
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "RobotLock":
@@ -114,6 +126,8 @@ class RobotLock:
             result=result,
             created_at=str(d["created_at"]),
             antares_version=str(d.get("antares_version", "")),
+            command_map=d.get("command_map"),
+            dynamics_only=d.get("dynamics_only"),
         )
 
     def default_path(self, lock_dir: Path = LOCK_DIR) -> Path:

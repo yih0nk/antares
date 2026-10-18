@@ -416,7 +416,10 @@ export default function App() {
   const jIndex = Math.max(0, jointNames.indexOf(joint));
   const maxJointErr = Math.max(1e-6, ...Object.values(baseGap?.per_joint_deg ?? {}), ...Object.values(ghostGap?.per_joint_deg ?? {}));
   const lastProgress = calib?.progress[calib.progress.length - 1];
-  const stageLabel = lastProgress?.stage === "per_joint" ? "per-joint refinement" : "fitting shared params";
+  const stageLabel =
+    lastProgress?.stage === "per_joint" ? "per-joint refinement"
+    : lastProgress?.stage === "command_map" ? "fitting sensor map"
+    : "fitting shared params";
   const shownParams = replay?.params ?? null;
   const defaultParams = baseline?.params ?? null;
   const currentDs = datasets.find((d) => d.id === dataset);

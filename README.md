@@ -17,7 +17,10 @@ you how much of the sim-to-real gap closed.
    same commands, and measure where the sim drifts from reality.
 3. **Calibrate.** CMA-ES fits actuator gain, damping, armature, friction,
    and latency to that robot's episodes, scored on held-out ones.
-4. **See it.** The web UI overlays the real arm and the sim ghost in 3D
+4. **Fit the sensor calibration (optional).** With `--fit-sensor`,
+   Antares also fits a per-joint offset and scale between the logged
+   commands and the measured joints, and saves it in the lock.
+5. **See it.** The web UI overlays the real arm and the sim ghost in 3D
    and streams the fit live, so you watch the ghost lock on.
 
 First embodiment: the SO-100/101 arm, using public community datasets.
@@ -248,6 +251,69 @@ SO-101 per-joint lock 0.769° on SO-100 against 0.846°.
 
 Caveat: the gripper is not scored (object contacts are not logged), so its
 per-joint parameters are unconstrained and should not be read as physical.
+
+## Is a lock specific to its arm?
+
+A lock is only worth having per robot if it beats another arm's lock on
+this arm, by more than refitting the same arm moves the score. `antares
+specificity` runs that test on the newest shared (one value for all
+joints) lock of each dataset, scoring the held-out episodes of the split
+that lock was fitted with, and writes `results/robot_specificity.{md,json}`:
+
+```sh
+.venv/bin/antares specificity                # the two demo arms
+.venv/bin/antares specificity --synthetic    # same study on simulated arms with known parameters
+.venv/bin/antares identify lerobot/svla_so101_pickplace --lock svla_so101_pickplace
+```
+
+Per arm it reports the cross matrix with a verdict and margin, a same-arm
+control (refit on 20 episodes the lock never saw), a swap test (refit
+with the other arm's `kp`/`kv` pinned), two extra CMA-ES seeds on the same
+episodes, a linearized identifiability table (how far each parameter can
+move before the training error rises 0.1°, alone and with the others
+refit), the latency profile, and the error along the path to the other
+lock. `antares cross` also prints the verdict and takes `--json`.
+
+What the two demo arms show with the current shared locks (held-out
+error, full tables in [`results/robot_specificity.md`](results/robot_specificity.md)):
+
+| | SO-101 data | SO-100 data |
+|---|---|---|
+| own lock | **0.74°** | 0.79° |
+| other seeds, same episodes | 0.91°, 1.06° | **0.57°**, 0.66° |
+| same arm, refit on other episodes | 1.05° | 0.80° |
+| own fit, other arm's kp/kv pinned | 1.09° | 0.65° |
+| other arm's lock | 1.27° (1.73×) | 0.96° (1.22×) |
+
+* **The arms are distinguishable.** Each arm's own lock beats the other
+  arm's, and the best fit found for each arm beats the other arm's lock by
+  about 1.7× on both (0.74° vs 1.27°, 0.57° vs 0.96°).
+* **A single fit is not reliable.** The same episodes with another CMA-ES
+  seed score up to 1.4× worse on SO-101, and two seeds beat SO-100's own
+  lock (0.57° vs 0.79°). Which basin a 150-200 evaluation run lands in
+  matters as much as which arm it is fitting, so the cross margins above
+  carry that noise. Keeping the best of several seeds would make a lock,
+  and every check built on it, much more repeatable.
+* **The stiffness gap is not a difference between the arms.** The locks
+  sit at kp 10.5 (SO-101) and 1427 (SO-100), but SO-100's two better
+  seeds land at kp 13-14, and pinning SO-100's fit to SO-101's `kp`/`kv`
+  scores 0.65°, better than its own lock. Across seeds `kp` and `kv`
+  spread 25-125× at similar error.
+* **The linearized table is local only.** It finds SO-100's lock tightly
+  pinned (every parameter within ×1.4-1.6, condition number 3), yet better
+  fits sit 100× away. On SO-101 it shows `damping` unconstrained and
+  traded off against `kv` (×8800 with the others refit, ×1.9 alone).
+* **Latency is the best-pinned parameter**: one frame either side of the
+  lock costs 0.3-0.9° with everything else held fixed.
+
+The synthetic study ([`results/synthetic/robot_specificity.md`](results/synthetic/robot_specificity.md))
+gives each simulated arm one real lock's parameters as its truth (kp 10.5
+vs 1427). There the own lock wins by 2.2× and 5.4×, but the fit still
+misses the truth (SO-100-like arm: kp 182 vs 1427 at 0.40° against
+0.35°), and the seeds on one arm range from 0.55° to 1.91°. So the
+optimizer spread above is a property of the fit, not of the real data.
+The fleet scan's cross matrix over many arms is the larger version of
+this test.
 
 ## Gate deploys on your robot's drift
 
@@ -540,6 +606,88 @@ bimanual or non-SO arms (14).
   below the fleet median. Score outliers are kept out of the cross matrix so
   one unexplained arm does not dominate it.
 
+
+## Sensor calibration
+
+LeRobot normalizes the commands (the leader arm's readings) and the
+measured state (the follower's) with two separate per-arm calibrations, so
+the same number can mean slightly different angles on each side. No
+dynamics parameter can model that, so a plain fit bends stiffness and
+latency to hide it. `--fit-sensor` fits a per-joint
+`command = gain * logged + bias` (a `CommandMap`, dataset units, gripper
+left at identity) and stores it in the lock:
+
+```sh
+.venv/bin/antares calibrate lerobot/svla_so101_pickplace --fit-sensor --name so101_sensor
+.venv/bin/antares calibrate lerobot/svla_so101_pickplace --fit-sensor --sensor-mode kinematic
+```
+
+Two ways to fit it (`--sensor-mode`, or `sensor_mode` in
+`POST /api/calibrate`):
+
+* **`sim`** (default): Levenberg-Marquardt on the replay residual with the
+  dynamics held fixed, alternating with a CMA-ES refit of the dynamics
+  under the new map, then a last map fit.
+* **`kinematic`**: a least-squares line through frames where command and
+  joint have both been still for 10 frames, with no sim, frozen before the
+  physics fit so it cannot absorb dynamics error. Its catch: a still joint
+  under gravity sags below its command by an amount the sim models through
+  `kp`, and this fit puts that sag into the bias.
+
+The table compares against a dynamics-only fit given the **same** budget,
+counting every pass over the training episodes, the map fits' included:
+it is refit round for round under the identity map, plus one more refit
+with the simulations the map fits spent, so a gain is not just extra
+evaluations. The lock's `n_evaluations` and stages count the map fits
+the same way. It also works with `--per-joint` (later rounds refit in
+the per-joint space directly, since the shared stage would only average
+the per-joint values back together).
+
+Synthetic check (`scripts/sensor_synthetic.py`): a hidden MuJoCo arm with
+the SO-101 lock's dynamics, 0.2-unit state noise and teleop-style pauses,
+10 train / 4 held-out episodes, held-out RMSE in degrees:
+
+| hidden arm | default sim | dynamics only | `sim` mode | `kinematic` mode |
+|---|---|---|---|---|
+| calibration mismatch (bias up to 3 units, gain ±4%) | 7.40 | 2.34 | **0.51** | 1.56 |
+| no mismatch (control) | 7.15 | 0.46 | **0.40** | 1.58 |
+
+(Measured with the current SO-101 lock, whose refit `kp` of about 10
+makes the arm sag a lot under gravity.) `sim` mode recovers the hidden
+bias to within 0.06 units and the gain to within 0.004, and on the arm
+with no mismatch keeps the map within 0.08 units of identity. `kinematic`
+mode's sag caveat bites on this arm: it reads the gravity sag as a bias
+(+3.0 units on the shoulder lift and +2.6 on the elbow of the arm with
+no mismatch, and the hidden -3.0 shoulder-lift bias comes out as -0.1),
+and the dynamics then refit around that, so it ends worse than fitting
+the dynamics alone.
+On the two demo datasets (20 train / 10 held-out episodes, seed 0, two
+rounds of 150 evaluations, with the wider `kp` range), held-out RMSE in degrees.
+"Dynamics only" is a fresh shared fit given the same 300 evaluations under
+the identity map, which is why it beats the committed shared locks (0.736
+SO-101 at 200 evaluations, 0.787 SO-100 at 150):
+
+| | SO-101 dynamics only | SO-101 `sim` | SO-101 `kinematic` | SO-100 dynamics only | SO-100 `sim` | SO-100 `kinematic` |
+|---|---|---|---|---|---|---|
+| **overall** | 0.708 | **0.624** | 0.633 | 0.745 | **0.399** | 0.480 |
+| shoulder_pan | 0.407 | 0.376 | 0.368 | 0.326 | 0.313 | 0.311 |
+| shoulder_lift | 0.801 | 0.651 | 0.665 | 0.854 | 0.431 | 0.504 |
+| elbow_flex | 1.145 | 1.026 | 1.049 | 1.248 | 0.580 | 0.701 |
+| wrist_flex | 0.485 | 0.426 | 0.420 | 0.416 | 0.253 | 0.308 |
+| wrist_roll | 0.394 | 0.388 | 0.383 | 0.458 | 0.335 | 0.465 |
+
+Both real arms carry a real mismatch, mostly on the elbow (`sim` bias
++1.6 units on SO-101 and +2.2 on SO-100, gain about 0.98) and, on the
+SO-100, the shoulder lift (+1.3 units, gain 1.013). The fitted map cuts
+the SO-100's held-out error by 46% and the SO-101's by 12%. `kinematic`
+puts more into the gravity-loaded joints (an SO-101 elbow bias of +3.5),
+as its sag caveat predicts, and is never better overall.
+
+Locks fitted this way carry a `command_map`. Replay, the viewer, `cross`,
+`check`, residuals and events, `compensate` (whose `--out` commands come
+back in raw units), `export` (in the sidecar) and the drift and DR refits
+(which hold the map fixed) all use it. Locks without one behave as before.
+
 ## Layout
 
 | Path | What |
@@ -547,6 +695,7 @@ bimanual or non-SO arms (14).
 | `antares/data.py` | LeRobot dataset loader (tabular only) |
 | `antares/sim.py` | MuJoCo model, unit mapping, replay and rollout |
 | `antares/calibrate.py` | CMA-ES parameter fit |
+| `antares/sensor.py` | Per-joint command offset/scale fit |
 | `antares/gap.py` | Tracking-error metrics |
 | `antares/lock.py` | Calibrated sim saved per robot as a lock file |
 | `antares/export.py` | Lock -> standalone MJCF, sidecar, scene, zip |
@@ -564,6 +713,9 @@ bimanual or non-SO arms (14).
 | `antares/events.py` | Contact events from the real-sim residual |
 
 | `antares/compensate.py` | Lag compensation (shift, ILC), sim-validated |
+| `antares/specificity.py` | Cross-arm verdict, identifiability, swap and same-arm checks |
+| `antares/synthetic.py` | Simulated arm datasets with known parameters |
+| `results/` | Robot-specificity reports (`antares specificity`) |
 | `antares/server.py` | FastAPI backend for the UI |
 | `examples/` | `randomize_env.py`: DR ranges in a training loop |
 

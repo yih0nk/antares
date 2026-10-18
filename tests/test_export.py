@@ -304,3 +304,21 @@ def test_exported_model_replays_identically_real_dataset(tmp_path):
     got = arm.replay(ep)
     assert got.shape == ref.shape == (len(ep), 6)
     np.testing.assert_allclose(got, ref, rtol=0, atol=1e-9)
+
+
+def test_export_carries_the_command_map(tmp_path):
+    from dataclasses import replace
+
+    from antares.sim import CommandMap
+
+    cmap = CommandMap(gain=[1.0, 0.97, 1.03, 1.0, 1.0, 1.0], bias=[0.0, -3.0, 2.0, 0.0, 1.0, 0.0])
+    lock = replace(make_lock(), command_map=cmap.to_dict())
+    out = export_mjcf(lock, tmp_path / "a.xml", bundle_assets=False)
+    sc = read_sidecar(out)
+    assert sc["command_map"]["bias"] == cmap.bias.tolist() and "note" in sc["command_map"]
+    ep = synthetic_episode()
+    ref = Arm(params=lock.params, command_map=cmap).replay(ep)
+    np.testing.assert_allclose(load_exported_arm(out).replay(ep), ref, rtol=0, atol=1e-9)
+    # a lock without one exports identity
+    plain = read_sidecar(export_mjcf(make_lock(), tmp_path / "b.xml", bundle_assets=False))
+    assert CommandMap.from_dict(plain["command_map"]).is_identity()

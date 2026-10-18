@@ -249,3 +249,15 @@ def test_held_out_episodes():
 
 def test_methods_constant():
     assert METHODS == ("shift", "ilc")
+
+
+def test_compensate_episode_raw_commands_use_the_command_map():
+    from antares.sim import CommandMap
+
+    ep = make_episode()
+    mapped_arm = Arm(command_map=CommandMap(gain=np.ones(6), bias=[0.0, 4.0, 0.0, 0.0, 0.0, 0.0]))
+    rep = compensate_episode(mapped_arm, ep, SOFT, method="shift")
+    # the raw commands are the mapped ones, so the raw rollout is the mapped replay
+    np.testing.assert_array_equal(rep.q_sim_raw, mapped_arm.replay(ep))
+    assert rep.rms["raw"] == pytest.approx(
+        tracking_error(mapped_arm.real_q(ep), mapped_arm.replay(ep)).overall_deg)

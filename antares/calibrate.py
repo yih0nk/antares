@@ -366,15 +366,17 @@ def _parse_float(v: Any) -> float:
 # --------------------------------------------------------------------------
 
 
-def default_simulate() -> SimulateFn:
+def default_simulate(command_map: Any | None = None) -> SimulateFn:
     """Build one MuJoCo :class:`antares.sim.Arm` and wrap it as a ``SimulateFn``.
 
     The arm is reused across calls (``apply`` is cheap); the real trajectory
     does not depend on the parameters, so it is cached per episode.
+    ``command_map`` (an :class:`antares.sim.CommandMap`) corrects every
+    replay's commands, e.g. a lock's sensor calibration held fixed.
     """
     from antares.sim import Arm
 
-    arm = Arm()
+    arm = Arm(command_map=command_map)
     real_cache: dict[int, tuple[Episode, np.ndarray]] = {}
 
     def simulate(params: SimParams, episode: Episode) -> tuple[np.ndarray, np.ndarray]:
@@ -600,7 +602,8 @@ def calibrate(
     )
     fit.record(start, start_report, start_score, SHARED.name)
 
-    finished = fit.run_stage(SHARED, start, max_evaluations, sigma0, popsize, seed)
+    # No shared budget: skip the stage (a per-joint refit starts in its own space).
+    finished = fit.run_stage(SHARED, start, max_evaluations, sigma0, popsize, seed) if max_evaluations > 0 else True
     if per_joint and finished:
         # Refine from the shared optimum; a fresh seed so the two stages do
         # not share a random stream.

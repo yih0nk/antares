@@ -44,7 +44,7 @@ import numpy as np
 
 from antares import __version__
 from antares.lock import RobotLock
-from antares.sim import JOINTS, MESH_DIR, MODEL_PATH, Arm, SimParams, UnitMap
+from antares.sim import JOINTS, MESH_DIR, MODEL_PATH, Arm, CommandMap, SimParams, UnitMap
 
 SCENE_PATH: Path = MODEL_PATH.parent / "scene.xml"
 SIDECAR_SUFFIX = ".antares.json"
@@ -233,6 +233,11 @@ def sidecar_dict(lock: RobotLock, model: mujoco.MjModel, model_file: str, meshdi
             "Not representable in MJCF: delay each ctrl by latency_frames frames."
         ),
         "joints": list(JOINTS),
+        "command_map": {
+            **CommandMap.from_dict(lock.command_map).to_dict(),
+            "note": "Per-arm sensor calibration: correct each logged command as "
+            "gain * u + bias (LeRobot units) before the unit map. Identity if the lock has none.",
+        },
         "unit_map": {
             **UnitMap.from_model(model).to_dict(),
             "note": "rad = scale * u + offset, clipped to [lo, hi]; u in LeRobot units "
@@ -355,13 +360,16 @@ def read_sidecar(xml_path: Path) -> dict[str, Any]:
 
 def load_exported_arm(xml_path: Path, contacts: bool = False) -> Arm:
     """An :class:`Arm` driven by an exported model: gains/joint values come
-    from the XML, ``latency_frames`` from the sidecar (0 if it is missing)."""
+    from the XML, ``latency_frames`` and the command map from the sidecar
+    (0 and identity if it is missing)."""
     xml_path = Path(xml_path)
-    latency = 0
+    latency, cmap = 0, None
     sc = sidecar_path(xml_path)
     if sc.is_file():
-        latency = int(json.loads(sc.read_text()).get("latency_frames", 0))
-    arm = Arm(model_path=xml_path, contacts=contacts)
+        side = json.loads(sc.read_text())
+        latency = int(side.get("latency_frames", 0))
+        cmap = CommandMap.from_dict(side.get("command_map"))
+    arm = Arm(model_path=xml_path, contacts=contacts, command_map=cmap)
     arm.apply(SimParams.from_model(arm.model, latency_frames=latency))
     return arm
 

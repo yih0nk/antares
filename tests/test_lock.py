@@ -189,3 +189,35 @@ def test_so101_lock_replays_unchanged():
     scalar_q = arm.replay(ep0)
     arm.apply(lock.params.broadcast())
     np.testing.assert_array_equal(arm.replay(ep0), scalar_q)
+
+
+def test_lock_command_map_round_trip(tmp_path):
+    from antares.sim import CommandMap
+
+    cmap = CommandMap(gain=[1.0, 0.95, 1.05, 1.0, 1.0, 1.0], bias=[0.0, -2.0, 1.5, 0.0, 0.0, 0.0])
+    only = fake_result(eval_score=2.5).to_dict()
+    lock = RobotLock.create("lerobot/x", "so101", episodes(), fake_result(),
+                            command_map=cmap.to_dict(), dynamics_only=only)
+    back = RobotLock.load(lock.save(tmp_path / "x.lock.json"))
+    assert back.command_map == cmap.to_dict()
+    assert back.dynamics_only["eval_score"] == 2.5
+    np.testing.assert_allclose(CommandMap.from_dict(back.command_map).bias, cmap.bias)
+
+
+def test_lock_without_command_map_omits_it():
+    d = RobotLock.create("lerobot/x", "so101", episodes(), fake_result()).to_dict()
+    assert "command_map" not in d and "dynamics_only" not in d
+    assert RobotLock.from_dict(d).command_map is None
+
+
+def test_committed_locks_still_load():
+    from pathlib import Path
+
+    from antares.sim import CommandMap
+
+    locks = list_locks(Path(__file__).resolve().parent.parent / "locks")
+    assert locks
+    for lk in locks:
+        # locks from before sensor fitting have none; sensor locks parse
+        cmap = CommandMap.from_dict(lk.command_map)
+        assert cmap.gain.shape == cmap.bias.shape == (6,)
