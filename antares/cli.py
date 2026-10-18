@@ -554,6 +554,33 @@ def cmd_compensate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_synth(args: argparse.Namespace) -> int:
+    from antares import server, synth
+
+    if args.lock:
+        params = server.params_from_dict(server.load_lock_dict(args.lock)["params"])
+    else:
+        params = server.default_params()
+    try:
+        params = synth.worn(params, synth.parse_changes(args.wear))
+    except ValueError as e:
+        print(f"--wear: {e}", file=sys.stderr)
+        return EXIT_USAGE
+    ds = synth.synthesize(
+        params,
+        n_episodes=args.episodes,
+        n_frames=args.frames,
+        fps=args.fps,
+        seed=args.seed,
+        noise_units=args.noise,
+        repo_id=args.out,
+    )
+    synth.write_local(ds, args.out)
+    print(f"wrote {len(ds.episodes)} episodes x {args.frames} frames -> {args.out}")
+    print("true params:", params.to_dict())
+    return 0
+
+
 def cmd_locks(args: argparse.Namespace) -> int:
     from antares import server
 
@@ -888,6 +915,25 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("locks", help="list saved locks")
     p.set_defaults(func=cmd_locks)
+
+    p = sub.add_parser(
+        "synth",
+        help="write a synthetic recording of an arm with known, optionally worn, params",
+        description=(
+            "Simulate what an arm would have recorded and save it as a LeRobot dataset "
+            "directory, e.g. to try `antares check --explain` without a physical arm."
+        ),
+    )
+    p.add_argument("out", help="output directory (LeRobot layout)")
+    p.add_argument("--lock", default=None, help="start from a lock's params (default: MJCF defaults)")
+    p.add_argument("--wear", default="", metavar="CHANGES",
+                   help='factors, and a frame shift for latency: "kp=0.7,frictionloss=2,latency_frames=1"')
+    p.add_argument("--episodes", type=int, default=20)
+    p.add_argument("--frames", type=int, default=300)
+    p.add_argument("--fps", type=float, default=30.0)
+    p.add_argument("--noise", type=float, default=0.2, help="sensor noise, dataset units (default 0.2)")
+    p.add_argument("--seed", type=int, default=0)
+    p.set_defaults(func=cmd_synth)
 
     p = sub.add_parser("export", help="write a lock as a standalone MJCF (+ scene, sidecar, meshes)")
     p.add_argument("name", help="lock name (see `antares locks`)")

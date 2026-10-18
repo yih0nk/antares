@@ -26,7 +26,7 @@ def test_help_exits_zero(capsys):
         cli.main(["--help"])
     assert e.value.code == 0
     out = capsys.readouterr().out
-    for cmd in ("serve", "inspect", "replay", "calibrate", "cross", "drift", "dr", "locks", "export", "check", "events", "compensate", "fleet"):
+    for cmd in ("serve", "inspect", "replay", "calibrate", "cross", "drift", "dr", "locks", "export", "check", "events", "compensate", "fleet", "synth"):
         assert cmd in out
 
 
@@ -699,3 +699,22 @@ def test_fleet_scan_wires_discover_and_scan(monkeypatch, capsys, tmp_path):
     assert "4.000 -> 1.500 deg (62% closed), latency 3 frames, kp 1200" in out
     assert "FAILED bob/x: boom" in out and "skipped carol/y" in out and "saved" in out
     assert "2 robots calibrated" in out  # final tables
+
+
+def test_synth_rejects_bad_wear(capsys):
+    assert cli.main(["synth", "/nonexistent/out", "--wear", "stiffness=2"]) == 2
+    assert "unknown parameter 'stiffness'" in capsys.readouterr().err
+
+
+@pytest.mark.slow
+def test_synth_writes_a_dataset_check_reads(tmp_path, capsys):
+    from antares.data import read_local
+
+    out = tmp_path / "worn"
+    assert cli.main(["synth", str(out), "--wear", "kp=0.5,latency_frames=2",
+                     "--episodes", "2", "--frames", "30"]) == 0
+    printed = capsys.readouterr().out
+    assert f"wrote 2 episodes x 30 frames -> {out}" in printed
+    assert "'latency_frames': 2" in printed and "'kp': 499.11" in printed
+    ds = read_local(out)
+    assert len(ds.episodes) == 2 and ds.episodes[0].state.shape == (30, 6)
