@@ -235,18 +235,25 @@ def _score_text(v: float, unit: str = " deg") -> str:
     return "n/a" if s is None else f"{s:.3f}{unit}"
 
 
+def _fmt_param(v: ParamValue) -> str:
+    """A scalar as :func:`_fmt`; a per-joint tuple as ``[v0 v1 ... v5]``."""
+    if isinstance(v, (tuple, list)):
+        return "[" + " ".join(_fmt(x) for x in v) + "]"
+    return _fmt(v)
+
+
 def header_lines(lock: RobotLock) -> list[str]:
     r = lock.result
     p = lock.params
-    return [
+    lines = [
         f"Antares calibrated SO-101 (antares {__version__}, lock format {EXPORT_FORMAT})",
         f"lock:        {lock.name}",
         f"dataset:     {lock.dataset} ({lock.robot_type}), data sha256 {lock.data_sha256}",
         f"created_at:  {lock.created_at}",
         f"held-out tracking RMSE: {_score_text(r.baseline_eval_score)} before -> "
         f"{_score_text(r.eval_score)} after ({len(r.eval_episodes)} episodes)",
-        f"baked: kp={_fmt(p.kp)} kv={_fmt(p.kv)} damping={_fmt(p.damping)} "
-        f"armature={_fmt(p.armature)} frictionloss={_fmt(p.frictionloss)}",
+        f"baked: kp={_fmt_param(p.kp)} kv={_fmt_param(p.kv)} damping={_fmt_param(p.damping)} "
+        f"armature={_fmt_param(p.armature)} frictionloss={_fmt_param(p.frictionloss)}",
         f"latency_frames: {p.latency_frames} (command delay in dataset frames; MJCF cannot "
         f"express this, apply it in your control loop; see the .antares.json sidecar)",
     ]
@@ -277,7 +284,7 @@ def sidecar_dict(lock: RobotLock, model: mujoco.MjModel, model_file: str, meshdi
         },
         "params": lock.params.to_dict(),
         "baked_params": list(BAKED_PARAMS),
-        "latency_frames": int(lock.params.latency_frames),
+        "latency_frames": lock.params.to_dict()["latency_frames"],  # int, or six ints for a per-joint lock
         "latency_note": (
             "Command delay in dataset frames (at the dataset's recording rate). "
             "Not representable in MJCF: delay each ctrl by latency_frames frames."
@@ -410,18 +417,24 @@ def read_sidecar(xml_path: Path) -> dict[str, Any]:
 
 
 def load_exported_arm(xml_path: Path, contacts: bool = False) -> Arm:
-    """An :class:`Arm` driven by an exported model: gains/joint values come
-    from the XML, ``latency_frames`` and the command map from the sidecar
-    (0 and identity if it is missing)."""
+    """An :class:`Arm` driven by an exported model. The parameters come from
+    the sidecar when it is there (its ``params`` carry per-joint values and
+    ``latency_frames``, which the XML cannot), else the gains/joint values
+    compiled into the XML with latency 0; the command map likewise comes
+    from the sidecar (identity if it is missing)."""
     xml_path = Path(xml_path)
-    latency, cmap = 0, None
+    params: SimParams | None = None
+    cmap = None
     sc = sidecar_path(xml_path)
     if sc.is_file():
         side = json.loads(sc.read_text())
-        latency = int(side.get("latency_frames", 0))
+        if isinstance(side.get("params"), dict):
+            params = SimParams.from_dict(side["params"])
         cmap = CommandMap.from_dict(side.get("command_map"))
     arm = Arm(model_path=xml_path, contacts=contacts, command_map=cmap)
-    arm.apply(SimParams.from_model(arm.model, latency_frames=latency))
+    if params is None:
+        params = SimParams.from_model(arm.model, latency_frames=0)
+    arm.apply(params)
     return arm
 
 
