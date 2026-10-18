@@ -115,7 +115,7 @@ Bring your own dataset, in short (details in [Bring your own dataset](#bring-you
 * **Parameter values are fits, not measurements.** `kp`, `kv`, damping, armature and friction trade off at the same tracking error (seeds on one arm span 25× in `kp`); only latency and the sensor map are pinned by pick-and-place logs. `--seeds 3` records which parameters the seeds agree on, and everything downstream reads only those as physical.
 * **The leftover elbow error is step-shaped**, not a slope in gravity load, so the six servo parameters do not express it; the contact detector sees that pose dependence, not contact with a light object.
 * **Payload mass is below the noise.** The residual resolves 13 g per encoder step with a noise floor of 40–60 g; a 30 g object comes out at 22 g with a 69 g IQR, so the export uses an assumed 30 g and says so.
-* **Camera fits are loose in depth, and are fits, not measurements.** Silhouettes pin the viewing direction but trade distance against field of view: on a synthetic video from a known 55° camera the fit landed at 71° and 14 cm closer, with the overlay still lined up. A second pass that borrows a fitted sibling camera's field of view helps when the two are the same webcam; with the earlier SO-101 `side` fit, its rays met 2.6 cm below the object plane. The table height assumes a 15 mm object half-height and a horizontal plane.
+* **Camera fits are loose in depth, and are fits, not measurements.** Silhouettes pin the viewing direction but trade distance against field of view: on a synthetic video from a known 55° camera the fit landed at 71° and 14 cm closer, with the overlay still lined up. A second pass that borrows a fitted sibling camera's field of view lined the SO-101 `side` camera's gripper up in the video, but its rays still meet `up`'s 2.9 cm below the object plane (2.6 cm with the earlier fit). The table height assumes a 15 mm object half-height and a horizontal plane.
 
 ## Reference map
 
@@ -1718,16 +1718,16 @@ camera gets the cube right.
 
 **Cross-camera check (SO-101).** With `up` and `side` both fitted, the
 object at rest is triangulated from the two pixel rays over 36 frames.
-These numbers (and `cross_camera` in the committed
-`svla_so101_pickplace.objects.json`) were measured with the earlier `side`
-fit (IoU 0.58, 25.8°), before the field-of-view second pass refit it.
-The rays pass within 0.5 cm of each other, but meet 3.0 cm from `up`'s
-plane point and 2.6 cm *below* the object plane (1 cm below the table),
-and `side`'s own plane intersection is 6.4 cm off in xy. The `side` fit
-(IoU 0.58, the arm leaving the frame) is loose in depth, so the
-single-camera plane intersection, validated by the FK agreement above, is
-the better estimate; triangulation here measures the camera fits, not the
-object.
+With the refit `side` camera (43.9°, held-out IoU 0.75) the rays pass
+within 1.1 cm of each other, but meet 3.4 cm from `up`'s plane point and
+2.9 cm *below* the object plane (1.4 cm below the table), and `side`'s own
+plane intersection is 9.8 cm off in xy. The earlier `side` fit (25.8°,
+0.72) gave 0.5, 3.0, 2.6 and 6.4 cm. So the refit lines the gripper up in
+the video without making the two cameras agree better in depth: `side` is
+loose along its optical axis either way (the arm leaves the frame in many
+fit frames), the single-camera plane intersection, validated by the FK
+agreement above, is the better estimate, and triangulation here measures
+the camera fits, not the object.
 
 **Payload mass from the residual.** A position servo settles short of its
 command by load / gain, so a mass `m` at the fingertip adds a deflection
