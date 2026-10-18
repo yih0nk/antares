@@ -165,6 +165,11 @@ class RobotLock(JsonFile):
             d["dynamics_only"] = self.dynamics_only
         if self.cameras:
             d["cameras"] = dict(self.cameras)
+        fitted = self.factors_fitted()
+        if fitted:
+            from antares.factors import REGISTRY_VERSION
+
+            d["factors"] = {"registry_version": REGISTRY_VERSION, "fitted": fitted}
         if self.calibration is not None:
             d["calibration"] = self.calibration
         if self.scene is not None:
@@ -172,6 +177,16 @@ class RobotLock(JsonFile):
         if self.objects is not None:
             d["objects"] = dict(self.objects)
         return d
+
+    def factors_fitted(self) -> dict[str, list[str]]:
+        """Stage name -> the factors it fitted, from the result's stage log
+        (empty for locks written before the factor registry)."""
+        out: dict[str, list[str]] = {}
+        for st in getattr(self.result, "stages", None) or []:
+            names = st.get("factors") if isinstance(st, dict) else None
+            if names:
+                out.setdefault(str(st.get("name", "shared")), list(names))
+        return out
 
     def replace(self, **changes: Any) -> "RobotLock":
         return replace(self, **changes)

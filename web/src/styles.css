@@ -1005,6 +1005,14 @@ body {
   }
 }
 
+/* What the fit accounts for */
+.factors { margin-top: 8px; }
+.factors summary { cursor: pointer; font-size: 13px; }
+.factors ul { list-style: none; margin: 6px 0; padding: 0; display: grid; gap: 2px; }
+.factors .toggle { display: flex; gap: 6px; align-items: baseline; }
+.factors .pin-yes { color: var(--good, #3fb68b); }
+.factors .pin-no { color: var(--warn, #d9a441); }
+.factors p { margin: 6px 0 0; }
 /* ---- fleet dashboard ---- */
 
 .shell.fleet-shell {

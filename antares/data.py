@@ -84,8 +84,10 @@ def read_local(root: str | Path, repo_id: str = "local") -> Dataset:
     root = Path(root)
     info = json.loads((root / "meta" / "info.json").read_text())
     features = info["features"]
-    names = features["observation.state"]["names"]
-    if names != features["action"]["names"]:
+    from antares.validate import feature_names  # validate imports this module
+
+    names = feature_names(features["observation.state"])
+    if names is None or names != feature_names(features["action"]):
         raise ValueError("action and observation.state joints differ; cannot replay")
     joint_names = tuple(canonical_joint_name(n) for n in names)
     fps = float(info["fps"])

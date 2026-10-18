@@ -7,6 +7,7 @@ Heavy imports (MuJoCo, FastAPI, CMA-ES) live inside the command functions so
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 
 
@@ -30,7 +31,7 @@ def _fmt(v) -> str:
     return str(v) if isinstance(v, int) else f"{v:.4g}"
 
 
-def _params_table(params: dict) -> str:
+def _params_table(params: dict, joints: list[str] | None = None) -> str:
     """Scalar params on one line; per-joint params as a joints x fields table."""
     if not any(isinstance(v, list) for v in params.values()):
         return "params: " + ", ".join(f"{k}={_fmt(v)}" for k, v in params.items())
@@ -38,7 +39,7 @@ def _params_table(params: dict) -> str:
 
     names = list(params)
     rows = []
-    for j, joint in enumerate(JOINTS):
+    for j, joint in enumerate(joints or JOINTS):
         row = [joint]
         for k in names:
             v = params[k]
@@ -125,7 +126,9 @@ def cmd_inspect(args: argparse.Namespace) -> int:
         f"{frames} frames @ {ds.fps:g} fps"
     )
     print("joints:", ", ".join(ds.joint_names))
-    print(f"sim model: {model_for_dataset(ds.robot_type)}")
+    from antares.catalog import robot_for_dataset
+
+    print(f"sim model: {robot_for_dataset(args.repo_id) or model_for_dataset(ds.robot_type)}")
     _print_verdict(v)
     if getattr(args, "calibration", None) or getattr(args, "robot_id", None):
         if _print_calibration_check(ds, args) is None:
@@ -196,8 +199,16 @@ def cmd_replay(args: argparse.Namespace) -> int:
 
 
 def cmd_calibrate(args: argparse.Namespace) -> int:
-    from antares import server
+    from antares import factors, server
 
+    if not _load_factor_files(args.factors_file):
+        return EXIT_USAGE
+    try:
+        fit = factors.parse_selection(args.factors, "shared")
+        per = factors.parse_selection(args.per_joint_factors, "per_joint")
+    except (KeyError, ValueError) as e:
+        print(f"--factors: {str(e).strip(chr(39))}", file=sys.stderr)
+        return EXIT_USAGE
     ds = _load_dataset(args.repo_id)
     if ds is None:
         return 2
@@ -249,6 +260,8 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
         fit_sensor=args.fit_sensor,
         sensor_mode=args.sensor_mode,
         n_seeds=args.seeds,
+        factors=None if fit is None else list(fit),
+        per_joint_factors=None if per is None else list(per),
         calibration_path=args.calibration,
         robot_id=args.robot_id,
         robot_type=args.robot_type,
@@ -275,7 +288,9 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
     print()
     print(_table(headers, rows))
     print()
-    print(_params_table(r["params"]))
+    from antares.robots import get_robot
+
+    print(_params_table(r["params"], list(get_robot(lock["robot"]).joints) if lock.get("robot") else None))
     for s in r.get("stages", []):
         run = f" (seed {s['seed']})" if "seed" in s and r.get("seeds") else ""
         print(f"  {s['name']}{run}: {s['n_evaluations']} evaluations, train {s['train_score']:.3f} deg")
@@ -307,6 +322,19 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
         else:
             print(reg["summary"])
     return 0
+
+
+def _load_factor_files(paths) -> bool:
+    """Register the ``--factors-file`` TOMLs; False (after printing why) on a bad file."""
+    from antares import factors
+
+    for path in paths or ():
+        try:
+            factors.load_factor_file(path)
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            print(f"--factors-file {path}: {e}", file=sys.stderr)
+            return False
+    return True
 
 
 def _print_seed_spread(sd: dict) -> None:
@@ -2402,6 +2430,88 @@ def cmd_fleet_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_factors(args: argparse.Namespace) -> int:
+    """What the fit can account for, and what it can't yet."""
+    from antares import factors
+
+    if not _load_factor_files(args.file):
+        return EXIT_USAGE
+    d = factors.describe()
+    if args.json:
+        print(json.dumps(d, indent=2))
+        return 0
+    rows = []
+    for f in d["factors"]:
+        if args.stage and args.stage not in f["stages"]:
+            continue
+        lo, hi = f["bounds"]
+        rows.append([
+            f["name"], f["label"], ",".join(f["stages"]), f"{lo:g}..{hi:g} {f['unit']}".strip(),
+            f["identifiable"], f["origin"],
+        ])
+    print(f"factors the fit can account for (registry v{d['version']}):")
+    print(_table(["name", "what", "stages", "range", "pinned by data", "source"], rows))
+    if args.verbose:
+        for f in d["factors"]:
+            print(f"\n{f['name']}: {f['explains']}\n  needs: {f['needs']}\n  evidence: {f['evidence']}")
+    print()
+    print("known effects not modelled yet:")
+    print(_table(["name", "what", "shows up as"], [[u["name"], u["label"], u["symptom"]] for u in d["not_modelled"]]))
+    print()
+    print("fit a different set with `antares calibrate --factors +name,-name`; add your own with --factors-file "
+          "(see examples/factors.toml)")
+    return 0
+
+
+def cmd_models(args: argparse.Namespace) -> int:
+    from antares.robots import REGISTRY
+
+    rows = []
+    for r in REGISTRY.values():
+        d = r.to_dict()
+        rows.append([r.name, d["label"], str(r.n_joints), ",".join(r.grippers) or "-",
+                     ",".join(r.unit_kinds()[:1]) + ("..." if len(set(r.unit_kinds())) > 1 else ""),
+                     d["source"], "yes" if d["fetched"] else "no"])
+    if args.json:
+        print(json.dumps([r.to_dict() for r in REGISTRY.values()], indent=2))
+        return 0
+    print(_table(["name", "robot", "columns", "grippers", "units", "model", "on disk"], rows))
+    return 0
+
+
+def cmd_fetch_model(args: argparse.Namespace) -> int:
+    from antares.menagerie import fetch
+    from antares.robots import REGISTRY, get_robot
+
+    names = [n for n, r in REGISTRY.items() if r.menagerie is not None] if args.robot == "all" else [args.robot]
+    for name in names:
+        try:
+            r = get_robot(name)
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return EXIT_USAGE
+        if r.menagerie is None:
+            print(f"{name}: ships with antares ({r.model_path})")
+            continue
+        path = fetch(r.menagerie, force=args.force)
+        print(f"{name}: {path}")
+    return 0
+
+
+def cmd_datasets(args: argparse.Namespace) -> int:
+    from antares.catalog import entries
+
+    rows = entries()
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return 0
+    print(_table(["dataset", "robot", "episodes", "fps", "units", "checked"],
+                 [[e["repo_id"], e["robot"], str(e["episodes"]), _fmt(e["fps"]), e["units"], e["checked"] or "-"]
+                  for e in rows]))
+    print("\ncalibrate one with `antares calibrate <dataset>`; the catalog picks the model.")
+    return 0
+
+
 # --------------------------------------------------------------------------
 # parser
 # --------------------------------------------------------------------------
@@ -2421,7 +2531,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_serve)
 
     dataset_help = "Hub dataset id, upload/<name>, or a LeRobot dataset directory on disk"
-    robot_help = "sim model from the registry (so101, so100); default: the dataset's family"
+    from antares.robots import REGISTRY
+
+    robot_help = (f"sim model from the registry ({', '.join(REGISTRY)}); "
+                  "default: the dataset's catalog entry or family (see `antares robots`)")
 
     def add_calibration_args(p: argparse.ArgumentParser) -> None:
         g = p.add_argument_group("LeRobot calibration (the follower arm's own tick-to-angle map)")
@@ -2511,6 +2624,25 @@ def build_parser() -> argparse.ArgumentParser:
         default="sim",
         help="with --fit-sensor: fit the map through the sim, alternating with the dynamics "
         "(sim, default), or pre-fit it from still frames and freeze it (kinematic)",
+    )
+    p.add_argument(
+        "--factors",
+        default=None,
+        metavar="LIST",
+        help="factors the shared fit accounts for: '+gravity,-kp' edits the defaults, "
+        "'kp,kv,latency_frames' replaces them (see `antares factors`)",
+    )
+    p.add_argument(
+        "--per-joint-factors",
+        default=None,
+        metavar="LIST",
+        help="same, for the --per-joint stage (default: the shared ones plus forcerange)",
+    )
+    p.add_argument(
+        "--factors-file",
+        action="append",
+        metavar="TOML",
+        help="register the [[factor]] entries of a TOML file first; repeatable",
     )
     add_calibration_args(p)
     p.add_argument("--activate", action="store_true",
@@ -2763,6 +2895,26 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", default="results", help="directory for the .md and .json report")
     p.set_defaults(func=cmd_specificity)
 
+    p = sub.add_parser("factors", help="list what the fit can account for, and what it can't yet")
+    p.add_argument("--stage", choices=("shared", "per_joint", "sensor"), default=None)
+    p.add_argument("--file", action="append", metavar="TOML", help="also load the factors in a TOML file")
+    p.add_argument("-v", "--verbose", action="store_true", help="print what each factor explains and the evidence")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_factors)
+
+    p = sub.add_parser("models", help="list the robot models antares can simulate")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_models)
+
+    p = sub.add_parser("fetch-model", help="download a robot's model from MuJoCo Menagerie (otherwise fetched on first use)")
+    p.add_argument("robot", help="registry name, or 'all'")
+    p.add_argument("--force", action="store_true", help="download again")
+    p.set_defaults(func=cmd_fetch_model)
+
+    p = sub.add_parser("datasets", help="list public datasets of other robots to test on")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_datasets)
+
     p = sub.add_parser("locks", help="list saved locks")
     p.set_defaults(func=cmd_locks)
 
@@ -2924,6 +3076,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if getattr(args, "robot", None) and getattr(args, "repo_id", None):
+        # Validate and replay the dataset on the model asked for.
+        from antares.catalog import assign
+
+        assign(args.repo_id, args.robot)
     try:
         return args.func(args)
     except KeyboardInterrupt:

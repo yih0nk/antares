@@ -45,6 +45,7 @@ from typing import Any
 import numpy as np
 
 from antares import __version__
+from antares import factors
 from antares.data import Episode
 from antares.lock import now_iso
 
@@ -57,16 +58,16 @@ DEFAULT_THRESHOLD = 0.10
 #: Keys of the trend table that are scores, not parameters.
 SCORE_KEYS = ("lock_score", "train_score")
 
-try:  # parameters searched on a log scale, from the calibration search spaces
+#: Parameters of the shared fits searched (and trended) on a log scale: the
+#: registry's shared space plus the servo model's (:data:`antares.calibrate.SERVO_SPACE`).
+LOG_PARAMS: frozenset[str] = frozenset(n for n, (_, _, s) in factors.space("shared").items() if s == "log")
+try:
     from antares.calibrate import SERVO_SPACE as _SERVO_SPACE
-    from antares.calibrate import SPACE as _SPACE
 
-    LOG_PARAMS: frozenset[str] = frozenset(
-        n for space in (_SPACE, _SERVO_SPACE) for n, (_, _, s) in space.items() if s == "log"
-    )
-    del _SPACE, _SERVO_SPACE
+    LOG_PARAMS |= frozenset(n for n, (_, _, s) in _SERVO_SPACE.items() if s == "log")
+    del _SERVO_SPACE
 except (ImportError, AttributeError):  # pragma: no cover - stubbed sibling module
-    LOG_PARAMS = frozenset({"kp", "kv", "damping", "armature", "frictionloss", "servo_gain", "max_velocity"})
+    LOG_PARAMS |= frozenset({"servo_gain", "max_velocity"})
 
 
 def _json_float(v: float) -> float | None:
@@ -532,8 +533,9 @@ def drift_scan(
     slices = window_slices(len(ordered), window, step)
     if simulate is None:
         from antares.calibrate import default_simulate
+        from antares.check import lock_robot
 
-        simulate = default_simulate()
+        simulate = default_simulate(robot=lock_robot(lock))
     stop = should_stop or (lambda: False)
 
     windows: list[DriftWindow] = []

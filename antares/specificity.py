@@ -37,6 +37,7 @@ from antares.calibrate import (
     calibrate,
     decode,
     encode,
+    scoring_names,
     split_episodes,
 )
 from antares.data import Episode
@@ -97,18 +98,24 @@ def summarize_cross(matrix: Mapping[str, Any], lock_datasets: Mapping[str, str])
 #: frames, so it has no derivative; :func:`latency_profile` covers it.
 CONTINUOUS: tuple[str, ...] = tuple(n for n in DIMS if SPACE[n][2] != "int")
 
-#: Gripper column, excluded from the score like in :mod:`antares.gap`.
-_GRIPPER = 5
+def _unscored(simulate: SimulateFn) -> tuple[int, ...]:
+    """Gripper columns of the robot ``simulate`` runs (index 5 on the SO
+    arms), from the same names the calibrator scores with."""
+    names = scoring_names(simulate)
+    return tuple(names["joint_names"].index(g) for g in names["exclude"])
 
 
-def residuals(params, episodes: Sequence[Episode], simulate: SimulateFn, exclude: Sequence[int] = (_GRIPPER,)):
+def residuals(params, episodes: Sequence[Episode], simulate: SimulateFn, exclude: Sequence[int] | None = None):
     """Sim minus real, in degrees, for every frame and scored joint, flattened.
 
     ``sqrt(mean(r**2))`` equals the ``overall_deg`` the calibrator minimizes
-    (frame-weighted RMS over the scored joints).
+    (frame-weighted RMS over the scored joints). ``exclude`` defaults to the
+    gripper columns of the robot ``simulate`` is tagged with.
     """
     if not episodes:
         raise ValueError("no episodes to score")
+    if exclude is None:
+        exclude = _unscored(simulate)
     parts = []
     for ep in episodes:
         real_q, sim_q = simulate(params, ep)

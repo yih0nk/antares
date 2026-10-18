@@ -111,7 +111,9 @@ def bootstrap_fits(
     n_train = min(n_train, len(episodes))
     rng = np.random.default_rng(seed)
     if simulate is None:
-        simulate = default_simulate()
+        from antares.check import lock_robot
+
+        simulate = default_simulate(robot=lock_robot(lock_or_start))
     stop = should_stop or (lambda: False)
 
     fits: list[CalibrationResult] = []

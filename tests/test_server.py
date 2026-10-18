@@ -62,8 +62,8 @@ class FakeCommandMap:
         self.gain, self.bias = np.asarray(gain, float), np.asarray(bias, float)
 
     @classmethod
-    def identity(cls):
-        return cls(np.ones(6), np.zeros(6))
+    def identity(cls, n=6):
+        return cls(np.ones(n), np.zeros(n))
 
     @classmethod
     def from_dict(cls, d):
@@ -341,8 +341,11 @@ def fakes(monkeypatch, tmp_path):
                   model_geometry=lambda model=None: {"bodies": [], "geoms": [], "joints": []})
     gap = _module("antares.gap", GapReport=FakeGap, tracking_error=fake_tracking_error,
                   aggregate=fake_aggregate)
+    from antares.calibrate import scoring_names  # the real one: pure, reads the robot off its argument
+
     cal = _module("antares.calibrate", calibrate=fake_calibrate, split_episodes=fake_split, PENALTY=1e3,
-                  default_simulate=lambda command_map=None, robot=None: (lambda params, ep: (ep.state, ep.action)))
+                  default_simulate=lambda command_map=None, robot=None: (lambda params, ep: (ep.state, ep.action)),
+                  scoring_names=scoring_names)
     lock = _module("antares.lock", RobotLock=FakeLock, dataset_digest=lambda eps: "deadbeef",
                    slug=lambda r: r.replace("/", "__"), LOCK_DIR=tmp_path / "locks",
                    LOCK_SUFFIX=LOCK_SUFFIX,
@@ -738,6 +741,12 @@ def test_calibrate_rejects_bad_input(client, fakes):
     assert client.post("/api/calibrate", json={"dataset": FAKE_DS, "n_train": 0}).status_code == 422
     assert client.post("/api/calibrate", json={"dataset": FAKE_DS, "name": "../evil"}).status_code == 400
     assert client.post("/api/calibrate", json={}).status_code == 422
+    # a factor selection the stage cannot fit, or that fits nothing, is a usage error
+    r = client.post("/api/calibrate", json={"dataset": FAKE_DS, "factors": []})
+    assert r.status_code == 400 and "nothing to fit" in r.json()["detail"]
+    r = client.post("/api/calibrate", json={"dataset": FAKE_DS, "factors": ["+sensor_gain"]})
+    assert r.status_code == 400 and "sensor" in r.json()["detail"]
+    assert client.post("/api/calibrate", json={"dataset": FAKE_DS, "factors": ["+nope"]}).status_code == 400
 
 
 def test_calibrate_error_event(client, fakes):

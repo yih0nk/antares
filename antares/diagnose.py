@@ -57,30 +57,24 @@ from typing import Any
 
 import numpy as np
 
+from antares import factors
 from antares.calibrate import PENALTY, _per_joint, _safe_score
 from antares.data import Episode
 
-#: Largest factor searched for each scaled parameter, either way.
-FACTOR_RANGE: dict[str, float] = {
-    "kp": 4.0,
-    "kv": 4.0,
-    "damping": 4.0,
-    "armature": 4.0,
-    "frictionloss": 4.0,
-}
+#: Largest factor searched for each scaled parameter, either way (from
+#: :mod:`antares.factors`).
+FACTOR_RANGE: dict[str, float] = factors.drift_factors()
 #: The same for a servo-model lock (``params.uses_servo_model``): the
 #: firmware's gain ratio stands in for ``kp`` (the lock's ``kp`` is derived
 #: from it, so scaling ``kp`` itself would change nothing), and there is no
 #: ``kv`` to scale (back-EMF is a motor constant).
 SERVO_FACTOR_RANGE: dict[str, float] = {
     "servo_gain": 4.0,
-    "damping": 4.0,
-    "armature": 4.0,
-    "frictionloss": 4.0,
+    **{n: r for n, r in FACTOR_RANGE.items() if n in ("damping", "armature", "frictionloss")},
 }
 _ALL_FACTORS: dict[str, float] = {**FACTOR_RANGE, **SERVO_FACTOR_RANGE}
 #: Frames ``latency_frames`` may shift by, (fewest, most).
-LATENCY_SHIFT: tuple[int, int] = (-2, 3)
+LATENCY_SHIFT: tuple[int, int] = factors.drift_shifts()["latency_frames"]
 FIELDS: tuple[str, ...] = (*FACTOR_RANGE, "latency_frames")
 #: The change space of a servo-model lock (see :func:`change_fields`).
 SERVO_FIELDS: tuple[str, ...] = (*SERVO_FACTOR_RANGE, "latency_frames")
@@ -459,8 +453,9 @@ def diagnose(
         raise ValueError("diagnose needs at least two episodes")
     if simulate is None:
         from antares.calibrate import default_simulate
+        from antares.check import lock_robot
 
-        simulate = default_simulate()
+        simulate = default_simulate(robot=lock_robot(lock))
     stop = should_stop or (lambda: False)
 
     fields = change_fields(params)

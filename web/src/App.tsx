@@ -36,6 +36,7 @@ import { SceneGeometry } from "./Scene";
 import { ObjectMarker } from "./Objects";
 import { CrossHeatmap, JointTrace, ResidualStrip, Sparkline } from "./Charts";
 import { AddDataset } from "./AddDataset";
+import { Factors } from "./Factors";
 import { FleetView } from "./Fleet";
 
 // Layout: 3D viewer (real arm + ghost sim arm) on the left, gap panel on
@@ -339,6 +340,8 @@ export default function App() {
   const [joint, setJoint] = useState("shoulder_pan");
   const [calib, setCalib] = useState<Calibration | null>(null);
   const [perJoint, setPerJoint] = useState(false);
+  // null: the built-in factors; otherwise the shared-stage names to fit.
+  const [fitFactors, setFitFactors] = useState<string[] | null>(null);
   const [fitGravity, setFitGravity] = useState(false);
   const [fitDeadband, setFitDeadband] = useState(false);
   const [residual, setResidual] = useState<Residual | null>(null);
@@ -645,6 +648,7 @@ export default function App() {
         name,
         MAX_EVALUATIONS,
         perJoint ? { maxEvaluations: PER_JOINT_EVALUATIONS } : undefined,
+        fitFactors,
         { fitGravity, fitDeadband },
       ));
     } catch (e) {
@@ -1205,7 +1209,7 @@ export default function App() {
               return (
                 <button
                   key={j}
-                  className={`bar-row ${j === joint ? "sel" : ""} ${scored.has(j) ? "" : "unscored"}`}
+                  className={`bar-row ${j === jointNames[jIndex] ? "sel" : ""} ${scored.has(j) ? "" : "unscored"}`}
                   onClick={() => setJoint(j)}
                   title={scored.has(j) ? "" : "not scored (gripper contact isn't simulated)"}
                 >
@@ -1236,6 +1240,7 @@ export default function App() {
             per-joint refinement
             <span className="muted">+{PER_JOINT_EVALUATIONS} evals</span>
           </label>
+          <Factors selected={fitFactors} onChange={setFitFactors} disabled={running} />
           <label className={`toggle ${running ? "locked" : ""}`} title="Also fit gravity_scale, the arm's gravity load: how much it sags per pose, apart from how fast kp makes it track">
             <input type="checkbox" checked={fitGravity} disabled={running} onChange={(e) => setFitGravity(e.target.checked)} />
             fit gravity load
