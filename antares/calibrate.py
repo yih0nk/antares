@@ -431,6 +431,9 @@ def _stage_to_dict(s: Mapping[str, Any], score: Callable[[Any], Any]) -> dict:
     }
     if s.get("seed") is not None:
         out["seed"] = int(s["seed"])
+    for key in ("factors", "relative"):  # stages fitted since the factor registry
+        if s.get(key):
+            out[key] = [str(n) for n in s[key]]
     return out
 
 
@@ -744,6 +747,8 @@ class _Fit:
                 "train_score": self.best_score,
                 "params": self.best_params.to_dict(),
                 "seed": int(seed),
+                "factors": list(space.fields),
+                **({"relative": list(space.relative)} if space.relative else {}),
             }
         )
         return not cancelled and not self.stop()
