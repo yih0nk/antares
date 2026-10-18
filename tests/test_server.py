@@ -1335,3 +1335,13 @@ def test_replay_uses_lock_command_map(client, fakes):
     again = client.get("/api/replay", params={**q, "lock": "unit-b-plain"}).json()
     assert again["gap"]["overall_deg"] == plain["gap"]["overall_deg"]
 
+
+def test_post_replay_accepts_command_map(client, fakes):
+    body = {"dataset": FAKE_DS2, "episode": 0, "params": FakeParams(kp=50.0).to_dict()}
+    plain = client.post("/api/replay", json=body).json()
+    mapped = client.post("/api/replay", json={**body, "command_map": SHIFT_MAP}).json()
+    assert mapped["command_map"] == SHIFT_MAP
+    assert mapped["gap"]["overall_deg"] < plain["gap"]["overall_deg"]
+    bad = client.post("/api/replay", json={**body, "command_map": {"gain": [1.0] * 6}})
+    assert bad.status_code == 400
+

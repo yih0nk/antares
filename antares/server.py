@@ -1157,6 +1157,8 @@ class ReplayRequest(BaseModel):
     episode: int
     # A value is a scalar or a per-joint list of 6, as SimParams.from_dict accepts.
     params: dict[str, float | list[float]]
+    # Optional {"gain": [6], "bias": [6]}; omitted means identity.
+    command_map: dict[str, list[float]] | None = None
 
 
 @app.post("/api/replay")
@@ -1165,9 +1167,10 @@ def replay_with_params(req: ReplayRequest) -> dict:
     ds = get_dataset(req.dataset)
     try:
         params = params_from_dict(req.params)
-    except (TypeError, ValueError) as e:
+        cmap = command_map_from_lock({"command_map": req.command_map})
+    except (TypeError, ValueError, KeyError) as e:
         raise HTTPException(status_code=400, detail=f"bad params: {e}")
-    out = replay_episode(ds, req.episode, params)
+    out = replay_episode(ds, req.episode, params, cmap)
     out["lock"] = None
     return out
 
