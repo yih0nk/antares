@@ -513,13 +513,28 @@ class Arm:
         ``dof_invweight0``, which scale the frictionloss and limit constraints),
         so they are recomputed with ``mj_setConst``; the result is then identical
         to a model compiled with these values.
+
+        With a servo model (``params.servo != "position"``) the position
+        actuators carry the servo's linear part (:meth:`SimParams.linearized`:
+        P loop and back-EMF, so MuJoCo integrates the back-EMF implicitly)
+        with no force or control limit; :meth:`rollout` feeds them a control
+        that reproduces the firmware's rate limit and duty-cycle saturation.
         """
         m = self.model
-        kp = params.per_joint("kp")
-        fr = params.per_joint("forcerange")
+        lin = params.linearized()
+        kp = lin.per_joint("kp")
+        kv = lin.per_joint("kv")
+        fr = lin.per_joint("forcerange")
+        if params.uses_servo_model:
+            fr = np.full_like(fr, 1e9)
+            m.actuator_ctrlrange[:, 0] = -1e3
+            m.actuator_ctrlrange[:, 1] = 1e3
+        else:
+            m.actuator_ctrlrange[:, 0] = self._ctrl_lo
+            m.actuator_ctrlrange[:, 1] = self._ctrl_hi
         m.actuator_gainprm[:, 0] = kp
         m.actuator_biasprm[:, 1] = -kp
-        m.actuator_biasprm[:, 2] = -params.per_joint("kv")
+        m.actuator_biasprm[:, 2] = -kv
         m.actuator_forcerange[:, 0] = -fr
         m.actuator_forcerange[:, 1] = fr
         m.dof_damping[:] = params.per_joint("damping")
@@ -654,7 +669,9 @@ class Arm:
             dctrl = d.ctrl
             step = mujoco.mj_step
             band = self.params.per_joint("deadband")
-            if not np.any(band):
+            if self.params.uses_servo_model:
+                self._servo_steps(ctrl, sim_q, n_sub, band)
+            elif not np.any(band):
                 for t in range(1, T):
                     dctrl[:] = ctrl[t]
                     step(m, d, n_sub)
@@ -682,6 +699,44 @@ class Arm:
         finally:
             m.opt.timestep = old_dt
         return sim_q
+
+    def _servo_steps(self, ctrl: np.ndarray, sim_q: np.ndarray, n_sub: int, band: np.ndarray) -> None:
+        """Advance frames ``1..T-1`` with the STS3215 servo model (see :attr:`SimParams.servo`).
+
+        Runs inside :meth:`rollout` after the reset, so ``sim_q[0]`` is set
+        and ``m.opt.timestep`` is the substep. Every substep the firmware's
+        internal target moves toward the latency-shifted command by at most
+        ``max_velocity * dt``; the (deadband-shrunk) error to it is clipped
+        where the duty cycle saturates, and the actuator, which :meth:`apply`
+        set to the servo's linear gains, is given ``q + error``. Its force is
+        then ``kt / resistance * (vin * duty - kt * qvel)`` exactly, with the
+        back-EMF integrated implicitly. The internal target starts at the
+        first command, as if the servo had been holding it, which is what the
+        position actuator assumes too.
+        """
+        m, d = self.model, self.data
+        p = self.params
+        dt = float(m.opt.timestep)
+        gain = p.per_joint("p_coefficient") * STS3215_ERROR_GAIN * p.per_joint("servo_gain")
+        # Error at which the duty cycle saturates (no limit for a zero gain).
+        with np.errstate(divide="ignore"):
+            sat = np.where(gain > 0, STS3215_MAX_PWM / gain, np.inf)
+        step_max = p.per_joint("max_velocity") * dt
+        banded = bool(np.any(band))
+        target = ctrl[0].copy()
+        qpos, dctrl = d.qpos, d.ctrl
+        step = mujoco.mj_step
+        for t in range(1, ctrl.shape[0]):
+            want = ctrl[t]
+            for _ in range(n_sub):
+                target = np.clip(want, target - step_max, target + step_max)
+                q = qpos.copy()
+                e = target - q
+                if banded:
+                    e = np.sign(e) * np.maximum(np.abs(e) - band, 0.0)
+                dctrl[:] = q + np.clip(e, -sat, sat)
+                step(m, d)
+            sim_q[t] = qpos
 
 
 def model_geometry(model: mujoco.MjModel | None = None) -> dict[str, Any]:
