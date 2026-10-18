@@ -17,7 +17,10 @@ you how much of the sim-to-real gap closed.
    same commands, and measure where the sim drifts from reality.
 3. **Calibrate.** CMA-ES fits actuator gain, damping, armature, friction,
    and latency to that robot's episodes, scored on held-out ones.
-4. **See it.** The web UI overlays the real arm and the sim ghost in 3D
+4. **Fit the sensor calibration (optional).** With `--fit-sensor`,
+   Antares also fits a per-joint offset and scale between the logged
+   commands and the measured joints, and saves it in the lock.
+5. **See it.** The web UI overlays the real arm and the sim ghost in 3D
    and streams the fit live, so you watch the ghost lock on.
 
 First embodiment: the SO-100/101 arm, using public community datasets.
@@ -546,6 +549,88 @@ bimanual or non-SO arms (14).
   below the fleet median. Score outliers are kept out of the cross matrix so
   one unexplained arm does not dominate it.
 
+
+## Sensor calibration
+
+LeRobot normalizes the commands (the leader arm's readings) and the
+measured state (the follower's) with two separate per-arm calibrations, so
+the same number can mean slightly different angles on each side. No
+dynamics parameter can model that, so a plain fit bends stiffness and
+latency to hide it. `--fit-sensor` fits a per-joint
+`command = gain * logged + bias` (a `CommandMap`, dataset units, gripper
+left at identity) and stores it in the lock:
+
+```sh
+.venv/bin/antares calibrate lerobot/svla_so101_pickplace --fit-sensor --name so101_sensor
+.venv/bin/antares calibrate lerobot/svla_so101_pickplace --fit-sensor --sensor-mode kinematic
+```
+
+Two ways to fit it (`--sensor-mode`, or `sensor_mode` in
+`POST /api/calibrate`):
+
+* **`sim`** (default): Levenberg-Marquardt on the replay residual with the
+  dynamics held fixed, alternating with a CMA-ES refit of the dynamics
+  under the new map, then a last map fit.
+* **`kinematic`**: a least-squares line through frames where command and
+  joint have both been still for 10 frames, with no sim, frozen before the
+  physics fit so it cannot absorb dynamics error. Its catch: a still joint
+  under gravity sags below its command by an amount the sim models through
+  `kp`, and this fit puts that sag into the bias.
+
+The table compares against a dynamics-only fit given the **same** budget,
+counting every pass over the training episodes, the map fits' included:
+it is refit round for round under the identity map, plus one more refit
+with the simulations the map fits spent, so a gain is not just extra
+evaluations. The lock's `n_evaluations` and stages count the map fits
+the same way. It also works with `--per-joint` (later rounds refit in
+the per-joint space directly, since the shared stage would only average
+the per-joint values back together).
+
+Synthetic check (`scripts/sensor_synthetic.py`): a hidden MuJoCo arm with
+the SO-101 lock's dynamics, 0.2-unit state noise and teleop-style pauses,
+10 train / 4 held-out episodes, held-out RMSE in degrees:
+
+| hidden arm | default sim | dynamics only | `sim` mode | `kinematic` mode |
+|---|---|---|---|---|
+| calibration mismatch (bias up to 3 units, gain ±4%) | 7.40 | 2.34 | **0.51** | 1.56 |
+| no mismatch (control) | 7.15 | 0.46 | **0.40** | 1.58 |
+
+(Measured with the current SO-101 lock, whose refit `kp` of about 10
+makes the arm sag a lot under gravity.) `sim` mode recovers the hidden
+bias to within 0.06 units and the gain to within 0.004, and on the arm
+with no mismatch keeps the map within 0.08 units of identity. `kinematic`
+mode's sag caveat bites on this arm: it reads the gravity sag as a bias
+(+3.0 units on the shoulder lift and +2.6 on the elbow of the arm with
+no mismatch, and the hidden -3.0 shoulder-lift bias comes out as -0.1),
+and the dynamics then refit around that, so it ends worse than fitting
+the dynamics alone.
+On the two demo datasets (20 train / 10 held-out episodes, seed 0, two
+rounds of 150 evaluations, with the wider `kp` range), held-out RMSE in degrees.
+"Dynamics only" is a fresh shared fit given the same 300 evaluations under
+the identity map, which is why it beats the committed shared locks (0.736
+SO-101 at 200 evaluations, 0.787 SO-100 at 150):
+
+| | SO-101 dynamics only | SO-101 `sim` | SO-101 `kinematic` | SO-100 dynamics only | SO-100 `sim` | SO-100 `kinematic` |
+|---|---|---|---|---|---|---|
+| **overall** | 0.708 | **0.624** | 0.633 | 0.745 | **0.399** | 0.480 |
+| shoulder_pan | 0.407 | 0.376 | 0.368 | 0.326 | 0.313 | 0.311 |
+| shoulder_lift | 0.801 | 0.651 | 0.665 | 0.854 | 0.431 | 0.504 |
+| elbow_flex | 1.145 | 1.026 | 1.049 | 1.248 | 0.580 | 0.701 |
+| wrist_flex | 0.485 | 0.426 | 0.420 | 0.416 | 0.253 | 0.308 |
+| wrist_roll | 0.394 | 0.388 | 0.383 | 0.458 | 0.335 | 0.465 |
+
+Both real arms carry a real mismatch, mostly on the elbow (`sim` bias
++1.6 units on SO-101 and +2.2 on SO-100, gain about 0.98) and, on the
+SO-100, the shoulder lift (+1.3 units, gain 1.013). The fitted map cuts
+the SO-100's held-out error by 46% and the SO-101's by 12%. `kinematic`
+puts more into the gravity-loaded joints (an SO-101 elbow bias of +3.5),
+as its sag caveat predicts, and is never better overall.
+
+Locks fitted this way carry a `command_map`. Replay, the viewer, `cross`,
+`check`, residuals and events, `compensate` (whose `--out` commands come
+back in raw units), `export` (in the sidecar) and the drift and DR refits
+(which hold the map fixed) all use it. Locks without one behave as before.
+
 ## Layout
 
 | Path | What |
@@ -553,6 +638,7 @@ bimanual or non-SO arms (14).
 | `antares/data.py` | LeRobot dataset loader (tabular only) |
 | `antares/sim.py` | MuJoCo model, unit mapping, replay and rollout |
 | `antares/calibrate.py` | CMA-ES parameter fit |
+| `antares/sensor.py` | Per-joint command offset/scale fit |
 | `antares/gap.py` | Tracking-error metrics |
 | `antares/lock.py` | Calibrated sim saved per robot as a lock file |
 | `antares/export.py` | Lock -> standalone MJCF, sidecar, scene, zip |

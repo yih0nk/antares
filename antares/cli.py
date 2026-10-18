@@ -78,10 +78,12 @@ def cmd_replay(args: argparse.Namespace) -> int:
     from antares import server
 
     ds = server.get_dataset(args.repo_id)
-    params = None
+    params = cmap = None
     if args.lock:
-        params = server.params_from_dict(server.load_lock_dict(args.lock)["params"])
-    out = server.replay_episode(ds, args.episode, params)
+        lock = server.load_lock_dict(args.lock)
+        params = server.params_from_dict(lock["params"])
+        cmap = server.command_map_from_lock(lock)
+    out = server.replay_episode(ds, args.episode, params, cmap)
     gap = out["gap"]
     label = f"lock {args.lock}" if args.lock else "default params"
     print(f"{ds.repo_id} episode {out['episode']} ({len(out['real_q'])} frames, {label})")
@@ -96,6 +98,8 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
     stages = f"up to {args.max_evaluations} shared evaluations"
     if args.per_joint:
         stages += f" + {args.per_joint_evaluations} per-joint evaluations"
+    if args.fit_sensor:
+        stages += " per round, fitting the sensor calibration"
     print(f"calibrating {ds.repo_id}: {args.n_train} train / {args.n_eval} eval episodes, {stages}")
     last = {"n": 0, "stage": None}
 
@@ -125,27 +129,40 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
         per_joint_max_evaluations=args.per_joint_evaluations,
         per_joint_sigma0=args.per_joint_sigma0,
         on_progress=on_progress,
+        fit_sensor=args.fit_sensor,
+        sensor_mode=args.sensor_mode,
     )
     r = result.to_dict()
+    only = lock.get("dynamics_only")
     before = r.get("per_joint_before") or {}
     after = r.get("per_joint_after") or {}
+    mid = (only or {}).get("per_joint_after") or {}
+    nan = float("nan")
     rows = [
-        [j, f"{before.get(j, float('nan')):.3f}", f"{after.get(j, float('nan')):.3f}"]
+        [j, f"{before.get(j, nan):.3f}"]
+        + ([f"{mid.get(j, nan):.3f}"] if only else [])
+        + [f"{after.get(j, nan):.3f}"]
         for j in sorted(set(before) | set(after), key=list(before).index)
     ]
     rows.append(
-        [
-            "eval overall",
-            f"{r['baseline_eval_score']:.3f}",
-            f"{r['eval_score']:.3f}",
-        ]
+        ["eval overall", f"{r['baseline_eval_score']:.3f}"]
+        + ([f"{only['eval_score']:.3f}"] if only else [])
+        + [f"{r['eval_score']:.3f}"]
     )
+    headers = ["joint", "before (deg)"] + (["dynamics only"] if only else []) + ["after (deg)"]
     print()
-    print(_table(["joint", "before (deg)", "after (deg)"], rows))
+    print(_table(headers, rows))
     print()
     print(_params_table(r["params"]))
     for s in r.get("stages", []):
         print(f"  {s['name']}: {s['n_evaluations']} evaluations, train {s['train_score']:.3f} deg")
+    if lock.get("command_map"):
+        cm = lock["command_map"]
+        joints = list(before) or [str(i) for i in range(len(cm["gain"]))]
+        print()
+        print("sensor calibration (command = gain * logged + bias, dataset units):")
+        print(_table(["joint", "gain", "bias"],
+                     [[j, f"{g:.4f}", f"{b:+.3f}"] for j, g, b in zip(joints, cm["gain"], cm["bias"])]))
     print(f"{r['n_evaluations']} evaluations in {r['elapsed_s']:.1f}s")
     print(f"saved lock {lock['name']} -> {path}")
     return 0
@@ -511,6 +528,9 @@ def cmd_compensate(args: argparse.Namespace) -> int:
 
         um = server.get_arm().unit_map
         cmds = um.to_units(np.radians(np.asarray(out["ctrl_comp"], dtype=np.float64)))
+        cmap = server.command_map_from_lock(lock) if lock else None
+        if cmap is not None:  # back to the raw units the arm is commanded in
+            cmds = cmap.invert(cmds)
         np.save(args.out, cmds)
         print(f"saved {args.method} commands ({cmds.shape[0]}x{cmds.shape[1]}, dataset units) -> {args.out}")
     return 0
@@ -976,6 +996,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="CMA-ES step size of the per-joint stage in unit coordinates "
         "(default 0.05; 0.1 explores more and can win with a budget >= 1200)",
+    )
+    p.add_argument(
+        "--fit-sensor",
+        action="store_true",
+        help="also fit the per-joint command offset/scale and compare against dynamics only",
+    )
+    p.add_argument(
+        "--sensor-mode",
+        choices=("sim", "kinematic"),
+        default="sim",
+        help="with --fit-sensor: fit the map through the sim, alternating with the dynamics "
+        "(sim, default), or pre-fit it from still frames and freeze it (kinematic)",
     )
     p.set_defaults(func=cmd_calibrate)
 

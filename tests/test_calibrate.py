@@ -329,6 +329,18 @@ def test_calibrate_default_is_shared_only():
     assert back.space == "shared" and back.stages == []
 
 
+def test_zero_shared_budget_skips_the_shared_stage():
+    eps = make_episodes(2, T=60)
+    start = TRUE.replace(kp=(300.0,) * 6)
+    res = calibrate(eps[:1], eps[1:], simulate=fake_simulate, start=start, max_evaluations=0,
+                    per_joint=True, per_joint_max_evaluations=8, per_joint_popsize=4)
+    assert [s["name"] for s in res.stages] == ["per_joint"]
+    assert res.n_evaluations == 8 and res.space == "per_joint"
+    # and with no per-joint stage either, the start is returned untouched
+    res = calibrate(eps[:1], eps[1:], simulate=fake_simulate, start=TRUE, max_evaluations=0)
+    assert res.stages == [] and res.n_evaluations == 0 and res.params == TRUE
+
+
 def test_calibrate_per_joint_refines_shared_fit():
     eps = make_episodes(6, T=90, seed=3, true=TRUE_PER_JOINT)
     train, eval = split_episodes(eps, n_train=4, n_eval=2, seed=0)
@@ -453,3 +465,19 @@ def test_calibrate_with_real_arm_smoke():
     res = calibrate(eps[:1], eps[1:], max_evaluations=6, popsize=3, on_progress=events.append)
     assert res.n_evaluations == 6 and len(events) == 7
     assert math.isfinite(res.eval_score) and math.isfinite(res.baseline_eval_score)
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(not _sim_available(), reason="antares.sim not available yet")
+def test_default_simulate_holds_a_command_map():
+    from antares.calibrate import default_simulate
+    from antares.sim import CommandMap
+
+    T = 30
+    action = np.zeros((T, 6))
+    action[:, 1] = 20.0
+    ep = Episode(index=0, fps=30.0, joint_names=JOINTS, state=np.zeros((T, 6)), action=action)
+    shifted = CommandMap(gain=np.ones(6), bias=[0.0, 5.0, 0.0, 0.0, 0.0, 0.0])
+    _, plain = default_simulate()(SimParams(), ep)
+    _, mapped = default_simulate(shifted)(SimParams(), ep)
+    assert mapped[-1, 1] > plain[-1, 1]

@@ -18,9 +18,10 @@ import re
 import tempfile
 import threading
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Literal
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Query
@@ -157,6 +158,44 @@ def params_from_dict(d: dict):
     return SimParams.from_dict(d)
 
 
+def command_map_from_lock(lock: dict):
+    """The lock's CommandMap, or None for a lock fitted without one."""
+    d = lock.get("command_map")
+    if d is None:
+        return None
+    from antares.sim import CommandMap
+
+    return CommandMap.from_dict(d)
+
+
+@contextmanager
+def _command_map(arm, cmap):
+    """Use ``cmap`` on the shared ``arm`` for the block, then restore identity
+    so callers that never set one keep the plain mapping."""
+    if cmap is None:
+        yield
+        return
+    from antares.sim import CommandMap
+
+    arm.command_map = cmap
+    try:
+        yield
+    finally:
+        arm.command_map = CommandMap.identity()
+
+
+def lock_simulate(lock: dict):
+    """A SimulateFn holding the lock's command map fixed, or None (the
+    callee's default) for a lock without one. For refits warm-started from
+    a lock: the dynamics move, the sensor calibration does not."""
+    cmap = command_map_from_lock(lock)
+    if cmap is None:
+        return None
+    from antares.calibrate import default_simulate
+
+    return default_simulate(cmap)
+
+
 def mesh_dir() -> Path:
     if MESH_DIR is not None:
         return Path(MESH_DIR)
@@ -169,8 +208,11 @@ def _rounded(a: np.ndarray) -> list:
     return np.round(np.asarray(a, dtype=np.float64), ROUND).tolist()
 
 
-def replay_episode(ds: Dataset, episode: int, params=None) -> dict:
-    """Real FK + sim replay for one episode. Angles in degrees, poses (T,nbody,7)."""
+def replay_episode(ds: Dataset, episode: int, params=None, command_map=None) -> dict:
+    """Real FK + sim replay for one episode. Angles in degrees, poses (T,nbody,7).
+
+    ``command_map`` (a CommandMap, or None for identity) corrects the commands.
+    """
     from antares.gap import tracking_error
     from antares.sim import JOINTS
 
@@ -181,7 +223,8 @@ def replay_episode(ds: Dataset, episode: int, params=None) -> dict:
     with _ARM_LOCK:
         arm.apply(params)
         real_q = np.asarray(arm.real_q(ep))
-        sim_q = np.asarray(arm.replay(ep))
+        with _command_map(arm, command_map):
+            sim_q = np.asarray(arm.replay(ep))
         real_poses = np.asarray(arm.fk(real_q))
         sim_poses = np.asarray(arm.fk(sim_q))
         body_names = list(arm.body_names)
@@ -193,6 +236,7 @@ def replay_episode(ds: Dataset, episode: int, params=None) -> dict:
         "joints": list(JOINTS),
         "body_names": body_names,
         "params": params.to_dict(),
+        "command_map": None if command_map is None else command_map.to_dict(),
         "real_q": _rounded(np.degrees(real_q)),
         "sim_q": _rounded(np.degrees(sim_q)),
         "real_poses": _rounded(real_poses),
@@ -201,8 +245,9 @@ def replay_episode(ds: Dataset, episode: int, params=None) -> dict:
     }
 
 
-def score_episodes(params, episodes) -> Any:
-    """Aggregate GapReport of ``params`` over ``episodes`` using the shared Arm."""
+def score_episodes(params, episodes, command_map=None) -> Any:
+    """Aggregate GapReport of ``params`` (and ``command_map``) over ``episodes``
+    using the shared Arm."""
     from antares.gap import aggregate, tracking_error
     from antares.sim import JOINTS
 
@@ -212,7 +257,8 @@ def score_episodes(params, episodes) -> Any:
         arm.apply(params)
         for ep in episodes:
             real_q = np.asarray(arm.real_q(ep))
-            sim_q = np.asarray(arm.replay(ep))
+            with _command_map(arm, command_map):
+                sim_q = np.asarray(arm.replay(ep))
             reports.append(tracking_error(real_q, sim_q, joint_names=JOINTS))
     return aggregate(reports)
 
@@ -259,11 +305,12 @@ def get_baseline(ds: Dataset, lock_name: str | None):
     g = ds.joint_names.index("gripper") if "gripper" in ds.joint_names else -1
     thr = gripper_thresholds(np.concatenate([ep.action[:, g] for ep in ds.episodes]))
     eps = baseline_episodes(ds, lock)
+    cmap = command_map_from_lock(lock) if lock else None
     arm = get_arm()
-    with _ARM_LOCK:
+    with _ARM_LOCK, _command_map(arm, cmap):
         arm.apply(params)
         bl = residual_baseline(eps, arm, thr)
-    out = (bl, thr, params)
+    out = (bl, thr, params, cmap)
     with _BASELINES_LOCK:
         _BASELINES.setdefault(key, out)
         return _BASELINES[key]
@@ -272,9 +319,9 @@ def get_baseline(ds: Dataset, lock_name: str | None):
 def _episode_residual(ds: Dataset, ep: Episode, lock_name: str | None, z: float, min_frames: int):
     from antares.events import detect_events, residuals, validate_episode
 
-    bl, thr, params = get_baseline(ds, lock_name)
+    bl, thr, params, cmap = get_baseline(ds, lock_name)
     arm = get_arm()
-    with _ARM_LOCK:
+    with _ARM_LOCK, _command_map(arm, cmap):
         arm.apply(params)
         real_q = np.asarray(arm.real_q(ep))
         sim_q = np.asarray(arm.replay(ep))
@@ -324,7 +371,7 @@ def events_summary(ds: Dataset, lock_name: str | None = None, z: float = 4.0, mi
     """Detect events in every episode and score them against the gripper proxy label."""
     from antares.events import summarize_validation
 
-    bl, thr, params = get_baseline(ds, lock_name)
+    bl, thr, params, _ = get_baseline(ds, lock_name)
     held = set(bl.episodes)
     rows, vals = [], []
     for ep in ds.episodes:
@@ -442,8 +489,11 @@ def lock_summary(lock: dict) -> dict:
     }
 
 
-def build_lock(ds: Dataset, train: list, result, name: str | None):
-    """Make a RobotLock for a finished calibration (digest covers the train split)."""
+def build_lock(ds: Dataset, train: list, result, name: str | None, **sensor):
+    """Make a RobotLock for a finished calibration (digest covers the train split).
+
+    ``sensor`` carries ``command_map``/``dynamics_only`` for a sensor fit.
+    """
     from antares.lock import RobotLock
 
     return RobotLock.create(
@@ -452,6 +502,7 @@ def build_lock(ds: Dataset, train: list, result, name: str | None):
         train_episodes=train,
         result=result,
         name=name,
+        **sensor,
     )
 
 
@@ -522,6 +573,7 @@ def run_drift(
         scan = drift_scan(
             ds.episodes,
             lock,
+            simulate=lock_simulate(lock.to_dict()),
             window=window,
             step=step,
             max_evaluations=max_evaluations,
@@ -713,11 +765,19 @@ def run_calibration(
     per_joint_sigma0: float | None = None,
     on_progress: Callable[[Any], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
+    fit_sensor: bool = False,
+    sensor_mode: str = "sim",
 ) -> tuple[Any, dict, Path]:
     """Calibrate on ``ds``, save a lock, return (CalibrationResult, lock dict, path).
 
     ``per_joint`` adds the per-joint refinement stage after the shared fit,
     with its own evaluation budget and (optionally) CMA-ES step size.
+
+    With ``fit_sensor`` the arm's command map is fitted alongside the
+    dynamics (see :mod:`antares.sensor`) and stored in the lock, together
+    with the dynamics-only fit for comparison. ``sensor_mode`` is ``"sim"``
+    (fit through the sim, alternating) or ``"kinematic"`` (pre-fit from
+    still frames, then frozen).
     """
     from antares.calibrate import calibrate, split_episodes
 
@@ -731,6 +791,26 @@ def run_calibration(
         extra = {"per_joint": True, "per_joint_max_evaluations": int(per_joint_max_evaluations)}
         if per_joint_sigma0 is not None:
             extra["per_joint_sigma0"] = float(per_joint_sigma0)
+    if fit_sensor:
+        from antares.sensor import calibrate_with_sensor
+
+        out = calibrate_with_sensor(
+            train,
+            eval_,
+            start=default_params(),
+            max_evaluations=max_evaluations,
+            seed=seed,
+            on_progress=on_progress,
+            should_stop=should_stop,
+            mode=sensor_mode,
+            **extra,
+        )
+        lock = build_lock(
+            ds, train, out.result, name,
+            command_map={**out.command_map.to_dict(), "mode": sensor_mode},
+            dynamics_only=out.dynamics_only.to_dict(),
+        )
+        return out.result, lock.to_dict(), save_lock(lock)
     result = calibrate(
         train,
         eval_,
@@ -764,6 +844,8 @@ def _job_worker(job: Job, req: "CalibrateRequest") -> None:
             per_joint_max_evaluations=req.per_joint_max_evaluations,
             on_progress=on_progress,
             should_stop=job.stop.is_set,
+            fit_sensor=req.fit_sensor,
+            sensor_mode=req.sensor_mode,
         )
         result_d = result.to_dict()
         job.push({"type": "done", "lock": lock, "result": result_d})
@@ -816,6 +898,7 @@ def run_dr(
         on_progress=on_progress,
         should_stop=should_stop,
         on_fit=on_fit,
+        simulate=lock_simulate(lock),
     )
     if not results:
         raise HTTPException(status_code=409, detail="cancelled before the first fit finished")
@@ -888,8 +971,9 @@ def cross_matrix(
     if n_train < 1:
         raise HTTPException(status_code=400, detail="n_train must be >= 1")
     cols = list(locks) + ["default"]
-    col_params = [params_from_dict(load_lock_dict(n, lock_dir)["params"]) for n in locks]
-    col_params.append(default_params())
+    lock_dicts = [load_lock_dict(n, lock_dir) for n in locks]
+    col_params = [(params_from_dict(d["params"]), command_map_from_lock(d)) for d in lock_dicts]
+    col_params.append((default_params(), None))
 
     scores: list[list[float]] = []
     per_joint: list[list[dict]] = []
@@ -903,8 +987,8 @@ def cross_matrix(
                 f"n_train={n_train} + n_eval={n_eval} leaves no eval split",
             )
         row_s, row_j = [], []
-        for p in col_params:
-            rep = score_episodes(p, eval_)
+        for p, cmap in col_params:
+            rep = score_episodes(p, eval_, cmap)
             row_s.append(round(float(rep.overall_deg), ROUND))
             row_j.append({k: round(float(v), ROUND) for k, v in rep.per_joint_deg.items()})
         scores.append(row_s)
@@ -938,7 +1022,7 @@ def run_check(
         return np.asarray(arm.real_q(ep)), np.asarray(arm.replay(ep))
 
     try:
-        with _ARM_LOCK:
+        with _ARM_LOCK, _command_map(arm, command_map_from_lock(lock_d)):
             return check(
                 ds.episodes,
                 lock_d,
@@ -987,8 +1071,9 @@ def compensate_episode_dict(
     ep = find_episode(ds, episode)
     if params is None:
         params = default_params()
+    cmap = command_map_from_lock(load_lock_dict(lock)) if lock else None
     arm = get_arm()
-    with _ARM_LOCK:
+    with _ARM_LOCK, _command_map(arm, cmap):
         vmax = max_joint_velocity(ds.episodes, arm)
         rep = compensate_episode(arm, ep, params, method=method, real_vmax_deg_s=vmax)
         comp_poses = np.asarray(arm.fk(rep.q_sim_comp))
@@ -1032,7 +1117,7 @@ def compensate_heldout(ds: Dataset, lock_dict: dict, method: str = "ilc") -> dic
         raise HTTPException(status_code=400, detail=str(e))
     params = params_from_dict(lock_dict["params"])
     arm = get_arm()
-    with _ARM_LOCK:
+    with _ARM_LOCK, _command_map(arm, command_map_from_lock(lock_dict)):
         summary = compensate_episodes(arm, episodes, params, method=method)
     out = summary.to_dict()
     out.update(dataset=ds.repo_id, lock=lock_dict.get("name"), method=method, params=params.to_dict(),
@@ -1108,10 +1193,12 @@ def replay(
     baseline: int = 0,
 ) -> dict:
     ds = get_dataset(dataset)
-    params = None
+    params = cmap = None
     if lock and not baseline:
-        params = params_from_dict(load_lock_dict(lock)["params"])
-    out = replay_episode(ds, episode, params)
+        lock_d = load_lock_dict(lock)
+        params = params_from_dict(lock_d["params"])
+        cmap = command_map_from_lock(lock_d)
+    out = replay_episode(ds, episode, params, cmap)
     out["lock"] = lock if (lock and not baseline) else None
     return out
 
@@ -1121,6 +1208,9 @@ class ReplayRequest(BaseModel):
     episode: int
     # A value is a scalar or a per-joint list of 6, as SimParams.from_dict accepts.
     params: dict[str, float | list[float]]
+    # Optional {"gain": [6], "bias": [6]}, as a lock stores it (extra keys such
+    # as its "mode" are ignored); omitted means identity.
+    command_map: dict[str, Any] | None = None
 
 
 @app.post("/api/replay")
@@ -1129,9 +1219,15 @@ def replay_with_params(req: ReplayRequest) -> dict:
     ds = get_dataset(req.dataset)
     try:
         params = params_from_dict(req.params)
-    except (TypeError, ValueError) as e:
+        cmap = command_map_from_lock({"command_map": req.command_map})
+    except (TypeError, ValueError, KeyError) as e:
         raise HTTPException(status_code=400, detail=f"bad params: {e}")
-    out = replay_episode(ds, req.episode, params)
+    if cmap is not None and cmap.gain.shape != (len(ds.joint_names),):
+        raise HTTPException(
+            status_code=400,
+            detail=f"bad params: command_map needs {len(ds.joint_names)} gains and biases, got {cmap.gain.shape}",
+        )
+    out = replay_episode(ds, req.episode, params, cmap)
     out["lock"] = None
     return out
 
@@ -1189,6 +1285,8 @@ class CalibrateRequest(BaseModel):
     # demo stays at ~150 evaluations.
     per_joint: bool = False
     per_joint_max_evaluations: int = Field(600, ge=1)
+    fit_sensor: bool = False
+    sensor_mode: Literal["sim", "kinematic"] = "sim"
 
 
 @app.post("/api/calibrate")

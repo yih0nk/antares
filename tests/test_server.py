@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import json
+import time
 import sys
 import types
 from dataclasses import dataclass, field
 
 import numpy as np
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from antares import server
@@ -48,8 +50,28 @@ class FakeParams:
         return cls()
 
 
+class FakeCommandMap:
+    def __init__(self, gain, bias):
+        self.gain, self.bias = np.asarray(gain, float), np.asarray(bias, float)
+
+    @classmethod
+    def identity(cls):
+        return cls(np.ones(6), np.zeros(6))
+
+    @classmethod
+    def from_dict(cls, d):
+        return cls.identity() if d is None else cls(d["gain"], d["bias"])
+
+    def to_dict(self):
+        return {"gain": self.gain.tolist(), "bias": self.bias.tolist()}
+
+    def apply(self, u):
+        return np.asarray(u) * self.gain + self.bias
+
+
 class FakeArm:
     body_names = BODIES
+    command_map = None
 
     def __init__(self, params=None, unit_map=None):
         self.params = params or FakeParams()
@@ -64,7 +86,8 @@ class FakeArm:
 
     def replay(self, ep):
         # error that shrinks as kp grows, so calibrated params "help"
-        return np.radians(ep.action) + 0.1 / self.params.kp
+        action = ep.action if self.command_map is None else self.command_map.apply(ep.action)
+        return np.radians(action) + 0.1 / self.params.kp
 
     def fk(self, q):
         T = len(q)
@@ -173,12 +196,15 @@ class FakeLock:
     result: FakeResult
     created_at: str
     antares_version: str
+    command_map: dict | None = None
+    dynamics_only: dict | None = None
 
     @classmethod
-    def create(cls, dataset, robot_type, train_episodes, result, name=None):
+    def create(cls, dataset, robot_type, train_episodes, result, name=None,
+               command_map=None, dynamics_only=None):
         return cls(name or dataset.replace("/", "__"), dataset, robot_type,
                    f"digest-of-{len(list(train_episodes))}", result.params, result,
-                   "2026-10-17T12:00:00Z", "0.0.1")
+                   "2026-10-17T12:00:00Z", "0.0.1", command_map, dynamics_only)
 
     def to_dict(self):
         return {
@@ -186,6 +212,8 @@ class FakeLock:
             "data_sha256": self.data_sha256, "params": self.params.to_dict(),
             "result": self.result.to_dict(), "created_at": self.created_at,
             "antares_version": self.antares_version,
+            **({"command_map": self.command_map} if self.command_map is not None else {}),
+            **({"dynamics_only": self.dynamics_only} if self.dynamics_only is not None else {}),
         }
 
     def save(self, path=None):
@@ -291,7 +319,7 @@ def make_dataset(repo_id: str, n_episodes: int = 6, T: int = 20, offset: float =
 @pytest.fixture
 def fakes(monkeypatch, tmp_path):
     """Stub the sibling modules, inject a dataset, and point locks at tmp."""
-    sim = _module("antares.sim", JOINTS=JOINTS, SimParams=FakeParams, Arm=FakeArm,
+    sim = _module("antares.sim", JOINTS=JOINTS, SimParams=FakeParams, Arm=FakeArm, CommandMap=FakeCommandMap,
                   MODEL_PATH=tmp_path / "so101.xml",
                   model_geometry=lambda model=None: {"bodies": [], "geoms": [], "joints": []})
     gap = _module("antares.gap", GapReport=FakeGap, tracking_error=fake_tracking_error,
@@ -329,12 +357,15 @@ def client():
     return TestClient(server.app)
 
 
-def write_lock(tmp_path, name, kp=50.0, dataset=FAKE_DS):
+def write_lock(tmp_path, name, kp=50.0, dataset=FAKE_DS, command_map=None):
     d = tmp_path / "locks"
     d.mkdir(exist_ok=True)
     lock = FakeLock(name, dataset, "so101_follower", "abc", FakeParams(kp=kp),
                     FakeResult(FakeParams(kp=kp), FakeParams()), "2026-10-17T00:00:00+00:00", "0.0.1")
-    (d / f"{name}{LOCK_SUFFIX}").write_text(json.dumps(lock.to_dict()))
+    body = lock.to_dict()
+    if command_map is not None:
+        body["command_map"] = command_map
+    (d / f"{name}{LOCK_SUFFIX}").write_text(json.dumps(body))
     return lock
 
 
@@ -1293,3 +1324,122 @@ def test_events_summary_endpoint(client, pick):
     assert s["energy_in_grasp_fraction"] > s["chance"] and s["lift"] > 1.0
     assert out["summary_held_out"]["n_episodes"] == 4
     assert client.get("/api/events", params={"dataset": PICK_DS, "lock": "ghost"}).status_code == 404
+
+
+SHIFT_MAP = {"gain": [1.0] * 6, "bias": [-2.0] * 6}  # FAKE_DS2 state = action - 2
+
+
+def test_replay_uses_lock_command_map(client, fakes):
+    write_lock(fakes, "unit-b", kp=50.0, dataset=FAKE_DS2, command_map=SHIFT_MAP)
+    write_lock(fakes, "unit-b-plain", kp=50.0, dataset=FAKE_DS2)
+    q = {"dataset": FAKE_DS2, "episode": 0}
+    mapped = client.get("/api/replay", params={**q, "lock": "unit-b"}).json()
+    plain = client.get("/api/replay", params={**q, "lock": "unit-b-plain"}).json()
+    assert mapped["command_map"] == SHIFT_MAP
+    assert plain["command_map"] is None
+    assert mapped["gap"]["overall_deg"] < 0.5 * plain["gap"]["overall_deg"]
+    # a later plain replay resets the shared arm to identity
+    again = client.get("/api/replay", params={**q, "lock": "unit-b-plain"}).json()
+    assert again["gap"]["overall_deg"] == plain["gap"]["overall_deg"]
+
+
+def test_post_replay_accepts_command_map(client, fakes):
+    body = {"dataset": FAKE_DS2, "episode": 0, "params": FakeParams(kp=50.0).to_dict()}
+    plain = client.post("/api/replay", json=body).json()
+    mapped = client.post("/api/replay", json={**body, "command_map": SHIFT_MAP}).json()
+    assert mapped["command_map"] == SHIFT_MAP
+    assert mapped["gap"]["overall_deg"] < plain["gap"]["overall_deg"]
+    bad = client.post("/api/replay", json={**body, "command_map": {"gain": [1.0] * 6}})
+    assert bad.status_code == 400
+    # the map exactly as a sensor-fitted lock stores it, "mode" and all
+    as_saved = client.post("/api/replay", json={**body, "command_map": {**SHIFT_MAP, "mode": "sim"}})
+    assert as_saved.status_code == 200 and as_saved.json()["command_map"] == SHIFT_MAP
+    # a wrong-length map is a 400, not a 500 from inside the sim
+    short = client.post("/api/replay", json={**body, "command_map": {"gain": [1.0] * 3, "bias": [0.0] * 3}})
+    assert short.status_code == 400 and "command_map" in short.json()["detail"]
+
+
+def test_cross_matrix_uses_command_map(client, fakes):
+    write_lock(fakes, "unit-b", kp=50.0, dataset=FAKE_DS2, command_map=SHIFT_MAP)
+    write_lock(fakes, "unit-b-plain", kp=50.0, dataset=FAKE_DS2)
+    m = server.cross_matrix([FAKE_DS2], ["unit-b", "unit-b-plain"], n_train=4, n_eval=2)
+    mapped, plain, _ = m["scores"][0]
+    assert mapped < plain
+
+
+def test_calibrate_with_fit_sensor_saves_command_map(client, fakes, monkeypatch):
+    calls = {}
+
+    def fake_calibrate_with_sensor(train, eval, **kw):
+        calls.update(kw)
+        res = fake_calibrate(train, eval, **{k: v for k, v in kw.items() if k != "mode"})
+        return types.SimpleNamespace(
+            result=res,
+            command_map=FakeCommandMap(np.ones(6), np.full(6, -2.0)),
+            dynamics_only=FakeResult(FakeParams(kp=40.0), FakeParams(), eval_score=2.0),
+        )
+
+    monkeypatch.setitem(sys.modules, "antares.sensor",
+                        _module("antares.sensor", calibrate_with_sensor=fake_calibrate_with_sensor))
+    result, lock, path = server.run_calibration(
+        server.get_dataset(FAKE_DS2), n_train=4, n_eval=2, name="unit-b", fit_sensor=True)
+    assert calls["max_evaluations"] == 150 and calls["mode"] == "sim"
+    assert lock["command_map"] == {**SHIFT_MAP, "mode": "sim"}
+    assert lock["dynamics_only"]["eval_score"] == 2.0
+    saved = json.loads(path.read_text())
+    assert saved["command_map"]["bias"] == SHIFT_MAP["bias"]
+    replay = client.get("/api/replay", params={"dataset": FAKE_DS2, "episode": 0, "lock": "unit-b"}).json()
+    assert replay["command_map"] == SHIFT_MAP
+
+
+def test_calibrate_request_forwards_fit_sensor(client, fakes, monkeypatch):
+    seen = {}
+
+    def spy(ds, **kw):
+        seen.update(kw)
+        raise HTTPException(status_code=400, detail="stop here")
+
+    monkeypatch.setattr(server, "run_calibration", spy)
+    assert client.post("/api/calibrate", json={"dataset": FAKE_DS, "sensor_mode": "bogus"}).status_code == 422
+    job = client.post("/api/calibrate", json={"dataset": FAKE_DS, "fit_sensor": True,
+                                              "sensor_mode": "kinematic"}).json()["job_id"]
+    for _ in range(100):
+        if client.get(f"/api/calibrate/{job}").json()["status"] != "running":
+            break
+        time.sleep(0.01)
+    assert seen["fit_sensor"] is True and seen["sensor_mode"] == "kinematic"
+
+
+def test_check_uses_lock_command_map(client, fakes):
+    write_lock(fakes, "unit-b", kp=50.0, dataset=FAKE_DS2, command_map=SHIFT_MAP)
+    write_lock(fakes, "unit-b-plain", kp=50.0, dataset=FAKE_DS2)
+    mapped = client.post("/api/check", json={"dataset": FAKE_DS2, "lock": "unit-b"}).json()
+    plain = client.post("/api/check", json={"dataset": FAKE_DS2, "lock": "unit-b-plain"}).json()
+    assert mapped["score"] < 0.5 * plain["score"]
+    assert mapped["passed"] is True and plain["passed"] is False
+
+
+def test_residual_uses_lock_command_map(client, pick):
+    elbow_up = {"gain": [1.0] * 6, "bias": [0.0, 0.0, 2.0, 0.0, 0.0, 0.0]}
+    write_lock(pick, "unit-a", kp=50.0, dataset=PICK_DS)
+    write_lock(pick, "unit-a-mapped", kp=50.0, dataset=PICK_DS, command_map=elbow_up)
+    q = {"dataset": PICK_DS, "episode": 1}
+    plain = np.asarray(client.get("/api/residual", params={**q, "lock": "unit-a"}).json()["residual"])
+    mapped = np.asarray(client.get("/api/residual", params={**q, "lock": "unit-a-mapped"}).json()["residual"])
+    np.testing.assert_allclose(mapped[:, 2], plain[:, 2] - 2.0, atol=1e-3)
+    np.testing.assert_allclose(mapped[:, :2], plain[:, :2], atol=1e-9)
+
+
+def test_lock_simulate_holds_the_lock_command_map():
+    """Real MuJoCo: drift and DR refits replay a mapped lock with its map."""
+    from antares.sim import SimParams
+
+    assert server.lock_simulate({"params": {}}) is None
+    sim = server.lock_simulate({"command_map": {"gain": [1.0] * 6, "bias": [0.0, 5.0, 0.0, 0.0, 0.0, 0.0]}})
+    T = 30
+    action = np.zeros((T, 6))
+    action[:, 1] = 20.0
+    ep = Episode(index=0, fps=30.0, joint_names=JOINTS, state=np.zeros((T, 6)), action=action)
+    _, mapped = sim(SimParams(), ep)
+    plain = server.lock_simulate({"command_map": {"gain": [1.0] * 6, "bias": [0.0] * 6}})(SimParams(), ep)[1]
+    assert mapped[-1, 1] > plain[-1, 1]

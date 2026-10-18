@@ -225,6 +225,52 @@ class UnitMap:
         )
 
 
+@dataclass(frozen=True, eq=False)
+class CommandMap:
+    """Per-joint correction applied to commands before :class:`UnitMap`:
+    ``u' = gain*u + bias``, in dataset units.
+
+    In teleoperated LeRobot data the commands are the leader arm's readings
+    in the leader's own calibration, while the state is the follower's in
+    its own, so the two are normalized separately and need not agree. This
+    map captures that per-arm disagreement; identity is the old behaviour.
+    """
+
+    gain: np.ndarray  # (6,)
+    bias: np.ndarray  # (6,) dataset units
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "gain", np.asarray(self.gain, dtype=np.float64))
+        object.__setattr__(self, "bias", np.asarray(self.bias, dtype=np.float64))
+        if self.gain.shape != self.bias.shape:
+            raise ValueError("gain and bias must have the same shape")
+
+    @classmethod
+    def identity(cls, n: int = len(JOINTS)) -> CommandMap:
+        return cls(gain=np.ones(n), bias=np.zeros(n))
+
+    def is_identity(self) -> bool:
+        return bool(np.all(self.gain == 1.0) and np.all(self.bias == 0.0))
+
+    def apply(self, u: np.ndarray) -> np.ndarray:
+        """Correct raw command units. (6,) or (T,6)."""
+        return np.asarray(u, dtype=np.float64) * self.gain + self.bias
+
+    def invert(self, u: np.ndarray) -> np.ndarray:
+        """Corrected units -> raw command units (inverse of :meth:`apply`)."""
+        return (np.asarray(u, dtype=np.float64) - self.bias) / self.gain
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"gain": self.gain.tolist(), "bias": self.bias.tolist()}
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any] | None) -> CommandMap:
+        """``None`` (e.g. a lock saved before command maps existed) is identity."""
+        if d is None:
+            return cls.identity()
+        return cls(gain=np.asarray(d["gain"], dtype=np.float64), bias=np.asarray(d["bias"], dtype=np.float64))
+
+
 def load_model(path: str | Path = MODEL_PATH) -> mujoco.MjModel:
     return mujoco.MjModel.from_xml_path(str(path))
 
@@ -256,6 +302,7 @@ class Arm:
         unit_map: UnitMap | None = None,
         contacts: bool = False,
         model_path: str | Path | None = None,
+        command_map: CommandMap | None = None,
     ):
         self.model_path = Path(model_path) if model_path is not None else MODEL_PATH
         self.model = load_model(self.model_path)
@@ -264,6 +311,7 @@ class Arm:
         self.data = mujoco.MjData(self.model)
         self._fk_data = mujoco.MjData(self.model)
         self.unit_map = unit_map if unit_map is not None else UnitMap.from_model(self.model)
+        self.command_map = command_map if command_map is not None else CommandMap.identity()
         self.body_names: list[str] = [
             mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY, i) for i in range(self.model.nbody)
         ]
@@ -350,16 +398,17 @@ class Arm:
         """Drive the sim with the episode's commands; return sim joint angles (T,6) rad.
 
         Frame 0 is the real initial state (the sim starts there, at rest).
-        For each later frame the command from ``latency_frames`` frames ago
-        is applied (per joint, when latency is per joint) and the physics is
-        advanced one dataset frame. This is :meth:`rollout` with the episode's
-        own commands and initial state.
+        Commands pass through ``command_map`` first. For each later frame the
+        command from ``latency_frames`` frames ago is applied (per joint, when
+        latency is per joint) and the physics is advanced one dataset frame.
+        This is :meth:`rollout` with the episode's own commands and initial
+        state.
         """
         fps = float(fps if fps is not None else episode.fps)
         nq = self.model.nq
         if episode.state.shape[1] != nq or episode.action.shape[1] != nq:
             raise ValueError("episode must have 6 joints")
-        ctrl = self.unit_map.to_rad(episode.action)
+        ctrl = self.unit_map.to_rad(self.command_map.apply(episode.action))
         q0 = self.unit_map.to_rad(episode.state[0])
         return self.rollout(ctrl, q0, fps)
 
