@@ -1345,3 +1345,10 @@ def test_post_replay_accepts_command_map(client, fakes):
     bad = client.post("/api/replay", json={**body, "command_map": {"gain": [1.0] * 6}})
     assert bad.status_code == 400
 
+
+def test_cross_matrix_uses_command_map(client, fakes):
+    write_lock(fakes, "unit-b", kp=50.0, dataset=FAKE_DS2, command_map=SHIFT_MAP)
+    write_lock(fakes, "unit-b-plain", kp=50.0, dataset=FAKE_DS2)
+    m = server.cross_matrix([FAKE_DS2], ["unit-b", "unit-b-plain"], n_train=4, n_eval=2)
+    mapped, plain, _ = m["scores"][0]
+    assert mapped < plain

@@ -922,8 +922,9 @@ def cross_matrix(
     if n_train < 1:
         raise HTTPException(status_code=400, detail="n_train must be >= 1")
     cols = list(locks) + ["default"]
-    col_params = [params_from_dict(load_lock_dict(n, lock_dir)["params"]) for n in locks]
-    col_params.append(default_params())
+    lock_dicts = [load_lock_dict(n, lock_dir) for n in locks]
+    col_params = [(params_from_dict(d["params"]), command_map_from_lock(d)) for d in lock_dicts]
+    col_params.append((default_params(), None))
 
     scores: list[list[float]] = []
     per_joint: list[list[dict]] = []
@@ -937,8 +938,8 @@ def cross_matrix(
                 f"n_train={n_train} + n_eval={n_eval} leaves no eval split",
             )
         row_s, row_j = [], []
-        for p in col_params:
-            rep = score_episodes(p, eval_)
+        for p, cmap in col_params:
+            rep = score_episodes(p, eval_, cmap)
             row_s.append(round(float(rep.overall_deg), ROUND))
             row_j.append({k: round(float(v), ROUND) for k, v in rep.per_joint_deg.items()})
         scores.append(row_s)
