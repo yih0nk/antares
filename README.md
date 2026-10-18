@@ -814,7 +814,10 @@ back in raw units), `export` (in the sidecar) and the drift and DR refits
 | Path | What |
 |---|---|
 | `antares/data.py` | LeRobot dataset loader (tabular only) |
+| `antares/validate.py` | Dataset checks shared by upload, `inspect` and the fleet scan |
+| `antares/robots.py` | Registry of simulator models (`so101`, `so100`) |
 | `antares/sim.py` | MuJoCo model, unit mapping, replay and rollout |
+
 | `antares/calibrate.py` | CMA-ES parameter fit |
 | `antares/sensor.py` | Per-joint command offset/scale fit |
 | `antares/gap.py` | Tracking-error metrics |
