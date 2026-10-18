@@ -50,6 +50,24 @@ ParamValue = Scalar | PerJoint
 
 #: Fields that are integers (dataset frames) rather than physical quantities.
 INT_FIELDS = frozenset({"latency_frames"})
+#: Fields that name a model rather than hold a number (never per joint).
+STR_FIELDS = frozenset({"servo"})
+
+#: Actuator models :attr:`SimParams.servo` can select. ``position`` is
+#: MuJoCo's ideal position actuator (``kp``, ``kv``, ``forcerange``);
+#: ``sts3215`` is the Feetech STS3215's firmware and DC motor as identified on
+#: a test bench by BAM (Rhoban, https://bam.readthedocs.io), see
+#: :meth:`SimParams.sts3215`.
+SERVOS = ("position", "sts3215")
+
+#: Duty cycle per (firmware P coefficient x radian of error) of the STS3215,
+#: measured by BAM with an oscilloscope (``error_gain`` in bam/feetech).
+STS3215_ERROR_GAIN = 0.166
+#: Largest duty cycle the STS3215's H-bridge reaches (BAM, oscilloscope).
+STS3215_MAX_PWM = 0.97
+#: Servo-model fields; written to a lock only when :attr:`SimParams.servo` is
+#: not ``position``.
+SERVO_FIELDS = ("servo_gain", "p_coefficient", "vin", "kt", "resistance", "max_velocity")
 
 
 def _coerce(name: str, value: Any) -> ParamValue:
@@ -57,8 +75,12 @@ def _coerce(name: str, value: Any) -> ParamValue:
 
     The tuple's length is checked against the robot when the parameters are
     applied (:meth:`Arm.apply`), not here: a ``SimParams`` does not know
-    which arm it is for.
+    which arm it is for. ``servo`` (:data:`STR_FIELDS`) stays a string.
     """
+    if name in STR_FIELDS:
+        if not isinstance(value, str):
+            raise TypeError(f"{name}: expected a string, got {type(value).__name__}")
+        return value
     as_int = name in INT_FIELDS
     if isinstance(value, (list, tuple, np.ndarray)) and np.ndim(value) > 0:
         arr = np.asarray(value, dtype=np.float64).reshape(-1)
@@ -96,6 +118,12 @@ class SimParams:
     the factor's own hook. Built-in parameters never go there.
     """
 
+    #: Position-actuator gain, velocity gain and symmetric force limit (N*m).
+    #: With a servo model (:attr:`servo` not ``position``) these three are
+    #: *derived*: they always hold the model's PD equivalent (see
+    #: :meth:`linearized`), and any value passed for them is replaced, so a
+    #: consumer that does not know the servo model (an older antares, the
+    #: fleet table, :mod:`antares.sag`) still reads the right stiffness.
     kp: ParamValue = 998.22
     kv: ParamValue = 2.731
     damping: ParamValue = 0.6
@@ -117,6 +145,33 @@ class SimParams:
     #: moving one trails by it, so the error flips sign with the motion. 0 is
     #: the stock smooth actuator.
     deadband: ParamValue = 0.0
+    #: Actuator model, one of :data:`SERVOS`. With ``sts3215`` the servo is
+    #: simulated as its firmware and motor instead of a position actuator:
+    #: the firmware moves an internal target toward the command at most at
+    #: ``max_velocity``, its P loop turns the error into a PWM duty cycle
+    #: ``clip(error * p_coefficient * STS3215_ERROR_GAIN * servo_gain, +-STS3215_MAX_PWM)``,
+    #: and the motor pushes ``kt / resistance * (vin * duty - kt * qvel)``
+    #: (back-EMF makes it weaker the faster it turns). ``kp``, ``kv`` and
+    #: ``forcerange`` are then derived from the motor constants (the PD
+    #: equivalent, :meth:`linearized`) rather than fitted; ``damping``,
+    #: ``armature`` and ``frictionloss`` stay the joint's viscous friction,
+    #: rotor inertia and Coulomb friction, which is BAM's M1 friction model.
+    servo: str = "position"
+    #: Multiplies the firmware's position-to-duty gain (BAM's
+    #: ``error_gain_ratio``; 1.005 on BAM's bench). What the data has to pin
+    #: for an STS3215 instead of ``kp``: it lumps supply sag and unit spread.
+    servo_gain: ParamValue = 1.0
+    #: Firmware P coefficient written to the servo. LeRobot writes 16 to SO-100
+    #: and SO-101 followers (``position_p_coefficient``); the factory value is 32.
+    p_coefficient: ParamValue = 16.0
+    #: Supply voltage (V); the SO-101 follower's STS3215s are the 7.4 V kind.
+    vin: ParamValue = 7.4
+    #: Motor torque constant at the output shaft (N*m/A, also V*s/rad), BAM.
+    kt: ParamValue = 1.1776311631627974
+    #: Motor winding resistance (ohm), BAM.
+    resistance: ParamValue = 2.478681934101461
+    #: Rate limit of the firmware's internal target (rad/s), BAM.
+    max_velocity: ParamValue = 5.2883481319359
     extra: tuple[tuple[str, ParamValue], ...] = ()
 
     def __post_init__(self) -> None:
@@ -135,6 +190,16 @@ class SimParams:
             raise ValueError("gravity_scale must be >= 0")
         if np.any(self.per_joint("deadband") < 0):
             raise ValueError("deadband must be >= 0")
+        if self.servo not in SERVOS:
+            raise ValueError(f"servo must be one of {', '.join(SERVOS)}, got {self.servo!r}")
+        for n in ("vin", "kt", "resistance", "max_velocity"):
+            if np.any(self.per_joint(n) <= 0):
+                raise ValueError(f"{n} must be > 0")
+        if np.any(self.per_joint("servo_gain") < 0) or np.any(self.per_joint("p_coefficient") < 0):
+            raise ValueError("servo_gain and p_coefficient must be >= 0")
+        if self.uses_servo_model:
+            for name, value in self._pd_equivalent().items():
+                object.__setattr__(self, name, value)
 
     def __getattr__(self, name: str) -> Any:
         # Only reached when normal lookup fails: extra factor values read like fields.
@@ -152,6 +217,72 @@ class SimParams:
     @classmethod
     def default(cls) -> SimParams:
         return cls()
+
+    @classmethod
+    def sts3215(cls, **changes: Any) -> SimParams:
+        """The STS3215 servo model with BAM's bench-identified values.
+
+        BAM fitted a 7.4 V STS3215 on a pendulum bench (``feetech_sts3215_7_4V``,
+        friction model ``m1``, https://github.com/Rhoban/bam, Apache-2.0):
+        torque constant, resistance, gain ratio, rate limit, rotor inertia
+        (``armature``), Coulomb (``frictionloss``) and viscous (``damping``)
+        friction. ``p_coefficient`` is LeRobot's 16, not BAM's bench value of
+        32. ``changes`` override any field. At these values the servo is as
+        stiff as a position actuator with ``kp`` about 9.4 (see
+        :meth:`linearized`).
+        """
+        base = dict(
+            servo="sts3215",
+            servo_gain=1.0049367060648848,
+            armature=0.02608291141307205,
+            frictionloss=0.05152047758105413,
+            damping=0.05989161871380604,
+        )
+        return cls(**{**base, **changes})
+
+    @property
+    def uses_servo_model(self) -> bool:
+        return self.servo != "position"
+
+    def _pd_equivalent(self) -> dict[str, ParamValue]:
+        """``kp``, ``kv`` and ``forcerange`` of the servo model's linear part.
+
+        Away from saturation and the rate limit the STS3215 model is a PD
+        servo: ``kp = kt / resistance * vin * p_coefficient * STS3215_ERROR_GAIN
+        * servo_gain`` and ``kv = kt**2 / resistance`` (back-EMF), with a stall
+        torque of ``kt / resistance * vin * STS3215_MAX_PWM`` as ``forcerange``.
+        Each is per joint exactly when a servo field it depends on is.
+        """
+        kt, r, vin = self.per_joint("kt"), self.per_joint("resistance"), self.per_joint("vin")
+        kp = kt / r * vin * self.per_joint("p_coefficient") * STS3215_ERROR_GAIN * self.per_joint("servo_gain")
+        kv = kt**2 / r
+        fr = kt / r * vin * STS3215_MAX_PWM
+
+        def pack(a: np.ndarray, *deps: str) -> ParamValue:
+            if any(self.is_per_joint(d) for d in deps):
+                return tuple(float(v) for v in a)
+            return float(a[0])
+
+        return {
+            "kp": pack(kp, "kt", "resistance", "vin", "p_coefficient", "servo_gain"),
+            "kv": pack(kv, "kt", "resistance"),
+            "forcerange": pack(fr, "kt", "resistance", "vin"),
+        }
+
+    def linearized(self) -> SimParams:
+        """Position-actuator equivalent of the servo model (``self`` if there is none).
+
+        A servo-model ``SimParams`` already carries its PD equivalent in
+        ``kp``, ``kv`` and ``forcerange`` (:meth:`_pd_equivalent`); this
+        drops the servo model and its fields so the result replays as that
+        position actuator. This is what an MJCF can carry; the rate limit
+        and the duty-cycle (rather than torque) saturation are lost.
+        """
+        if not self.uses_servo_model:
+            return self
+        return self.replace(
+            servo="position", **{n: SimParams.__dataclass_fields__[n].default for n in SERVO_FIELDS}
+        )
 
     @classmethod
     def from_model(cls, model: mujoco.MjModel, latency_frames: int = 0) -> SimParams:
@@ -174,8 +305,9 @@ class SimParams:
 
     @classmethod
     def field_names(cls) -> tuple[str, ...]:
-        """The built-in parameters (not ``extra``)."""
-        return tuple(f.name for f in fields(cls) if f.name != "extra")
+        """The built-in numeric parameters (everything :meth:`per_joint`
+        accepts): not ``extra``, and not ``servo``, which names the actuator model."""
+        return tuple(f.name for f in fields(cls) if f.name != "extra" and f.name not in STR_FIELDS)
 
     def names(self) -> tuple[str, ...]:
         """Built-in parameters, then this instance's extra factors."""
@@ -201,6 +333,8 @@ class SimParams:
         ``n`` defaults to the tuple's own length, or :data:`N_JOINTS` for a
         scalar; a tuple of another length than ``n`` is an error.
         """
+        if name in STR_FIELDS:
+            raise ValueError(f"{name} is not a numeric parameter")
         v = getattr(self, name)
         dtype = np.int64 if name in INT_FIELDS else np.float64
         if isinstance(v, tuple):
@@ -210,10 +344,10 @@ class SimParams:
         return np.full(N_JOINTS if n is None else n, v, dtype=dtype)
 
     def broadcast(self, n: int | None = None) -> SimParams:
-        """Copy with every field in per-joint form; replays identically."""
+        """Copy with every numeric field in per-joint form; replays identically."""
         core = {k: tuple(self.per_joint(k, n).tolist()) for k in self.field_names()}
         extra = {k: tuple(self.per_joint(k, n).tolist()) for k, _ in self.extra}
-        return SimParams(**core, extra=extra)
+        return SimParams(servo=self.servo, **core, extra=extra)
 
     # -- serialization ------------------------------------------------------
 
@@ -224,17 +358,26 @@ class SimParams:
         ``gravity_scale`` and ``deadband`` are left out at their scalar
         defaults (1.0 and 0), so locks fitted without them serialize exactly
         as before; in per-joint form they are always written, so
-        :meth:`broadcast` round-trips through :meth:`from_dict`.
+        :meth:`broadcast` round-trips through :meth:`from_dict`. ``servo`` and
+        the servo-model fields (:data:`SERVO_FIELDS`) are written only when a
+        servo model is selected (or, like the others, in per-joint form), so
+        position-actuator locks are unchanged. A servo-model dict also carries
+        the derived ``kp``/``kv``/``forcerange``, so a reader that drops the
+        unknown servo keys gets the PD equivalent, not the stock actuator.
         """
         out: dict[str, Any] = {}
         for n in self.names():
             v = getattr(self, n)
+            if n in SERVO_FIELDS and not self.uses_servo_model and not isinstance(v, tuple):
+                continue
             if isinstance(v, tuple):
                 out[n] = list(v)
             elif (n == "gravity_scale" and v == 1.0) or (n == "deadband" and v == 0.0):
                 continue
             else:
                 out[n] = v
+        if self.uses_servo_model:
+            out["servo"] = self.servo
         return out
 
     @classmethod
@@ -251,7 +394,7 @@ class SimParams:
         """
         from antares import factors
 
-        known = set(cls.field_names())
+        known = set(cls.field_names()) | STR_FIELDS
         core = {k: v for k, v in d.items() if k in known}
         extra = {k: v for k, v in d.items() if k not in known and factors.is_extra(k)}
         unknown = [k for k in d if k not in known and k not in extra]
@@ -264,7 +407,7 @@ class SimParams:
         return cls(**core, extra=extra)
 
     def replace(self, **changes: Any) -> SimParams:
-        known = set(self.field_names())
+        known = set(self.field_names()) | STR_FIELDS
         core = {k: v for k, v in changes.items() if k in known}
         rest = {k: v for k, v in changes.items() if k not in known}
         if "extra" in rest:
@@ -646,31 +789,35 @@ class Arm:
         the frictionloss and limit constraints), so they are recomputed with
         ``mj_setConst``; the result is then identical to a model compiled
         with these values.
+
+        With a servo model (``params.servo != "position"``) the position
+        actuators carry the servo's linear part (:meth:`SimParams.linearized`:
+        P loop and back-EMF, so MuJoCo integrates the back-EMF implicitly)
+        with no force or control limit; :meth:`rollout` feeds them a control
+        that reproduces the firmware's rate limit and duty-cycle saturation.
         """
         m = self.model
         n = self.n_joints
-        kp = params.per_joint("kp", n)
-        fr = params.per_joint("forcerange", n)
-        kv = params.per_joint("kv", n)
-        if self._identity_map:
-            m.actuator_gainprm[:, 0] = kp
-            m.actuator_biasprm[:, 1] = -kp
-            m.actuator_biasprm[:, 2] = -kv
-            m.actuator_forcerange[:, 0] = -fr
-            m.actuator_forcerange[:, 1] = fr
-            m.dof_damping[:] = params.per_joint("damping", n)
-            m.dof_armature[:] = params.per_joint("armature", n)
-            m.dof_frictionloss[:] = params.per_joint("frictionloss", n)
+        a, d = self.actuator_ids, self.dof_ids
+        lin = params.linearized()
+        kp = lin.per_joint("kp", n)
+        kv = lin.per_joint("kv", n)
+        fr = lin.per_joint("forcerange", n)
+        if params.uses_servo_model:
+            fr = np.full_like(fr, 1e9)
+            m.actuator_ctrlrange[a, 0] = -1e3
+            m.actuator_ctrlrange[a, 1] = 1e3
         else:
-            a, d = self.actuator_ids, self.dof_ids
-            m.actuator_gainprm[a, 0] = kp
-            m.actuator_biasprm[a, 1] = -kp
-            m.actuator_biasprm[a, 2] = -kv
-            m.actuator_forcerange[a, 0] = -fr
-            m.actuator_forcerange[a, 1] = fr
-            m.dof_damping[d] = params.per_joint("damping", n)
-            m.dof_armature[d] = params.per_joint("armature", n)
-            m.dof_frictionloss[d] = params.per_joint("frictionloss", n)
+            m.actuator_ctrlrange[a, 0] = self._ctrl_lo
+            m.actuator_ctrlrange[a, 1] = self._ctrl_hi
+        m.actuator_gainprm[a, 0] = kp
+        m.actuator_biasprm[a, 1] = -kp
+        m.actuator_biasprm[a, 2] = -kv
+        m.actuator_forcerange[a, 0] = -fr
+        m.actuator_forcerange[a, 1] = fr
+        m.dof_damping[d] = params.per_joint("damping", n)
+        m.dof_armature[d] = params.per_joint("armature", n)
+        m.dof_frictionloss[d] = params.per_joint("frictionloss", n)
         m.opt.gravity[:] = self._base_gravity * params.per_joint("gravity_scale", n)[0]
         self._apply_extras(params)
         mujoco.mj_setConst(m, self.data)  # ~20 us; uses self.data as scratch
@@ -847,7 +994,9 @@ class Arm:
             dctrl = d.ctrl
             sim_q[0] = qpos if self._identity_map else qpos[qi]
             band = self.params.per_joint("deadband", nq)
-            if not np.any(band):
+            if self.params.uses_servo_model:
+                self._servo_steps(ctrl, sim_q, n_sub, band)
+            elif not np.any(band):
                 if self._identity_map:
                     for t in range(1, T):
                         dctrl[:] = ctrl[t]
@@ -882,6 +1031,46 @@ class Arm:
         finally:
             m.opt.timestep = old_dt
         return sim_q
+
+    def _servo_steps(self, ctrl: np.ndarray, sim_q: np.ndarray, n_sub: int, band: np.ndarray) -> None:
+        """Advance frames ``1..T-1`` with the STS3215 servo model (see :attr:`SimParams.servo`).
+
+        Runs inside :meth:`rollout` after the reset, so ``sim_q[0]`` is set
+        and ``m.opt.timestep`` is the substep. Every substep the firmware's
+        internal target moves toward the latency-shifted command by at most
+        ``max_velocity * dt``; the (deadband-shrunk) error to it is clipped
+        where the duty cycle saturates, and the actuator, which :meth:`apply`
+        set to the servo's linear gains, is given ``q + error``. Its force is
+        then ``kt / resistance * (vin * duty - kt * qvel)`` exactly, with the
+        back-EMF integrated implicitly. The internal target starts at the
+        first command, as if the servo had been holding it, which is what the
+        position actuator assumes too.
+        """
+        m, d = self.model, self.data
+        p = self.params
+        n = self.n_joints
+        dt = float(m.opt.timestep)
+        gain = p.per_joint("p_coefficient", n) * STS3215_ERROR_GAIN * p.per_joint("servo_gain", n)
+        # Error at which the duty cycle saturates (no limit for a zero gain).
+        with np.errstate(divide="ignore"):
+            sat = np.where(gain > 0, STS3215_MAX_PWM / gain, np.inf)
+        step_max = p.per_joint("max_velocity", n) * dt
+        banded = bool(np.any(band))
+        target = ctrl[0].copy()
+        qpos, dctrl = d.qpos, d.ctrl
+        a, qi = self.actuator_ids, self.qpos_ids  # the mapped columns (all of them on the SO arms)
+        step = mujoco.mj_step
+        for t in range(1, ctrl.shape[0]):
+            want = ctrl[t]
+            for _ in range(n_sub):
+                target = np.clip(want, target - step_max, target + step_max)
+                q = qpos[qi]
+                e = target - q
+                if banded:
+                    e = np.sign(e) * np.maximum(np.abs(e) - band, 0.0)
+                dctrl[a] = q + np.clip(e, -sat, sat)
+                step(m, d)
+            sim_q[t] = qpos[qi]
 
 
 def mesh_files(model_path: str | Path) -> dict[str, tuple[str, list[float]]]:

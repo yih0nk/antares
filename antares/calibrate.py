@@ -137,6 +137,22 @@ GRAVITY_SPACE: dict[str, tuple[float, float, str]] = factors.space("shared", fac
 #: STS3215's spec'd deadzone plus gear backlash (about 0.5 degrees).
 DEADBAND_SPACE: dict[str, tuple[float, float, str]] = factors.space("shared", factors=("deadband",))
 
+#: Shared space when the start parameters select the STS3215 servo model
+#: (:meth:`antares.sim.SimParams.sts3215`). ``kp``/``kv``/``forcerange`` mean
+#: nothing there; the motor constants stay at BAM's bench values and what
+#: varies between arms is searched instead: the firmware gain ratio, the
+#: joint's friction and inertia, the internal target's rate limit and the
+#: command latency. Bounds are a decade or so around BAM's values (gain 1.0, damping
+#: 0.06, armature 0.026, frictionloss 0.052, max_velocity 5.3 rad/s).
+SERVO_SPACE: dict[str, tuple[float, float, str]] = {
+    "servo_gain": factors.get("servo_gain").space_entry(),
+    "damping": (1e-3, 1.0, "log"),
+    "armature": (3e-3, 0.1, "log"),
+    "frictionloss": (3e-3, 0.5, "log"),
+    "max_velocity": factors.get("max_velocity").space_entry(),
+    "latency_frames": factors.get("latency_frames").space_entry(),
+}
+
 DIMS: tuple[str, ...] = tuple(SPACE)
 N_DIMS = len(DIMS)
 
@@ -276,6 +292,7 @@ def spaces_for(
     robot: Any | None = None,
     fit_factors: Sequence[str] | None = None,
     per_joint_factors: Sequence[str] | None = None,
+    servo: bool = False,
 ) -> tuple[SearchSpace, SearchSpace]:
     """``(shared, per_joint)`` search spaces for a robot and a factor selection.
 
@@ -285,16 +302,27 @@ def spaces_for(
     ``per_joint_factors`` the per-joint stage's (default: the shared ones
     that can take one value per joint, plus the per-joint defaults). With
     nothing given these are :data:`SHARED` and :data:`PER_JOINT`.
+
+    ``servo=True`` (the start selects a servo model) swaps the
+    position-actuator defaults for :data:`SERVO_SPACE` in both stages (the
+    per-joint stage searches the same fields per joint; there is no force
+    limit to fit), with its bounds overriding the registry's.
     """
-    if robot is None and fit_factors is None and per_joint_factors is None:
+    if robot is None and fit_factors is None and per_joint_factors is None and not servo:
         return SHARED, PER_JOINT
     joints = tuple(robot.joints) if robot is not None else JOINTS
-    overrides = dict(robot.bounds) if robot is not None else {}
-    shared_names = tuple(fit_factors) if fit_factors is not None else factors.names("shared")
+    overrides = {**(SERVO_SPACE if servo else {}), **(dict(robot.bounds) if robot is not None else {})}
+    if fit_factors is not None:
+        shared_names = tuple(fit_factors)
+    else:
+        shared_names = tuple(SERVO_SPACE) if servo else factors.names("shared")
     if per_joint_factors is None:
-        per_joint_factors = tuple(n for n in shared_names if factors.get(n).per_joint_ok) + tuple(
-            n for n in factors.names("per_joint") if n not in shared_names
-        )
+        if servo:
+            per_joint_factors = shared_names
+        else:
+            per_joint_factors = tuple(n for n in shared_names if factors.get(n).per_joint_ok) + tuple(
+                n for n in factors.names("per_joint") if n not in shared_names
+            )
     shared = SearchSpace(factors.space("shared", factors=shared_names, overrides=overrides), False, joints)
     per_joint = SearchSpace(
         factors.space("per_joint", per_joint=True, factors=tuple(per_joint_factors), overrides=overrides), True, joints
@@ -307,28 +335,41 @@ def optional_factors(
     per_joint_factors: Sequence[str] | None = None,
     fit_gravity: bool = False,
     fit_deadband: bool = False,
+    servo: bool = False,
 ) -> tuple[tuple[str, ...] | None, tuple[str, ...] | None]:
     """Fold the ``fit_gravity`` / ``fit_deadband`` switches into a factor selection.
 
     ``gravity_scale`` joins the shared stage only (it is one value for the
     whole arm); ``deadband`` joins both stages. A selection left ``None``
-    stays ``None`` when neither switch is on, so the default spaces are kept.
+    stays ``None`` when neither switch is on, so the default spaces (or, with
+    ``servo``, :data:`SERVO_SPACE`) are kept.
     """
     add = tuple(n for n, on in (("gravity_scale", fit_gravity), ("deadband", fit_deadband)) if on)
     if not add:
         return (None if fit_factors is None else tuple(fit_factors),
                 None if per_joint_factors is None else tuple(per_joint_factors))
-    shared = tuple(fit_factors) if fit_factors is not None else factors.names("shared")
+    if fit_factors is not None:
+        shared = tuple(fit_factors)
+    else:
+        shared = tuple(SERVO_SPACE) if servo else factors.names("shared")
     shared += tuple(n for n in add if n not in shared)
     per_joint = None if per_joint_factors is None else tuple(per_joint_factors)
-    if per_joint is not None and fit_deadband and "deadband" not in per_joint:
+    if per_joint is None and servo and fit_deadband:
+        per_joint = tuple(SERVO_SPACE) + ("deadband",)
+    elif per_joint is not None and fit_deadband and "deadband" not in per_joint:
         per_joint += ("deadband",)
     return shared, per_joint
 
 
-def spaces(fit_gravity: bool = False, fit_deadband: bool = False) -> tuple[SearchSpace, SearchSpace]:
-    """``(shared, per_joint)`` search spaces with the optional terms added."""
-    return spaces_for(None, *optional_factors(None, None, fit_gravity, fit_deadband))
+def spaces(
+    fit_gravity: bool = False, fit_deadband: bool = False, servo: bool = False
+) -> tuple[SearchSpace, SearchSpace]:
+    """``(shared, per_joint)`` search spaces with the optional terms added.
+
+    ``servo=True`` swaps the position-actuator dimensions for
+    :data:`SERVO_SPACE` in both stages (see :func:`spaces_for`).
+    """
+    return spaces_for(None, *optional_factors(None, None, fit_gravity, fit_deadband, servo), servo=servo)
 
 
 def encode(params: SimParams, space: SearchSpace = SHARED) -> np.ndarray:
@@ -498,13 +539,15 @@ def param_spread_of(params: Sequence[SimParams]) -> tuple[dict[str, dict[str, fl
     *pinned* when the fits agree on it: ratio at most :data:`PINNED_RATIO`,
     or latency within :data:`PINNED_LATENCY_FRAMES` frames. Other parameters
     moved between fits of equal quality and are not physical measurements.
+    Servo-model fits are compared on :data:`SERVO_SPACE`, the fields they fit.
     """
     params = list(params)
     if len(params) < 2:
         raise ValueError("spread needs at least two fits")
     spread: dict[str, dict[str, float]] = {}
     pinned: list[str] = []
-    for name, (_, _, scale) in SPACE.items():
+    space = SERVO_SPACE if params[0].uses_servo_model else SPACE
+    for name, (_, _, scale) in space.items():
         values = np.concatenate([np.asarray(p.per_joint(name), dtype=np.float64) for p in params])
         lo, hi = float(values.min()), float(values.max())
         if scale == "log":
@@ -842,7 +885,9 @@ def calibrate(
     ``fit_gravity=True`` adds ``gravity_scale`` to the shared stage (see
     :func:`spaces`); the per-joint stage keeps the shared value.
     ``fit_deadband=True`` adds the servo ``deadband``: one value in the
-    shared stage, one per joint in the per-joint stage.
+    shared stage, one per joint in the per-joint stage. A ``start`` that
+    selects a servo model (``SimParams.sts3215()``) searches
+    :data:`SERVO_SPACE` instead of :data:`SPACE` in both stages.
 
     With ``n_seeds > 1`` (or an explicit ``seeds`` list) the shared stage
     runs once per seed (``seed``, ``seed + 100``, ``seed + 200``, ...), each
@@ -887,16 +932,17 @@ def calibrate(
         seed_list = [seed + 100 * i for i in range(n_seeds)]
     if simulate is None:
         simulate = default_simulate()
-    fit_factors, per_joint_factors = optional_factors(fit_factors, per_joint_factors, fit_gravity, fit_deadband)
-    if fit_factors is not None and not fit_factors:
-        raise ValueError("fit_factors is empty: the shared stage has nothing to fit (None keeps the defaults)")
-    if per_joint_factors is not None and not per_joint_factors:
-        raise ValueError("per_joint_factors is empty: the per-joint stage has nothing to fit (None keeps the defaults)")
     robot = robot_of(simulate)
     so_arm = robot is None or robot.default_params == "sts3215"
     if start is None:
         start = SimParams() if so_arm else simulate.default_params  # type: ignore[attr-defined]
-    shared_space, per_joint_space = spaces_for(robot, fit_factors, per_joint_factors)
+    servo = start.uses_servo_model
+    fit_factors, per_joint_factors = optional_factors(fit_factors, per_joint_factors, fit_gravity, fit_deadband, servo)
+    if fit_factors is not None and not fit_factors:
+        raise ValueError("fit_factors is empty: the shared stage has nothing to fit (None keeps the defaults)")
+    if per_joint_factors is not None and not per_joint_factors:
+        raise ValueError("per_joint_factors is empty: the per-joint stage has nothing to fit (None keeps the defaults)")
+    shared_space, per_joint_space = spaces_for(robot, fit_factors, per_joint_factors, servo=servo)
     if not so_arm:
         shared_space = shared_space.relative_to(start)
 
@@ -1030,6 +1076,7 @@ __all__ = [
     "SearchSpace",
     "GRAVITY_SPACE",
     "DEADBAND_SPACE",
+    "SERVO_SPACE",
     "spaces",
     "optional_factors",
     "SHARED",

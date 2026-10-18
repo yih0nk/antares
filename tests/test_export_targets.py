@@ -481,3 +481,18 @@ def test_api_zip_includes_targets_on_request(monkeypatch, tmp_path):
     # the library function behind the route
     names = set(zipfile.ZipFile(io.BytesIO(export_zip(_lock(PER_JOINT), targets=["json"]))).namelist())
     assert f"{PER_JOINT}/{PER_JOINT}.params.json" in names
+
+
+def test_servo_lock_exports_its_pd_equivalent():
+    from antares.sim import SimParams
+
+    base = _lock(SCALAR)
+    params = SimParams.sts3215(servo_gain=1.2, latency_frames=2)
+    lock = replace(base, name="servo_unit", params=params)
+    lin = params.linearized()
+    act = _json_files(render(lock, "isaaclab", lock_dir=LOCK_DIR))["servo_unit_isaaclab.json"]["actuator"]
+    assert act["stiffness"] == pytest.approx(lin.kp)
+    assert act["damping"] == pytest.approx(lin.kv + lin.damping)
+    assert act["effort_limit_sim"] == pytest.approx(lin.forcerange)
+    py = _py_files(render(lock, "maniskill", lock_dir=LOCK_DIR))["servo_unit_maniskill.py"]
+    assert repr(lin.kp) in py

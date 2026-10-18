@@ -221,6 +221,36 @@ BUILTIN: tuple[Factor, ...] = (
         identifiable="untested",
         evidence="only searched in the per-joint refinement; no study yet",
         stages=("per_joint",),
+        mjcf=("position", "forcerange"),
+    ),
+    Factor(
+        name="servo_gain",
+        label="Servo firmware gain",
+        explains="Multiplies the STS3215 firmware's position-to-duty gain: supply sag and unit spread, "
+        "what the data pins instead of kp with the servo model.",
+        acts_on="actuator",
+        unit="x",
+        scale="log",
+        bounds=(0.3, 3.0),  # a decade around BAM's bench value of 1.0
+        neutral=1.0,
+        needs="moves with varied speed; any teleop log",
+        identifiable="untested",
+        evidence="fitted only with the servo model (calibrate --servo sts3215); see the STS3215 study in the README",
+        stages=(),
+    ),
+    Factor(
+        name="max_velocity",
+        label="Servo rate limit",
+        explains="How fast the STS3215 firmware slews its internal target toward the command (rad/s).",
+        acts_on="actuator",
+        unit="rad/s",
+        scale="log",
+        bounds=(1.0, 20.0),  # around BAM's 5.3 rad/s
+        neutral=None,
+        needs="fast moves",
+        identifiable="untested",
+        evidence="fitted only with the servo model (calibrate --servo sts3215)",
+        stages=(),
     ),
     Factor(
         name="gravity_scale",

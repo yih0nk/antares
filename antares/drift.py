@@ -58,8 +58,16 @@ DEFAULT_THRESHOLD = 0.10
 #: Keys of the trend table that are scores, not parameters.
 SCORE_KEYS = ("lock_score", "train_score")
 
-#: Parameters of the shared fit searched (and trended) on a log scale.
+#: Parameters of the shared fits searched (and trended) on a log scale: the
+#: registry's shared space plus the servo model's (:data:`antares.calibrate.SERVO_SPACE`).
 LOG_PARAMS: frozenset[str] = frozenset(n for n, (_, _, s) in factors.space("shared").items() if s == "log")
+try:
+    from antares.calibrate import SERVO_SPACE as _SERVO_SPACE
+
+    LOG_PARAMS |= frozenset(n for n, (_, _, s) in _SERVO_SPACE.items() if s == "log")
+    del _SERVO_SPACE
+except (ImportError, AttributeError):  # pragma: no cover - stubbed sibling module
+    LOG_PARAMS |= frozenset({"servo_gain", "max_velocity"})
 
 
 def _json_float(v: float) -> float | None:
@@ -453,6 +461,12 @@ def window_slices(n_episodes: int, window: int, step: int) -> list[range]:
     return [range(s, s + window) for s in range(0, n_episodes - window + 1, step)]
 
 
+def trended_params(params: Any) -> list[str]:
+    """Keys of ``params.to_dict()`` a trend can be fitted to: scalar numbers,
+    so not ``servo`` (the actuator model's name) nor per-joint lists."""
+    return [n for n, v in params.to_dict().items() if isinstance(v, (int, float)) and not isinstance(v, bool)]
+
+
 def compute_trends(
     windows: Sequence[DriftWindow],
     *,
@@ -460,12 +474,16 @@ def compute_trends(
     n_boot: int = 1000,
     seed: int = 0,
 ) -> dict[str, Trend]:
-    """Trend of every fitted parameter and of both scores against episode index."""
+    """Trend of every fitted parameter and of both scores against episode index.
+
+    Only the numeric, shared parameters are trended: ``servo`` names the
+    actuator model (a string) and is skipped, as is any per-joint value.
+    """
     windows = list(windows)
     if not windows:
         return {}
     x = [w.center for w in windows]
-    names = list(windows[0].params.to_dict())
+    names = trended_params(windows[0].params)
     out: dict[str, Trend] = {}
     for i, name in enumerate(names):
         y = [float(w.params.to_dict()[name]) for w in windows]

@@ -1826,3 +1826,25 @@ def test_calibrate_robot_id_registers_the_saved_lock(monkeypatch, capsys, tmp_pa
     assert cli.main(["calibrate", "fake/robot", "--name", "z"]) == 0
     assert "registered" not in capsys.readouterr().out
     assert "z" not in [l["name"] for l in json.loads((server.LOCK_DIR / "registry.json").read_text())["robots"]["arm_a"]["locks"]]
+
+
+def test_calibrate_cli_servo_flag(monkeypatch, capsys, tmp_path):
+    from antares import server
+
+    calls = []
+    params = {"kp": 998.22, "kv": 2.731, "damping": 0.06, "armature": 0.026, "frictionloss": 0.05,
+              "latency_frames": 2, "forcerange": 2.94, "servo": "sts3215", "servo_gain": 1.2,
+              "p_coefficient": 16.0, "vin": 7.4, "kt": 1.18, "resistance": 2.48, "max_velocity": 5.3}
+
+    def fake_run(ds, **kw):
+        calls.append(kw)
+        return _Result(_result_dict(params, [])), {"name": "x"}, tmp_path / "x.lock.json"
+
+    monkeypatch.setattr(server, "_DATASETS", {"fake/robot": _dataset()})
+    monkeypatch.setattr(server, "run_calibration", fake_run)
+    assert cli.main(["calibrate", "fake/robot", "--servo", "sts3215"]) == 0
+    assert calls[0]["servo"] == "sts3215"
+    out = capsys.readouterr().out
+    assert "sts3215 servo model" in out and "servo=sts3215" in out and "servo_gain=1.2" in out
+    assert cli.main(["calibrate", "fake/robot"]) == 0
+    assert calls[1]["servo"] == "position"

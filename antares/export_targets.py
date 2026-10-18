@@ -325,7 +325,14 @@ def drive_damping(params: SimParams) -> float | dict[str, float]:
 
 
 def mapped_params(params: SimParams) -> dict[str, Any]:
-    """The fitted values in target vocabulary (scalar or per-joint dict)."""
+    """The fitted values in target vocabulary (scalar or per-joint dict).
+
+    A lock fitted with the STS3215 servo model is given as its PD
+    equivalent (:meth:`~antares.sim.SimParams.linearized`): stiffness from
+    the firmware gain and motor constants, drive damping from the back-EMF,
+    effort limit at stall. The firmware's rate limit has no counterpart.
+    """
+    params = params.linearized()
     return {
         "stiffness": _scalar_or_joint(params, "kp"),
         "damping": drive_damping(params),

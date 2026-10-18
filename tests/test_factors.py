@@ -28,12 +28,16 @@ def test_space_overrides_and_selection():
 def test_drift_lists():
     assert factors.drift_factors() == {f: 4.0 for f in ("kp", "kv", "damping", "armature", "frictionloss")}
     assert factors.drift_shifts() == {"latency_frames": (-2, 3)}
-    assert factors.log_scaled() == {"kp", "kv", "damping", "armature", "frictionloss", "forcerange"}
+    assert factors.log_scaled() == {
+        "kp", "kv", "damping", "armature", "frictionloss", "forcerange", "servo_gain", "max_velocity"
+    }
+    # the servo model's own terms are opt-in (calibrate --servo sts3215), never defaults
+    assert "servo_gain" not in factors.names("shared") and "max_velocity" not in factors.names("per_joint")
 
 
 def test_mjcf_attrs():
     assert factors.mjcf_attrs("joint") == ("damping", "armature", "frictionloss")
-    assert factors.mjcf_attrs("position") == ("kp", "kv")
+    assert factors.mjcf_attrs("position") == ("kp", "kv", "forcerange")  # forcerange is baked as "-f f"
 
 
 def test_parse_selection():
