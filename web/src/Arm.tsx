@@ -59,8 +59,8 @@ type Props = {
 
 // Glow where the sim disagrees with the arm: contact (critical) or anomaly (warn).
 const GLOW = [new THREE.Color(palette.critical), new THREE.Color(palette.warn)];
-const WARM_INTENSITY = 0.6;
-const WARM_TINT = 0.7;
+const WARM_INTENSITY = 0.25;
+const WARM_TINT = 0.25;
 
 // MuJoCo quaternions are [w, x, y, z].
 const toQuat = (q: number[]) => new THREE.Quaternion(q[1], q[2], q[3], q[0]);
