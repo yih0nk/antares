@@ -152,6 +152,49 @@ class RobotLock:
         return cls.from_dict(json.loads(Path(path).read_text()))
 
 
+#: Parameters taken as physical when a lock carries no seed spread. One frame
+#: of latency either way costs 0.3-0.9 deg on the demo arms with everything
+#: else held fixed, so it is the one parameter a single fit does pin down;
+#: kp/kv/damping/armature/frictionloss spread 2-125x across seeds at equal error.
+DEFAULT_PINNED: tuple[str, ...] = ("latency_frames",)
+
+
+def seed_info(lock: Any) -> dict | None:
+    """The ``result.seeds`` block of a lock (:class:`RobotLock`, a lock dict,
+    or a :class:`~antares.calibrate.CalibrationResult`), or None when the
+    lock was fitted with a single seed or before seeds were recorded."""
+    if isinstance(lock, dict):
+        result = lock.get("result")
+        seeds = (result if isinstance(result, dict) else lock).get("seeds")
+    else:
+        result = getattr(lock, "result", lock)
+        seeds = getattr(result, "seeds", None)
+    return seeds if isinstance(seeds, dict) else None
+
+
+def pinned_params(lock: Any) -> list[str]:
+    """Parameters whose fitted value can be read as a measurement of the arm.
+
+    With seed spread recorded (``calibrate --seeds 3``) these are the
+    parameters that agreed across the seeds (``seeds.pinned``); otherwise
+    the conservative :data:`DEFAULT_PINNED`. Drift, diagnose and fleet read
+    only these as physical; the others trade off against each other at the
+    same tracking error.
+    """
+    seeds = seed_info(lock)
+    pinned = seeds.get("pinned") if seeds is not None else None
+    return [str(p) for p in pinned] if pinned is not None else list(DEFAULT_PINNED)
+
+
+def param_spread(lock: Any) -> dict | None:
+    """``seeds.spread`` of a lock: per shared parameter ``{"min", "max",
+    "ratio"}`` (log-scaled) or ``{"min", "max", "range"}`` (latency) across
+    the seeds, or None when the lock carries no seed spread."""
+    seeds = seed_info(lock)
+    spread = seeds.get("spread") if seeds is not None else None
+    return dict(spread) if isinstance(spread, dict) else None
+
+
 def list_locks(lock_dir: Path = LOCK_DIR) -> list[RobotLock]:
     """All locks under ``lock_dir``, sorted by name. Unreadable files are
     skipped with a warning rather than hiding the rest."""
@@ -167,4 +210,14 @@ def list_locks(lock_dir: Path = LOCK_DIR) -> list[RobotLock]:
     return sorted(locks, key=lambda lk: lk.name)
 
 
-__all__ = ["LOCK_DIR", "RobotLock", "dataset_digest", "list_locks", "slug"]
+__all__ = [
+    "DEFAULT_PINNED",
+    "LOCK_DIR",
+    "RobotLock",
+    "dataset_digest",
+    "list_locks",
+    "param_spread",
+    "pinned_params",
+    "seed_info",
+    "slug",
+]

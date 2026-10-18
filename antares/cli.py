@@ -156,19 +156,23 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
     if ds is None:
         return 2
     stages = f"up to {args.max_evaluations} shared evaluations"
+    if args.seeds > 1:
+        stages = f"best of {args.seeds} seeds x {stages}"
     if args.per_joint:
         stages += f" + {args.per_joint_evaluations} per-joint evaluations"
     if args.fit_sensor:
         stages += " per round, fitting the sensor calibration"
     print(f"calibrating {ds.repo_id}: {args.n_train} train / {args.n_eval} eval episodes, {stages}")
-    last = {"n": 0, "stage": None}
+    last = {"n": 0, "stage": None, "seed": None}
 
     def on_progress(ev) -> None:
         n = ev.evaluation
         stage = getattr(ev, "stage", "shared")
-        if stage != last["stage"]:
-            last["stage"] = stage
-            print(f"  -- {stage} stage --", flush=True)
+        seed = getattr(ev, "seed", 0)
+        if stage != last["stage"] or seed != last["seed"]:
+            last["stage"], last["seed"] = stage, seed
+            run = f", seed {seed + 1}/{args.seeds}" if args.seeds > 1 and stage == "shared" else ""
+            print(f"  -- {stage} stage{run} --", flush=True)
         if n - last["n"] >= 10 or n <= 1:
             last["n"] = n
             print(
@@ -192,6 +196,7 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
         on_progress=on_progress,
         fit_sensor=args.fit_sensor,
         sensor_mode=args.sensor_mode,
+        n_seeds=args.seeds,
     )
     r = result.to_dict()
     only = lock.get("dynamics_only")
@@ -216,7 +221,10 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
     print()
     print(_params_table(r["params"]))
     for s in r.get("stages", []):
-        print(f"  {s['name']}: {s['n_evaluations']} evaluations, train {s['train_score']:.3f} deg")
+        run = f" (seed {s['seed']})" if "seed" in s and r.get("seeds") else ""
+        print(f"  {s['name']}{run}: {s['n_evaluations']} evaluations, train {s['train_score']:.3f} deg")
+    if r.get("seeds"):
+        _print_seed_spread(r["seeds"])
     if lock.get("command_map"):
         cm = lock["command_map"]
         joints = list(before) or [str(i) for i in range(len(cm["gain"]))]
@@ -227,6 +235,23 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
     print(f"{r['n_evaluations']} evaluations in {r['elapsed_s']:.1f}s")
     print(f"saved lock {lock['name']} -> {path}")
     return 0
+
+
+def _print_seed_spread(sd: dict) -> None:
+    """The best-of-N summary: which seed won, and which parameters it pins."""
+    scores = " / ".join("-" if v is None else f"{v:.3f}" for v in sd["eval_scores"])
+    print(f"seeds: kept seed {sd['seeds'][sd['chosen']]} ({sd['chosen'] + 1} of {sd['n']}); held-out {scores} deg")
+    spread = []
+    for name, sp in sd.get("spread", {}).items():
+        if "ratio" in sp:
+            spread.append(f"{name} x{_num(sp['ratio'], '{:.3g}')}")
+        else:
+            spread.append(f"{name} +-{_num(sp.get('range'), '{:.0f}')} frames")
+    pinned = ", ".join(sd.get("pinned") or []) or "none"
+    print(f"  pinned (agree across seeds): {pinned}")
+    print(f"  spread across seeds: {', '.join(spread)}")
+    if set(sd.get("pinned") or []) < set(sd.get("spread", {})):
+        print("  unpinned parameters move across seeds at equal error; read them as a fit, not a measurement")
 
 
 def cmd_cross(args: argparse.Namespace) -> int:
@@ -1228,12 +1253,21 @@ def _fleet_tables(report: dict) -> str:
         f"median gap closed {_f(s.get('median_improvement'), '{:.0%}')}"
     )
     if rows:
+        from antares.fleet import pinned_across
+
         out.append("")
         out.append(
             _table(
                 ["dataset", "robot", "eps", "fps", "baseline", "calibrated", "closed", "latency", "kp"],
                 rows,
             )
+        )
+        pinned = pinned_across(r.get("pinned") for r in robots)
+        n_seeded = sum(1 for r in robots if r.get("pinned") is not None)
+        out.append(
+            f"pinned across the fleet's locks: {', '.join(pinned) or 'none'} "
+            f"({n_seeded}/{len(robots)} locks carry seed spread); "
+            "the other parameters are fit outcomes, not measurements of the arm"
         )
     stats = report.get("stats") or {}
     if stats:
@@ -1376,6 +1410,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--n-eval", type=int, default=10)
     p.add_argument("--max-evaluations", type=int, default=150)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument(
+        "--seeds",
+        type=int,
+        default=1,
+        metavar="N",
+        help="run the shared fit from N CMA-ES seeds and keep the best held-out score; "
+        "records which parameters agree across seeds (3 for a lock worth keeping; default 1)",
+    )
     p.add_argument("--name", default=None, help="lock name (default: dataset slug)")
     p.add_argument(
         "--per-joint",

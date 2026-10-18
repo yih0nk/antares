@@ -319,6 +319,9 @@ class RobotEntry:
     frames_per_episode: float = 0.0
     data_bytes: int = 0
     downloads: int = 0
+    #: Parameters the lock pins (``result.seeds.pinned`` of a best-of-N fit);
+    #: None for a single-seed lock, which pins only latency by default.
+    pinned: list[str] | None = None
 
     @property
     def latency_ms(self) -> float:
@@ -326,6 +329,8 @@ class RobotEntry:
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
+        if self.pinned is None:
+            del d["pinned"]  # the committed report predates seed spread
         for k in ("baseline_eval", "calibrated_eval", "improvement"):
             d[k] = _json_float(d[k])
         d["per_joint_before"] = {k: _json_float(v) for k, v in self.per_joint_before.items()}
@@ -341,6 +346,8 @@ class RobotEntry:
             kw[k] = _parse_float(kw.get(k))
         kw["per_joint_before"] = {k: _parse_float(v) for k, v in (kw.get("per_joint_before") or {}).items()}
         kw["per_joint_after"] = {k: _parse_float(v) for k, v in (kw.get("per_joint_after") or {}).items()}
+        if kw.get("pinned") is not None:
+            kw["pinned"] = [str(p) for p in kw["pinned"]]
         return cls(**kw)
 
 
@@ -506,7 +513,7 @@ def scan(
     partial cross matrix over up to ``cross_n`` robots (0 disables it).
     """
     from antares.calibrate import calibrate, split_episodes
-    from antares.lock import RobotLock
+    from antares.lock import RobotLock, pinned_params, seed_info
     from antares.sim import SimParams
 
     if load is None:
@@ -593,6 +600,7 @@ def scan(
                 frames_per_episode=float(np.mean([len(e) for e in episodes])) if episodes else 0.0,
                 data_bytes=cand.data_bytes,
                 downloads=cand.downloads,
+                pinned=pinned_params(result) if seed_info(result) is not None else None,
             )
             report.robots.append(entry)
             emit({"type": "robot", "dataset": cand.repo_id, "entry": entry.to_dict()})
@@ -671,12 +679,44 @@ def robust_z(values: np.ndarray) -> np.ndarray:
     return (x - med) / scale
 
 
-def fleet_stats(robots: Sequence[RobotEntry], params: Sequence[str] = STAT_PARAMS) -> dict[str, dict[str, Any]]:
+def pinned_across(pinned_lists: Iterable[Sequence[str] | None]) -> list[str]:
+    """Parameters pinned by every lock: the intersection of each robot's
+    ``pinned`` list, a robot without seed spread counting as
+    :data:`antares.lock.DEFAULT_PINNED` (latency only). Only these can be
+    compared across robots as measurements; the rest differ between fits of
+    one arm as much as between arms."""
+    from antares.lock import DEFAULT_PINNED
+
+    keep: set[str] | None = None
+    for pinned in pinned_lists:
+        this = set(DEFAULT_PINNED if pinned is None else pinned)
+        keep = this if keep is None else keep & this
+    if keep is None:
+        keep = set(DEFAULT_PINNED)
+    order = LOG_PARAMS + ("latency_frames",)
+    return [p for p in order if p in keep] + sorted(keep - set(order))
+
+
+def _pinned_filter(robots: Sequence[RobotEntry], params: Sequence[str]) -> list[str]:
+    """``params`` restricted to scores and parameters pinned across ``robots``."""
+    keep = set(pinned_across(r.pinned for r in robots))
+    if "latency_frames" in keep:
+        keep.add("latency_ms")
+    return [p for p in params if p in SCORE_FIELDS or p in keep]
+
+
+def fleet_stats(
+    robots: Sequence[RobotEntry], params: Sequence[str] = STAT_PARAMS, *, pinned_only: bool = False
+) -> dict[str, dict[str, Any]]:
     """Per-parameter median, quartiles, IQR and a robust z-score per robot.
 
     Log-scale parameters are analysed in log10 (so ``z`` is in decades of
-    MAD) but the quantiles are reported in natural units.
+    MAD) but the quantiles are reported in natural units. With
+    ``pinned_only`` the parameters are limited to those every lock pins
+    (:func:`pinned_across`); scores are always kept.
     """
+    if pinned_only:
+        params = _pinned_filter(robots, params)
     stats: dict[str, dict[str, Any]] = {}
     for param in params:
         pairs = _param_values(robots, param)
@@ -706,9 +746,14 @@ def find_outliers(
     stats: dict[str, dict[str, Any]],
     threshold: float = OUTLIER_Z,
     params: Sequence[str] = LOG_PARAMS + ("latency_frames",) + SCORE_FIELDS,
+    *,
+    pinned_only: bool = False,
 ) -> list[dict[str, Any]]:
     """Robots whose fitted value (or score) sits more than ``threshold``
-    robust sigmas from the fleet median, most extreme first."""
+    robust sigmas from the fleet median, most extreme first. ``pinned_only``
+    skips parameters not pinned across the fleet (see :func:`fleet_stats`)."""
+    if pinned_only:
+        params = _pinned_filter(robots, params)
     by_name = {r.dataset: r for r in robots}
     out = []
     for param in params:
@@ -915,6 +960,7 @@ __all__ = [
     "STAT_PARAMS",
     "OUTLIER_Z",
     "robust_z",
+    "pinned_across",
     "fleet_stats",
     "find_outliers",
     "pick_cross_robots",

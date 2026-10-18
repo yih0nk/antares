@@ -1162,12 +1162,16 @@ def run_calibration(
     should_stop: Callable[[], bool] | None = None,
     fit_sensor: bool = False,
     sensor_mode: str = "sim",
+    n_seeds: int = 1,
 ) -> tuple[Any, dict, Path]:
     """Calibrate on ``ds``, save a lock, return (CalibrationResult, lock dict, path).
 
     ``per_joint`` adds the per-joint refinement stage after the shared fit,
     with its own evaluation budget and (optionally) CMA-ES step size.
-    ``robot`` overrides the simulator model (default: the dataset's family).
+    ``n_seeds`` above 1 runs the shared stage from that many CMA-ES seeds
+    and keeps the best held-out score (every dynamics fit, with
+    ``fit_sensor``). ``robot`` overrides the simulator model (default: the
+    dataset's family).
 
     With ``fit_sensor`` the arm's command map is fitted alongside the
     dynamics (see :mod:`antares.sensor`) and stored in the lock, together
@@ -1188,6 +1192,8 @@ def run_calibration(
         extra = {"per_joint": True, "per_joint_max_evaluations": int(per_joint_max_evaluations)}
         if per_joint_sigma0 is not None:
             extra["per_joint_sigma0"] = float(per_joint_sigma0)
+    if n_seeds > 1:
+        extra["n_seeds"] = int(n_seeds)
     if fit_sensor:
         from antares.sensor import calibrate_with_sensor
 
@@ -1254,6 +1260,7 @@ def _job_worker(job: Job, req: "CalibrateRequest") -> None:
             should_stop=job.stop.is_set,
             fit_sensor=req.fit_sensor,
             sensor_mode=req.sensor_mode,
+            n_seeds=req.n_seeds,
         )
         result_d = result.to_dict()
         job.push({"type": "done", "lock": lock, "result": result_d})
@@ -1813,6 +1820,9 @@ class CalibrateRequest(BaseModel):
     n_eval: int = Field(10, ge=0)
     max_evaluations: int = Field(150, ge=1)
     seed: int = 0
+    # Best of N CMA-ES seeds on the shared stage (held-out score decides);
+    # 1 keeps the demo fast, 3 is recommended for a lock worth keeping.
+    n_seeds: int = Field(1, ge=1, le=10)
     name: str | None = None
     # Per-joint refinement after the shared fit; off by default so the live
     # demo stays at ~150 evaluations.

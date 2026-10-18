@@ -103,7 +103,7 @@ robot. Three ways in:
 
   ```sh
   .venv/bin/antares inspect ./recordings/2026-10-17      # verdict + summary, no sim
-  .venv/bin/antares calibrate ./recordings/2026-10-17 --name my_arm
+  .venv/bin/antares calibrate ./recordings/2026-10-17 --name my_arm --seeds 3
   .venv/bin/antares replay upload/bench_arm --episode 0 --lock my_arm
   ```
 
@@ -408,6 +408,49 @@ misses the truth (SO-100-like arm: kp 182 vs 1427 at 0.40° against
 optimizer spread above is a property of the fit, not of the real data.
 The fleet scan's cross matrix over many arms is the larger version of
 this test.
+
+### Repeatable locks: best of N seeds
+
+One CMA-ES run is deterministic for its seed but not representative. On
+the same SO-101 episodes, seeds 0/1/2 land at kp 10.5 / 27 / 260 with
+held-out errors of 0.74° / 0.91° / 1.06°; on SO-100 they land at kp
+1427 / 14 / 13 at 0.79° / 0.57° / 0.66°
+([`results/robot_specificity.md`](results/robot_specificity.md)). The
+tracking error is repeatable to within about 1.4×; the parameter values
+are not, because several parameter sets reproduce the arm equally well.
+A parameter value read off a single lock is therefore a fit, not a
+measurement.
+
+`--seeds N` runs the shared stage from N seeds (`seed`, `seed+100`, ...),
+each from the same start with the full budget, keeps the candidate with
+the best held-out score, and records every candidate in the lock under
+`result.seeds`. From the candidates it computes each parameter's spread
+and marks a parameter **pinned** when the seeds agree on it: a log-scaled
+parameter (`kp`, `kv`, `damping`, `armature`, `frictionloss`) when its
+max/min across seeds is at most 2, `latency_frames` when it moves by at
+most one frame. The per-joint stage, if asked for, runs once from the
+winner.
+
+```sh
+.venv/bin/antares calibrate lerobot/svla_so101_pickplace --seeds 3
+```
+
+Three seeds cost three times the shared budget (about a minute on the
+demo datasets) and are what a lock worth keeping should use; the default
+stays at 1 so the live demo stays fast. `antares.lock.pinned_params(lock)`
+returns the pinned list, and for a lock without seed spread the
+conservative default `["latency_frames"]`: one frame either way costs
+0.3-0.9° with everything else held fixed, so latency is the one parameter
+a single fit does pin down.
+
+Drift, diagnose and the fleet statistics now read only pinned parameters
+as physical. A drift scan still reports every trend, but its verdict only
+announces a parameter as drifting when the lock pins it (scores always
+count), and says when an unpinned parameter trends. `--explain` only
+names a cause the lock pins; fleet statistics take `pinned_only`, and
+`antares fleet list` prints which parameters are pinned across the
+fleet's locks. The committed locks were fitted with one seed, so for them
+that is latency only.
 
 ## Gate deploys on your robot's drift
 

@@ -331,7 +331,9 @@ def fakes(monkeypatch, tmp_path):
                   default_simulate=lambda command_map=None, robot=None: (lambda params, ep: (ep.state, ep.action)))
     lock = _module("antares.lock", RobotLock=FakeLock, dataset_digest=lambda eps: "deadbeef",
                    slug=lambda r: r.replace("/", "__"), LOCK_DIR=tmp_path / "locks",
-                   LOCK_SUFFIX=LOCK_SUFFIX)
+                   LOCK_SUFFIX=LOCK_SUFFIX,
+                   # no seed spread in the fakes: only latency is pinned, as for a real old lock
+                   pinned_params=lambda lock: ["latency_frames"], seed_info=lambda lock: None)
     comp = _module("antares.compensate", compensate_episode=fake_compensate_episode,
                    compensate_episodes=fake_compensate_episodes, held_out_episodes=fake_held_out,
                    max_joint_velocity=lambda episodes, arm: np.full(6, 100.0))
@@ -771,6 +773,14 @@ def test_calibrate_per_joint_option(client, fakes, monkeypatch):
     assert calls[-1]["per_joint"] is True and calls[-1]["per_joint_max_evaluations"] == 42
     run({"dataset": FAKE_DS, "per_joint": True})
     assert calls[-1]["per_joint_max_evaluations"] == 600  # default budget
+
+    # best of N seeds: forwarded only when asked for, bounded at 10
+    run({"dataset": FAKE_DS, "name": "seeds-a"})
+    assert "n_seeds" not in calls[-1]
+    run({"dataset": FAKE_DS, "name": "seeds-b", "n_seeds": 3})
+    assert calls[-1]["n_seeds"] == 3
+    assert client.post("/api/calibrate", json={"dataset": FAKE_DS, "n_seeds": 0}).status_code == 422
+    assert client.post("/api/calibrate", json={"dataset": FAKE_DS, "n_seeds": 11}).status_code == 422
 
     assert client.post("/api/calibrate", json={"dataset": FAKE_DS, "per_joint_max_evaluations": 0}).status_code == 422
 

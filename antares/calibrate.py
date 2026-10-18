@@ -252,6 +252,9 @@ class ProgressEvent:
     best_per_joint_deg: dict[str, float]
     elapsed_s: float
     stage: str = "shared"  # which search space produced this evaluation
+    #: Index of the CMA-ES seed run this evaluation belongs to (0-based; a
+    #: single-seed fit is all seed 0). ``best_score`` is the best of that run.
+    seed: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -263,6 +266,7 @@ class ProgressEvent:
             "best_per_joint_deg": {k: _json_float(v) for k, v in self.best_per_joint_deg.items()},
             "elapsed_s": float(self.elapsed_s),
             "stage": self.stage,
+            "seed": int(self.seed),
         }
 
 
@@ -284,8 +288,13 @@ class CalibrationResult:
     #: ``"shared"`` or ``"per_joint"``: the space the final parameters live in.
     space: str = "shared"
     #: One entry per CMA-ES stage run, in order: ``{"name", "n_evaluations",
-    #: "train_score", "params"}`` with the stage's best on the training set.
+    #: "train_score", "params"}`` with the stage's best on the training set,
+    #: plus ``"seed"`` (the CMA-ES seed) for stages fitted since seeds were
+    #: recorded. A best-of-N fit has one ``"shared"`` entry per seed.
     stages: list[dict] = field(default_factory=list)
+    #: Best-of-N seed summary (see :func:`seed_summary`), or None for a
+    #: single-seed fit and for locks written before seeds were recorded.
+    seeds: dict | None = None
 
     @property
     def improvement(self) -> float:
@@ -311,19 +320,13 @@ class CalibrationResult:
             "eval_episodes": [int(i) for i in self.eval_episodes],
             "improvement": _json_float(self.improvement),
             "space": self.space,
-            "stages": [
-                {
-                    "name": str(s["name"]),
-                    "n_evaluations": int(s["n_evaluations"]),
-                    "train_score": _json_float(s["train_score"]),
-                    "params": dict(s["params"]),
-                }
-                for s in self.stages
-            ],
+            "stages": [_stage_to_dict(s, _json_float) for s in self.stages],
+            **({"seeds": _seeds_to_dict(self.seeds)} if self.seeds is not None else {}),
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "CalibrationResult":
+        seeds = d.get("seeds")
         return cls(
             params=SimParams.from_dict(d["params"]),
             baseline=SimParams.from_dict(d["baseline"]),
@@ -339,15 +342,8 @@ class CalibrationResult:
             train_episodes=[int(i) for i in d.get("train_episodes", [])],
             eval_episodes=[int(i) for i in d.get("eval_episodes", [])],
             space=str(d.get("space", "shared")),
-            stages=[
-                {
-                    "name": str(s["name"]),
-                    "n_evaluations": int(s["n_evaluations"]),
-                    "train_score": _parse_float(s["train_score"]),
-                    "params": dict(s["params"]),
-                }
-                for s in d.get("stages", [])
-            ],
+            stages=[_stage_to_dict(s, _parse_float) for s in d.get("stages", [])],
+            seeds=_seeds_from_dict(seeds) if isinstance(seeds, dict) else None,
         )
 
 
@@ -359,6 +355,113 @@ def _json_float(v: float) -> float | None:
 
 def _parse_float(v: Any) -> float:
     return float("nan") if v is None else float(v)
+
+
+def _stage_to_dict(s: Mapping[str, Any], score: Callable[[Any], Any]) -> dict:
+    """Normalize one ``stages`` entry; ``seed`` only when the stage recorded one."""
+    out = {
+        "name": str(s["name"]),
+        "n_evaluations": int(s["n_evaluations"]),
+        "train_score": score(s["train_score"]),
+        "params": dict(s["params"]),
+    }
+    if s.get("seed") is not None:
+        out["seed"] = int(s["seed"])
+    return out
+
+
+# --------------------------------------------------------------------------
+# Best-of-N seeds: spread and pinned parameters
+# --------------------------------------------------------------------------
+
+#: A log-scaled parameter is pinned when its max/min across seeds is at most this.
+PINNED_RATIO = 2.0
+#: ``latency_frames`` is pinned when it moves by at most this many frames across seeds.
+PINNED_LATENCY_FRAMES = 1
+
+
+def param_spread_of(params: Sequence[SimParams]) -> tuple[dict[str, dict[str, float]], list[str]]:
+    """``(spread, pinned)`` of the shared search parameters across several fits.
+
+    ``spread[name]`` is ``{"min", "max", "ratio"}`` for a log-scaled
+    parameter and ``{"min", "max", "range"}`` for ``latency_frames``, over
+    every fit (and every joint, for per-joint values). A parameter is
+    *pinned* when the fits agree on it: ratio at most :data:`PINNED_RATIO`,
+    or latency within :data:`PINNED_LATENCY_FRAMES` frames. Other parameters
+    moved between fits of equal quality and are not physical measurements.
+    """
+    params = list(params)
+    if len(params) < 2:
+        raise ValueError("spread needs at least two fits")
+    spread: dict[str, dict[str, float]] = {}
+    pinned: list[str] = []
+    for name, (_, _, scale) in SPACE.items():
+        values = np.concatenate([np.asarray(p.per_joint(name), dtype=np.float64) for p in params])
+        lo, hi = float(values.min()), float(values.max())
+        if scale == "log":
+            ratio = hi / lo if lo > 0 else float("inf")
+            spread[name] = {"min": lo, "max": hi, "ratio": ratio}
+            if ratio <= PINNED_RATIO:
+                pinned.append(name)
+        else:
+            spread[name] = {"min": lo, "max": hi, "range": hi - lo}
+            if hi - lo <= PINNED_LATENCY_FRAMES:
+                pinned.append(name)
+    return spread, pinned
+
+
+def seed_summary(
+    seeds: Sequence[int],
+    chosen: int,
+    params: Sequence[SimParams],
+    eval_scores: Sequence[float],
+    train_scores: Sequence[float],
+) -> dict:
+    """The ``seeds`` block of a :class:`CalibrationResult`: every seed's
+    shared optimum and scores, which one was kept (best held-out score), and
+    the spread/pinned verdict from :func:`param_spread_of`."""
+    params = list(params)
+    spread, pinned = param_spread_of(params)
+    return {
+        "n": len(params),
+        "seeds": [int(s) for s in seeds],
+        "chosen": int(chosen),
+        "eval_scores": [float(v) for v in eval_scores],
+        "train_scores": [float(v) for v in train_scores],
+        "params": [p.to_dict() for p in params],
+        "spread": spread,
+        "pinned": pinned,
+    }
+
+
+def _seeds_to_dict(s: Mapping[str, Any]) -> dict:
+    return {
+        "n": int(s["n"]),
+        "seeds": [int(v) for v in s["seeds"]],
+        "chosen": int(s["chosen"]),
+        "eval_scores": [_json_float(v) for v in s["eval_scores"]],
+        "train_scores": [_json_float(v) for v in s["train_scores"]],
+        "params": [dict(p) for p in s["params"]],
+        "spread": {
+            k: {kk: _json_float(vv) for kk, vv in v.items()} for k, v in (s.get("spread") or {}).items()
+        },
+        "pinned": [str(p) for p in (s.get("pinned") or [])],
+    }
+
+
+def _seeds_from_dict(s: Mapping[str, Any]) -> dict:
+    return {
+        "n": int(s.get("n", len(s.get("params", [])))),
+        "seeds": [int(v) for v in s.get("seeds", [])],
+        "chosen": int(s.get("chosen", 0)),
+        "eval_scores": [_parse_float(v) for v in s.get("eval_scores", [])],
+        "train_scores": [_parse_float(v) for v in s.get("train_scores", [])],
+        "params": [dict(p) for p in s.get("params", [])],
+        "spread": {
+            k: {kk: _parse_float(vv) for kk, vv in v.items()} for k, v in (s.get("spread") or {}).items()
+        },
+        "pinned": [str(p) for p in (s.get("pinned") or [])],
+    }
 
 
 # --------------------------------------------------------------------------
@@ -464,6 +567,12 @@ class _Fit:
     generation: int = 0
     history: list[tuple[int, float]] = field(default_factory=list)
     stages: list[dict] = field(default_factory=list)
+    #: Which seed run is in progress (0-based); stamped on every progress event.
+    seed_index: int = 0
+
+    def reset_best(self, params: SimParams, report: Any, value: float) -> None:
+        """Start tracking the best from ``params`` again (a new seed run)."""
+        self.best_params, self.best_score, self.best_report = params, value, report
 
     def record(self, params: SimParams, report: Any, value: float, stage: str) -> None:
         """Account one evaluated candidate: best-so-far, history, progress."""
@@ -481,6 +590,7 @@ class _Fit:
                     best_per_joint_deg=_per_joint(self.best_report),
                     elapsed_s=time.perf_counter() - self.t0,
                     stage=stage,
+                    seed=self.seed_index,
                 )
             )
 
@@ -543,6 +653,7 @@ class _Fit:
                 "n_evaluations": self.evaluations - first_eval,
                 "train_score": self.best_score,
                 "params": self.best_params.to_dict(),
+                "seed": int(seed),
             }
         )
         return not cancelled and not self.stop()
@@ -563,6 +674,8 @@ def calibrate(
     per_joint_max_evaluations: int = PER_JOINT_MAX_EVALUATIONS,
     per_joint_sigma0: float = PER_JOINT_SIGMA0,
     per_joint_popsize: int | None = None,
+    n_seeds: int = 1,
+    seeds: Sequence[int] | None = None,
 ) -> CalibrationResult:
     """Fit :class:`SimParams` to ``train`` episodes; report on ``eval`` episodes.
 
@@ -574,17 +687,40 @@ def calibrate(
     optimum with step size ``per_joint_sigma0``; ``per_joint_popsize`` of
     None takes CMA-ES's default for that dimensionality.
 
+    With ``n_seeds > 1`` (or an explicit ``seeds`` list) the shared stage
+    runs once per seed (``seed``, ``seed + 100``, ``seed + 200``, ...), each
+    from the same ``start`` with the full ``max_evaluations`` budget, and the
+    candidate with the best held-out score is kept (the training score
+    decides when there are no eval episodes). The per-joint stage then runs
+    once from the winner. ``result.stages`` has one ``"shared"`` entry per
+    seed and ``result.seeds`` records every candidate, the spread of each
+    parameter across them and which parameters are *pinned* (agree across
+    seeds); a single-seed fit leaves ``seeds`` None. The same seed run twice
+    gives the same fit, so one seed is repeatable but not representative:
+    on the demo arms different seeds land at kp 10 and kp 260 with the same
+    error.
+
     ``on_progress`` fires once per objective evaluation, starting with the
     starting point as evaluation 0, so it is called ``n_evaluations + 1``
-    times; each event names its ``stage``. ``should_stop`` is polled between
-    evaluations; when it returns True the fit ends early (skipping any later
-    stage) and the best parameters found so far are returned.
+    times; each event names its ``stage`` and ``seed`` index, and
+    ``best_score`` is the best of the seed run in progress. ``should_stop``
+    is polled between evaluations; when it returns True the fit ends early
+    (skipping later seeds and any later stage) and the best parameters found
+    so far are returned.
     """
     t0 = time.perf_counter()
     train = list(train)
     eval = list(eval)
     if not train:
         raise ValueError("calibrate needs at least one training episode")
+    if seeds is not None:
+        seed_list = [int(s) for s in seeds]
+        if not seed_list:
+            raise ValueError("seeds must name at least one seed")
+    else:
+        if n_seeds < 1:
+            raise ValueError("n_seeds must be >= 1")
+        seed_list = [seed + 100 * i for i in range(n_seeds)]
     if simulate is None:
         simulate = default_simulate()
     if start is None:
@@ -604,8 +740,40 @@ def calibrate(
     )
     fit.record(start, start_report, start_score, SHARED.name)
 
-    # No shared budget: skip the stage (a per-joint refit starts in its own space).
-    finished = fit.run_stage(SHARED, start, max_evaluations, sigma0, popsize, seed) if max_evaluations > 0 else True
+    def held_out(params: SimParams, report: Any, value: float) -> tuple[Any, float]:
+        """Held-out score; the training score stands in without eval episodes."""
+        return _safe_score(params, eval, simulate) if eval else (report, value)
+
+    # Shared stage, once per seed from the same start. No shared budget:
+    # skip it (a per-joint refit starts in its own space).
+    finished = True
+    chosen = 0
+    candidates: list[tuple[SimParams, Any, float]] = []  # (params, train report, train score)
+    candidate_eval: list[tuple[Any, float]] = []
+    if max_evaluations > 0:
+        for i, s in enumerate(seed_list):
+            fit.seed_index = i
+            if i > 0:
+                fit.reset_best(start, start_report, start_score)
+            finished = fit.run_stage(SHARED, start, max_evaluations, sigma0, popsize, s)
+            candidates.append((fit.best_params, fit.best_report, fit.best_score))
+            candidate_eval.append(held_out(fit.best_params, fit.best_report, fit.best_score))
+            if not finished:
+                break
+        chosen = int(np.argmin([v for _, v in candidate_eval]))
+        fit.reset_best(*candidates[chosen])
+    seeds_block = (
+        seed_summary(
+            seed_list[: len(candidates)],
+            chosen,
+            [p for p, _, _ in candidates],
+            [v for _, v in candidate_eval],
+            [v for _, _, v in candidates],
+        )
+        if len(candidates) >= 2
+        else None
+    )
+
     if per_joint and finished:
         # Refine from the shared optimum; a fresh seed so the two stages do
         # not share a random stream.
@@ -620,13 +788,13 @@ def calibrate(
     best_params, best_score, best_report = fit.best_params, fit.best_score, fit.best_report
 
     # Held-out evaluation, before and after. With no eval episodes the
-    # training reports stand in so the result stays fully populated.
-    if eval:
-        before_report, before_score = _safe_score(start, eval, simulate)
-        after_report, after_score = _safe_score(best_params, eval, simulate)
+    # training reports stand in so the result stays fully populated. The
+    # chosen seed's held-out score is reused when nothing refined it.
+    before_report, before_score = held_out(start, start_report, start_score)
+    if candidates and best_params is candidates[chosen][0]:
+        after_report, after_score = candidate_eval[chosen]
     else:
-        before_report, before_score = start_report, start_score
-        after_report, after_score = best_report, best_score
+        after_report, after_score = held_out(best_params, best_report, best_score)
 
     return CalibrationResult(
         params=best_params,
@@ -644,6 +812,7 @@ def calibrate(
         eval_episodes=[ep.index for ep in eval],
         space=PER_JOINT.name if best_params.has_per_joint else SHARED.name,
         stages=fit.stages,
+        seeds=seeds_block,
     )
 
 
@@ -682,6 +851,8 @@ __all__ = [
     "PENALTY",
     "PER_JOINT_MAX_EVALUATIONS",
     "PER_JOINT_SIGMA0",
+    "PINNED_RATIO",
+    "PINNED_LATENCY_FRAMES",
     "SearchSpace",
     "SHARED",
     "PER_JOINT",
@@ -693,5 +864,7 @@ __all__ = [
     "score",
     "calibrate",
     "default_simulate",
+    "param_spread_of",
+    "seed_summary",
     "split_episodes",
 ]
