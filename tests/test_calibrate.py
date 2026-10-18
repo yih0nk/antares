@@ -150,8 +150,8 @@ def test_decode_rejects_wrong_dim():
 def test_search_spaces():
     assert SHARED.name == "shared" and SHARED.dims == DIMS and SHARED.n_dims == 6
     assert PER_JOINT.name == "per_joint"
-    # every per-joint field, incl. forcerange; gravity_scale is shared-only
-    assert set(PER_JOINT_SPACE) == set(SimParams.field_names()) - {"gravity_scale"}
+    # every per-joint field, incl. forcerange; gravity_scale and deadband are opt-in
+    assert set(PER_JOINT_SPACE) == set(SimParams.field_names()) - {"gravity_scale", "deadband"}
     assert PER_JOINT.n_dims == 7 * 6 == len(PER_JOINT.dims)
     assert PER_JOINT.dims[:2] == ("kp.shoulder_pan", "kp.shoulder_lift")
     assert PER_JOINT.dims[-1] == "forcerange.gripper"
@@ -481,3 +481,30 @@ def test_calibrate_fit_gravity_searches_gravity_scale():
     assert len(seen) > 1
     assert res.params.gravity_scale == pytest.approx(0.5, abs=0.15)
     assert res.space == "shared" and "gravity_scale" in res.to_dict()["params"]
+
+
+def test_spaces_add_optional_terms():
+    from antares.calibrate import DEADBAND_SPACE, spaces
+
+    assert spaces() == (SHARED, PER_JOINT)
+    shared, pj = spaces(fit_deadband=True)
+    assert shared.dims == DIMS + ("deadband",)
+    assert "deadband" in pj.fields and pj.n_dims == PER_JOINT.n_dims + 6
+    shared, pj = spaces(fit_gravity=True, fit_deadband=True)
+    assert shared.dims == DIMS + ("gravity_scale", "deadband")
+    assert "gravity_scale" not in pj.fields
+    assert DEADBAND_SPACE["deadband"][0] == 0.0
+
+
+def test_calibrate_fit_deadband_per_joint_stage():
+    eps = make_episodes(2)
+
+    def sim(params, ep):
+        real, simq = fake_simulate(params, ep)
+        return real, simq + (params.per_joint("deadband") - 0.01)  # best at 0.01 rad everywhere
+
+    res = calibrate(eps[:1], eps[1:], simulate=sim, max_evaluations=40, popsize=6,
+                    fit_deadband=True, per_joint=True, per_joint_max_evaluations=40)
+    assert [s["name"] for s in res.stages] == ["shared", "per_joint"]
+    assert "deadband" in res.to_dict()["params"]
+    assert np.all(np.abs(res.params.per_joint("deadband") - 0.01) < 0.004)

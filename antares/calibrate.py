@@ -135,6 +135,12 @@ PER_JOINT_SPACE: dict[str, tuple[float, float, str]] = {
 #: ``calibrate(fit_gravity=True)``. 0 is a weightless arm, 2 a doubled load.
 GRAVITY_SPACE: dict[str, tuple[float, float, str]] = {"gravity_scale": (0.0, 2.0, "linear")}
 
+#: Optional servo deadband (rad; see :attr:`antares.sim.SimParams.deadband`),
+#: searched only when ``calibrate(fit_deadband=True)``: shared in the shared
+#: stage, per joint in the per-joint stage. 3 degrees is well past the
+#: STS3215's spec'd deadzone plus gear backlash (about 0.5 degrees).
+DEADBAND_SPACE: dict[str, tuple[float, float, str]] = {"deadband": (0.0, math.radians(3.0), "linear")}
+
 DIMS: tuple[str, ...] = tuple(SPACE)
 N_DIMS = len(DIMS)
 
@@ -230,6 +236,15 @@ SHARED = SearchSpace(SPACE, per_joint=False)
 PER_JOINT = SearchSpace(PER_JOINT_SPACE, per_joint=True)
 #: :data:`SHARED` plus the gravity load.
 SHARED_GRAVITY = SearchSpace({**SPACE, **GRAVITY_SPACE}, per_joint=False)
+
+
+def spaces(fit_gravity: bool = False, fit_deadband: bool = False) -> tuple[SearchSpace, SearchSpace]:
+    """``(shared, per_joint)`` search spaces with the optional terms added."""
+    shared = {**SPACE, **(GRAVITY_SPACE if fit_gravity else {}), **(DEADBAND_SPACE if fit_deadband else {})}
+    per_joint = {**PER_JOINT_SPACE, **(DEADBAND_SPACE if fit_deadband else {})}
+    if not fit_gravity and not fit_deadband:
+        return SHARED, PER_JOINT
+    return SearchSpace(shared, per_joint=False), SearchSpace(per_joint, per_joint=True)
 
 
 def encode(params: SimParams, space: SearchSpace = SHARED) -> np.ndarray:
@@ -567,6 +582,7 @@ def calibrate(
     per_joint_sigma0: float = PER_JOINT_SIGMA0,
     per_joint_popsize: int | None = None,
     fit_gravity: bool = False,
+    fit_deadband: bool = False,
 ) -> CalibrationResult:
     """Fit :class:`SimParams` to ``train`` episodes; report on ``eval`` episodes.
 
@@ -580,6 +596,8 @@ def calibrate(
 
     ``fit_gravity=True`` adds ``gravity_scale`` to the shared stage
     (:data:`SHARED_GRAVITY`); the per-joint stage keeps the shared value.
+    ``fit_deadband=True`` adds the servo ``deadband``: one value in the
+    shared stage, one per joint in the per-joint stage.
 
     ``on_progress`` fires once per objective evaluation, starting with the
     starting point as evaluation 0, so it is called ``n_evaluations + 1``
@@ -611,13 +629,13 @@ def calibrate(
     )
     fit.record(start, start_report, start_score, SHARED.name)
 
-    shared = SHARED_GRAVITY if fit_gravity else SHARED
+    shared, per_joint_space = spaces(fit_gravity, fit_deadband)
     finished = fit.run_stage(shared, start, max_evaluations, sigma0, popsize, seed)
     if per_joint and finished:
         # Refine from the shared optimum; a fresh seed so the two stages do
         # not share a random stream.
         fit.run_stage(
-            PER_JOINT,
+            per_joint_space,
             fit.best_params,
             per_joint_max_evaluations,
             per_joint_sigma0,
@@ -691,6 +709,8 @@ __all__ = [
     "PER_JOINT_SIGMA0",
     "SearchSpace",
     "GRAVITY_SPACE",
+    "DEADBAND_SPACE",
+    "spaces",
     "SHARED",
     "SHARED_GRAVITY",
     "PER_JOINT",
