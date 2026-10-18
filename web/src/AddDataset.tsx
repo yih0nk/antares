@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, type DragEvent } from "react";
 import { ApiError, api, type DatasetInfo, type Verdict } from "./api";
+import { Button, Icon, InlineNotice, ProgressBar } from "./ui";
 
-// "+ add dataset": a popover under the top bar with two ways in. A Hub id is
+// "Add dataset": a popover under the top bar with two ways in. A Hub id is
 // checked first (meta/info.json only, no download) and the verdict shown
 // before anything is loaded; a zip of a LeRobot dataset directory is
 // uploaded with progress and validated server-side. Either way the new
@@ -26,16 +27,20 @@ export function VerdictLines({ verdict }: { verdict: Verdict }) {
   return (
     <ul className="verdict">
       {verdict.reasons.map((r) => (
-        <li key={r} className="bad">
-          {r}
+        <li key={r} className="tone-critical">
+          <Icon.error /> {r}
         </li>
       ))}
       {verdict.warnings.map((w) => (
-        <li key={w} className="warn">
-          {w}
+        <li key={w} className="tone-warn">
+          <Icon.warn /> {w}
         </li>
       ))}
-      {verdict.ok && !verdict.warnings.length && <li className="good">looks good</li>}
+      {verdict.ok && !verdict.warnings.length && (
+        <li className="tone-good">
+          <Icon.check /> Looks good
+        </li>
+      )}
     </ul>
   );
 }
@@ -43,7 +48,7 @@ export function VerdictLines({ verdict }: { verdict: Verdict }) {
 const fmtVerdictHead = (v: Verdict) =>
   `${v.robot_type || "unknown robot"}${v.robot_family ? ` (${v.robot_family})` : ""} · ${v.n_episodes} episodes @ ${v.fps} fps`;
 
-export function AddDataset({ disabled, onAdded }: Props) {
+export function AddDataset({ disabled, disabledReason, onAdded }: Props & { disabledReason?: string }) {
   const [open, setOpen] = useState(false);
   const [hubId, setHubId] = useState("");
   const [checking, setChecking] = useState(false);
@@ -131,12 +136,18 @@ export function AddDataset({ disabled, onAdded }: Props) {
 
   return (
     <div className="add-dataset" ref={box}>
-      <button className="add-btn" onClick={() => setOpen((o) => !o)} disabled={disabled} title="Bring your own dataset">
-        + add dataset
-      </button>
+      <Button
+        onClick={() => setOpen((o) => !o)}
+        disabled={disabled}
+        title={disabled && disabledReason ? disabledReason : "Bring your own LeRobot dataset"}
+        aria-expanded={open}
+        aria-haspopup="dialog"
+      >
+        Add dataset
+      </Button>
       {open && (
         <div className="popover" role="dialog" aria-label="Add a dataset">
-          <div className="label">Hugging Face Hub</div>
+          <div className="section-label">Hugging Face Hub</div>
           <form
             className="hub-row"
             onSubmit={(e) => {
@@ -145,7 +156,8 @@ export function AddDataset({ disabled, onAdded }: Props) {
             }}
           >
             <input
-              className="picker hub-id"
+              className="input hub-id"
+              aria-label="Hugging Face dataset id"
               placeholder="owner/dataset_name"
               value={hubId}
               onChange={(e) => {
@@ -156,26 +168,30 @@ export function AddDataset({ disabled, onAdded }: Props) {
               spellCheck={false}
               autoFocus
             />
-            <button type="submit" className="cta secondary small-cta" disabled={!hubId.trim() || checking}>
+            <Button type="submit" busy={checking} disabled={!hubId.trim()}>
               {checking ? "Checking…" : "Check"}
-            </button>
-            <button type="button" className="cta small-cta" disabled={!checked?.verdict.ok} onClick={load}>
+            </Button>
+            <Button variant="primary" disabled={!checked?.verdict.ok} onClick={load} title={checked?.verdict.ok ? "Load this dataset" : "Check the id first"}>
               Load
-            </button>
+            </Button>
           </form>
-          {checkError && <div className="bad small">{checkError}</div>}
+          {checkError && (
+            <InlineNotice tone="error" onDismiss={() => setCheckError(null)}>
+              {checkError}
+            </InlineNotice>
+          )}
           {checked && (
-            <div className="small">
-              <div className="muted">{fmtVerdictHead(checked.verdict)}</div>
+            <div className="verdict-box">
+              <div className="section-hint">{fmtVerdictHead(checked.verdict)}</div>
               <VerdictLines verdict={checked.verdict} />
             </div>
           )}
-          <div className="muted small">
-            Any public LeRobot dataset of one SO-100/101 arm: six joints, 30 or 50 fps, at least 5 episodes. Checked
-            from its info.json before the download starts.
+          <div className="section-hint">
+            Check an id, then load it. Any public LeRobot dataset of one SO-100/101 arm: six joints, 30 or 50 fps, at least 5 episodes. Checked from its info.json
+            before the download starts.
           </div>
 
-          <div className="label">Upload a zip</div>
+          <div className="section-label">Upload a zip</div>
           <div
             className={`dropzone ${dragOver ? "over" : ""} ${upload?.status === "uploading" ? "busy" : ""}`}
             onDragOver={(e) => {
@@ -187,7 +203,12 @@ export function AddDataset({ disabled, onAdded }: Props) {
             onClick={() => upload?.status !== "uploading" && fileInput.current?.click()}
             role="button"
             tabIndex={0}
-            onKeyDown={(e) => e.key === "Enter" && fileInput.current?.click()}
+            aria-label="Upload a zip of a LeRobot dataset"
+            onKeyDown={(e) => {
+              if (e.key !== "Enter" && e.key !== " ") return;
+              e.preventDefault();
+              if (upload?.status !== "uploading") fileInput.current?.click();
+            }}
           >
             <input
               ref={fileInput}
@@ -202,25 +223,21 @@ export function AddDataset({ disabled, onAdded }: Props) {
             />
             {upload ? (
               <div className="upload-state">
-                <div className="row">
-                  <span className="mono small">{upload.name}</span>
-                  <span className="mono small">
-                    {upload.status === "uploading" ? `${Math.round(upload.fraction * 100)}%` : upload.status}
-                  </span>
+                <div className="run-head">
+                  <span>{upload.name}</span>
+                  <span className="num">{upload.status === "uploading" ? `${Math.round(upload.fraction * 100)}%` : upload.status}</span>
                 </div>
-                <div className="progress">
-                  <span style={{ width: `${Math.round(upload.fraction * 100)}%` }} />
-                </div>
+                <ProgressBar value={upload.fraction} label="Upload progress" />
                 {upload.status === "uploading" && upload.fraction >= 1 && (
-                  <div className="muted small">Extracting, validating and reading the parquet files…</div>
+                  <div className="section-hint">Extracting, validating and reading the parquet files…</div>
                 )}
-                {upload.message && <div className="bad small">{upload.message}</div>}
+                {upload.message && <div className="tone-critical">{upload.message}</div>}
                 {upload.verdict && <VerdictLines verdict={upload.verdict} />}
               </div>
             ) : (
               <>
                 <div>Drop a .zip of a LeRobot dataset directory, or click to choose</div>
-                <div className="muted small">meta/info.json + data/**/*.parquet; videos are ignored. Up to 200 MB.</div>
+                <div className="section-hint">meta/info.json + data/**/*.parquet; videos are ignored. Up to 200 MB.</div>
               </>
             )}
           </div>

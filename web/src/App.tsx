@@ -1,329 +1,184 @@
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Canvas, useFrame, useThree } from "@react-three/fiber";
-import { Grid, OrbitControls } from "@react-three/drei";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   lockNameFor,
-  type CalibrationResult,
   type Compensation,
   type CrossMatrix,
   type DatasetInfo,
   type EpisodeInfo,
   type Geometry,
   type JobEvent,
-  type LockSummary,
   type ObjectsFit,
   type ObjectTrack,
-  type NumericParamKey,
   type Params,
-  type ParamValue,
   type PolicyEvalEvent,
   type PolicyInfo,
   type PolicyMode,
   type PolicyResults,
   type PolicyTrainEvent,
-  type PolicyTrainProgress,
   type PolicyViewer,
-  type ProgressEvent,
   type Replay,
   type Residual,
   type SceneFit,
 } from "./api";
-import * as THREE from "three";
-import { Arm, compMaterial, ghostMaterial, policyDefaultMaterial, policyLockMaterial, realMaterial, type Playhead } from "./Arm";
+import { Arm, ghostMaterials, makeGhostMaterial, policyDefaultMaterial, policyLockMaterial, type Playhead } from "./Arm";
 import { CameraView } from "./CameraView";
 import { SceneGeometry } from "./Scene";
 import { ObjectMarker } from "./Objects";
-import { CrossHeatmap, JointTrace, ResidualStrip, Sparkline } from "./Charts";
 import { AddDataset } from "./AddDataset";
-import { Factors } from "./Factors";
 import { FleetView } from "./Fleet";
+import { ArmScene, type Show } from "./Viewport";
+import { Timeline, episodeOptionLabel } from "./Timeline";
+import {
+  CalibrateSection,
+  GapStat,
+  JointBars,
+  LIVE_ID,
+  MAX_EVALUATIONS,
+  PER_JOINT_EVALUATIONS,
+  ParamsDisclosure,
+  PhysicsPicker,
+  STOCK,
+  type CalibOptions,
+  type Calibration,
+  type PhysicsRow,
+} from "./CalibrateTab";
+import { PolicyTab, POLICY_EPOCHS, type PolicyJob } from "./PolicyTab";
+import { ToolsTab } from "./ToolsTab";
+import { CrossModal } from "./CrossModal";
+import { deg } from "./format";
+import {
+  defaultSplit,
+  fmtWhen,
+  isViewerRun,
+  lockApi,
+  lockKinds,
+  lockLabel,
+  partialOf,
+  readPartialRuns,
+  recordPartialRun,
+  repeatOf,
+  roleOf,
+  splitOf,
+  ROLE_HELP,
+  type LockDetail,
+  type LockRow,
+  type PartialRun,
+} from "./lockInfo";
+import type { SimTone } from "./theme";
+import {
+  ArmKey,
+  Button,
+  Icon,
+  InlineNotice,
+  LegendItem,
+  SegmentedControl,
+  Select,
+  Spinner,
+  TabPanel,
+  Tabs,
+  ToastHost,
+  useToasts,
+} from "./ui";
 
-// Layout: 3D viewer (real arm + ghost sim arm) on the left, gap panel on
-// the right, episode timeline along the bottom. The ghost is the simulator
-// replaying the real commands with either the default parameters, a saved
-// robot lock, or (while calibrating) the best fit so far.
+// Layout: the 3D viewport (real arm + sim ghost) on the left, the inspector
+// (Calibrate / Camera / Policy / Tools) on the right, the episode timeline
+// along the bottom. The ghost is the simulator replaying the real commands
+// with the stock model, a saved lock, or (while calibrating) the best fit so far.
 
-const DEFAULT = "default";
-const LIVE = "live";
-const PARAM_KEYS: NumericParamKey[] = ["kp", "kv", "damping", "armature", "frictionloss", "latency_frames", "forcerange", "gravity_scale", "deadband"];
-// Terms a lock omits at their defaults; the row shows only when the lock carries one.
-const OPTIONAL_DEFAULTS: Partial<Record<NumericParamKey, number>> = { gravity_scale: 1, deadband: 0 };
-// The STS3215 servo model's fields, written only by a --servo fit; shown when either side has them.
-const SERVO_KEYS: NumericParamKey[] = ["servo_gain", "p_coefficient", "vin", "kt", "resistance", "max_velocity"];
-// With a servo model these hold its linearized PD equivalent, not fitted values.
-const LINEARIZED_KEYS: ReadonlySet<NumericParamKey> = new Set<NumericParamKey>(["kp", "kv", "forcerange"]);
-const servoOf = (p: Params) => p.servo ?? "position";
-const SPEEDS = [0.25, 0.5, 1, 2];
-// Which arms the viewer draws: both overlaid, or one at a time.
-const SHOW = ["both", "real", "sim"] as const;
-type Show = (typeof SHOW)[number];
-// CMA-ES budget for a UI run; also sizes the sparkline's x axis.
-const MAX_EVALUATIONS = 150;
-// Budget of the optional per-joint refinement stage (the API's default).
-const PER_JOINT_EVALUATIONS = 600;
-
-type Calibration = {
-  jobId: string;
-  name: string;
-  // Evaluations the run was asked for over all its stages; sizes the sparkline.
-  total: number;
-  perJoint: boolean;
-  status: "running" | "done" | "error" | "cancelled";
-  progress: ProgressEvent[];
-  best: number[];
-  result?: CalibrationResult;
-  error?: string;
-};
+const DEFAULT = STOCK;
+const LIVE = LIVE_ID;
 
 const noop = () => {};
 
-// A policy training or evaluation job streamed from the API.
-type PolicyJob = {
-  jobId: string;
-  kind: "train" | "evaluate";
-  mode?: PolicyMode;
-  status: "running" | "done" | "error";
-  progress: PolicyTrainProgress[];
-  // Evaluation progress: episodes done / total.
-  i: number;
-  n: number;
-  error?: string;
-};
+type Tab = "calibrate" | "camera" | "policy" | "tools";
+const TABS: Tab[] = ["calibrate", "camera", "policy", "tools"];
+const TAB_KEY = "antares.inspector-tab";
 
-// Epochs a UI training run asks for (early stopping usually ends it sooner).
-const POLICY_EPOCHS = 200;
-
-const short = (id: string) => id.split("/").pop() ?? id;
-
-const deg = (v: number | null | undefined, digits = 2) => (v == null || !isFinite(v) ? "--" : `${v.toFixed(digits)}°`);
-const cm = (v: number | null | undefined, digits = 1) => (v == null || !isFinite(v) ? "--" : `${v.toFixed(digits)} cm`);
-
-function fmtScalar(k: NumericParamKey, v: number) {
-  if (k === "latency_frames") return `${Math.round(v)} fr`;
-  if (Math.abs(v) >= 100) return v.toFixed(1);
-  if (Math.abs(v) >= 1) return v.toFixed(3);
-  return v.toFixed(4);
-}
-
-// A per-joint value shows as its range across the six joints.
-function fmtParam(k: NumericParamKey, v: ParamValue) {
-  if (!Array.isArray(v)) return fmtScalar(k, v);
-  const lo = Math.min(...v);
-  const hi = Math.max(...v);
-  return lo === hi ? fmtScalar(k, lo) : `${fmtScalar(k, lo)}–${fmtScalar(k, hi)}`;
-}
-
-function sameParam(a: ParamValue, b: ParamValue) {
-  const av = Array.isArray(a) ? a : [a];
-  const bv = Array.isArray(b) ? b : [b];
-  const n = Math.max(av.length, bv.length);
-  for (let i = 0; i < n; i++) {
-    if (Math.abs(av[i % av.length] - bv[i % bv.length]) > 1e-9) return false;
+function readTab(): Tab {
+  try {
+    const t = window.localStorage.getItem(TAB_KEY) as Tab | null;
+    return t && TABS.includes(t) ? t : "calibrate";
+  } catch {
+    return "calibrate";
   }
-  return true;
 }
 
-// Advances the shared playhead inside the render loop so playback never
-// waits on React; the UI copy of the frame is updated when it changes.
-function Driver({
-  playhead,
-  playing,
-  fps,
-  frames,
-  speed,
-  onFrame,
-}: {
-  playhead: Playhead;
-  playing: boolean;
-  fps: number;
-  frames: number;
-  speed: number;
-  onFrame: (f: number) => void;
-}) {
-  const last = useRef(-1);
-  useFrame((_, dt) => {
-    if (frames < 2) return;
-    // Cap dt only against long stalls (a backgrounded tab), so slow renders
-    // still play back in real time.
-    if (playing) playhead.frame = (playhead.frame + Math.min(dt, 0.5) * fps * speed) % frames;
-    const f = Math.floor(playhead.frame);
-    if (f !== last.current) {
-      last.current = f;
-      onFrame(f);
+// How long a deleted lock can be restored before the DELETE is sent.
+const UNDO_MS = 6000;
+
+// The selection that survives a reload, carried in the query string so the
+// address is also a link to this view: `?dataset=…&episode=…&ghost=…`.
+// The live fit is never restored (it belongs to a job that is gone).
+type Restore = { dataset: string; episode: number | null; ghost: string | null };
+
+function readRestore(): Restore {
+  try {
+    const q = new URLSearchParams(window.location.search);
+    const ep = q.get("episode");
+    const n = ep == null ? NaN : Number(ep);
+    const ghost = q.get("ghost");
+    return {
+      dataset: q.get("dataset") ?? "",
+      episode: Number.isInteger(n) && n >= 0 ? n : null,
+      ghost: ghost && ghost !== LIVE ? ghost : null,
+    };
+  } catch {
+    return { dataset: "", episode: null, ghost: null };
+  }
+}
+
+function writeRestore(dataset: string, episode: number | null, ghost: string) {
+  try {
+    const q = new URLSearchParams(window.location.search);
+    if (dataset) q.set("dataset", dataset);
+    else q.delete("dataset");
+    if (episode != null) q.set("episode", String(episode));
+    else q.delete("episode");
+    if (ghost !== DEFAULT && ghost !== LIVE) q.set("ghost", ghost);
+    else q.delete("ghost");
+    const search = q.toString();
+    const url = window.location.pathname + (search ? "?" + search : "") + window.location.hash;
+    if (url !== window.location.pathname + window.location.search + window.location.hash) {
+      window.history.replaceState(null, "", url);
     }
-  });
-  return null;
-}
-
-const CAMERA_POSITION: [number, number, number] = [0.62, 0.48, 0.72];
-const CAMERA_TARGET: [number, number, number] = [0, 0.16, 0];
-// Widest view the default camera frames the whole arm in; narrower panes
-// (side by side) pull the camera back so the arm still fits.
-const FRAMED_ASPECT = 1.6;
-
-function FitCamera() {
-  const camera = useThree((s) => s.camera);
-  const aspect = useThree((s) => s.size.width / Math.max(1, s.size.height));
-  // The pull-back factor last applied; a later aspect change rescales the
-  // camera's current offset from the target, so an orbit the user made survives
-  // a resize or the side-by-side toggle.
-  const lastK = useRef<number | null>(null);
-  useEffect(() => {
-    const k = Math.max(1, FRAMED_ASPECT / aspect);
-    const [tx, ty, tz] = CAMERA_TARGET;
-    if (lastK.current == null) {
-      const [x, y, z] = CAMERA_POSITION;
-      camera.position.set(tx + (x - tx) * k, ty + (y - ty) * k, tz + (z - tz) * k);
-    } else if (lastK.current !== k) {
-      const r = k / lastK.current;
-      const { x, y, z } = camera.position;
-      camera.position.set(tx + (x - tx) * r, ty + (y - ty) * r, tz + (z - tz) * r);
-    }
-    lastK.current = k;
-  }, [camera, aspect]);
-  return null;
-}
-
-// A pane that mirrors another pane's playhead: the second episode is a pure
-// function of the first one's clock (scaled by frame rate, wrapped to its
-// own length), so the two never drift apart.
-function Follow({
-  lead,
-  leadFps,
-  playhead,
-  fps,
-  frames,
-}: {
-  lead: Playhead;
-  leadFps: number;
-  playhead: Playhead;
-  fps: number;
-  frames: number;
-}) {
-  useFrame(() => {
-    if (frames < 2) return;
-    playhead.frame = ((lead.frame / Math.max(1, leadFps)) * fps) % frames;
-  });
-  return null;
-}
-
-// One 3D view: the real arm, the sim ghost and (optionally) the
-// lag-compensated sim for one episode, with its own playhead and camera.
-function Scene({
-  geometry,
-  realPoses,
-  simPoses,
-  compPoses,
-  hotSpans,
-  clip,
-  show,
-  playhead,
-  playing,
-  fps,
-  frames,
-  speed,
-  onFrame,
-  ghostMat = ghostMaterial,
-  children,
-  follow,
-}: {
-  geometry: Geometry | null;
-  realPoses: number[][][] | null;
-  simPoses: number[][][] | null;
-  compPoses: number[][][] | null;
-  hotSpans: number[][] | null;
-  clip: string;
-  show: Show;
-  playhead: Playhead;
-  playing: boolean;
-  fps: number;
-  frames: number;
-  speed: number;
-  onFrame: (f: number) => void;
-  // A second pane gets its own copy: the warm glow on hot spans animates it.
-  ghostMat?: THREE.Material;
-  // Extra things drawn in the arm's frame (policy ghosts, the fitted scene, the tracked object).
-  children?: ReactNode;
-  // Follow another pane's playhead (scaled by fps) instead of running its own clock.
-  follow?: { lead: Playhead; leadFps: number };
-}) {
-  return (
-    <Canvas shadows camera={{ position: CAMERA_POSITION, fov: 38, near: 0.01, far: 20 }}>
-      <FitCamera />
-      <color attach="background" args={["#0b0d12"]} />
-      <ambientLight intensity={0.55} />
-      <directionalLight position={[0.8, 1.6, 0.6]} intensity={1.3} castShadow shadow-mapSize={[1024, 1024]} />
-      <directionalLight position={[-1, 0.6, -0.8]} intensity={0.35} />
-      <Grid
-        infiniteGrid
-        cellSize={0.05}
-        sectionSize={0.25}
-        cellColor="#1c2230"
-        sectionColor="#2a3346"
-        fadeDistance={3}
-      />
-      {geometry && (
-        <Suspense fallback={null}>
-          {/* MuJoCo is z-up; three.js is y-up. Keyed by model so a robot switch swaps the meshes cleanly. */}
-          <group key={geometry.robot} rotation={[-Math.PI / 2, 0, 0]}>
-            <Arm
-              geometry={geometry}
-              poses={realPoses}
-              clip={clip}
-              playhead={playhead}
-              material={realMaterial}
-              hidden={show === "sim"}
-            />
-            <Arm
-              geometry={geometry}
-              poses={simPoses}
-              clip={clip}
-              playhead={playhead}
-              material={ghostMat}
-              hotSpans={hotSpans}
-              hidden={show === "real"}
-            />
-            <Arm
-              geometry={geometry}
-              poses={compPoses}
-              clip={clip}
-              playhead={playhead}
-              material={compMaterial}
-              hidden={show === "real"}
-            />
-            {children}
-          </group>
-        </Suspense>
-      )}
-      {follow ? (
-        <Follow lead={follow.lead} leadFps={follow.leadFps} playhead={playhead} fps={fps} frames={frames} />
-      ) : (
-        <Driver playhead={playhead} playing={playing} fps={fps} frames={frames} speed={speed} onFrame={onFrame} />
-      )}
-      <OrbitControls makeDefault target={CAMERA_TARGET} />
-    </Canvas>
-  );
+  } catch {
+    // per-viewer convenience only
+  }
 }
 
 export default function App() {
   // Top-level screen: the single-arm viewer, or the fleet dashboard. The
   // hash deep-links to the fleet (`#fleet`, or `#fleet/<lock>` with a row open).
-  const [view, setViewState] = useState<"viewer" | "fleet">(() =>
-    window.location.hash.startsWith("#fleet") ? "fleet" : "viewer",
-  );
+  const [view, setViewState] = useState<"viewer" | "fleet">(() => (window.location.hash.startsWith("#fleet") ? "fleet" : "viewer"));
   const setView = (v: "viewer" | "fleet") => {
     setViewState(v);
     window.history.replaceState(null, "", v === "fleet" ? "#fleet" : window.location.pathname + window.location.search);
   };
+  const [tab, setTabState] = useState<Tab>(readTab);
+  const inspectorBody = useRef<HTMLDivElement | null>(null);
+  const setTab = (t: Tab) => {
+    setTabState(t);
+    // Each tab opens at its top (the panels share one scroller).
+    if (inspectorBody.current) inspectorBody.current.scrollTop = 0;
+    try {
+      window.localStorage.setItem(TAB_KEY, t);
+    } catch {
+      // per-viewer convenience only
+    }
+  };
   const [datasets, setDatasets] = useState<DatasetInfo[]>([]);
-  const [dataset, setDataset] = useState<string>("");
+  // Episode and ghost to restore once the dataset named in the URL has loaded.
+  const restore = useRef<Restore>(readRestore());
+  const [dataset, setDataset] = useState<string>(() => restore.current.dataset);
   const [dsState, setDsState] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [loadSeconds, setLoadSeconds] = useState(0);
   const [episodes, setEpisodes] = useState<EpisodeInfo[]>([]);
   const [episode, setEpisode] = useState<number | null>(null);
   const [geometry, setGeometry] = useState<Geometry | null>(null);
-  const [locks, setLocks] = useState<LockSummary[]>([]);
+  const [locks, setLocks] = useState<LockRow[]>([]);
+  const locksRef = useRef<LockRow[]>([]);
+  locksRef.current = locks;
   const [ghost, setGhost] = useState<string>(DEFAULT);
   const [baseline, setBaseline] = useState<Replay | null>(null);
   const [replay, setReplay] = useState<Replay | null>(null);
@@ -332,18 +187,14 @@ export default function App() {
   const [playing, setPlaying] = useState(true);
   const [speed, setSpeed] = useState(1);
   const [show, setShow] = useState<Show>("both");
-  // A second episode shown side by side with the first; null when off.
+  // A second episode shown next to the first; null when off.
   const [compare, setCompare] = useState<number | null>(null);
   const [compareBase, setCompareBase] = useState<Replay | null>(null);
   const [compareReplay, setCompareReplay] = useState<Replay | null>(null);
   const [frame, setFrame] = useState(0);
   const [joint, setJoint] = useState("shoulder_pan");
   const [calib, setCalib] = useState<Calibration | null>(null);
-  const [perJoint, setPerJoint] = useState(false);
-  // null: the built-in factors; otherwise the shared-stage names to fit.
-  const [fitFactors, setFitFactors] = useState<string[] | null>(null);
-  const [fitGravity, setFitGravity] = useState(false);
-  const [fitDeadband, setFitDeadband] = useState(false);
+  const [opts, setOpts] = useState<CalibOptions>({ perJoint: false, fitGravity: false, fitDeadband: false, factors: null });
   const [residual, setResidual] = useState<Residual | null>(null);
   const [crossOpen, setCrossOpen] = useState(false);
   // Cached per (loaded datasets × saved locks); cleared when either changes.
@@ -370,9 +221,20 @@ export default function App() {
   const [objects, setObjects] = useState<ObjectsFit | null>(null);
   const [track, setTrack] = useState<ObjectTrack | null>(null);
 
+  // What the inspector knows about each lock beyond /api/locks: its split,
+  // kind and stages (GET /api/locks/{name}), and its camera fits.
+  const [details, setDetails] = useState<Record<string, LockDetail>>({});
+  const [camFits, setCamFits] = useState<Record<string, string[]>>({});
+  // Runs stopped from this browser, for the "partial" badge.
+  const [stoppedRuns, setStoppedRuns] = useState<Record<string, PartialRun>>(readPartialRuns);
+  const [showAllLocks, setShowAllLocks] = useState(false);
+  // Locks deleted in the UI whose DELETE waits out the undo window.
+  const [pendingDeletes, setPendingDeletes] = useState<Set<string>>(new Set());
+  const { toasts, push: pushToast, remove: removeToast } = useToasts();
+
   const playhead = useMemo<Playhead>(() => ({ frame: 0 }), []);
   const comparePlayhead = useMemo<Playhead>(() => ({ frame: 0 }), []);
-  const compareGhostMat = useMemo(() => ghostMaterial.clone(), []);
+  const compareGhostMats = useMemo(() => ({ stock: makeGhostMaterial("stock"), sim: makeGhostMaterial("sim") }), []);
 
   // ---- initial load ---------------------------------------------------------
   useEffect(() => {
@@ -402,7 +264,7 @@ export default function App() {
     };
   }, [robot]);
 
-  // A dataset added from the "+ add dataset" popover: list it and select it;
+  // A dataset added from the "Add dataset" popover: list it and select it;
   // the dataset effect below then loads it behind the usual overlay.
   const addDataset = (info: DatasetInfo) => {
     setDatasets((ds) => (ds.some((d) => d.id === info.id) ? ds.map((d) => (d.id === info.id ? info : d)) : [...ds, info]));
@@ -425,13 +287,18 @@ export default function App() {
       .loadDataset(dataset)
       .then((info) => {
         if (!live) return;
-        setDatasets((ds) => ds.map((d) => (d.id === info.id ? info : d)));
+        setDatasets((ds) => (ds.some((d) => d.id === info.id) ? ds.map((d) => (d.id === info.id ? info : d)) : [...ds, info]));
         return api.episodes(dataset);
       })
       .then((eps) => {
         if (!live || !eps) return;
         setEpisodes(eps);
-        setEpisode(eps[0]?.index ?? null);
+        // A reload lands on the episode and ghost it left, once.
+        const r = restore.current;
+        const wanted = r.dataset === dataset && r.episode != null && eps.some((e) => e.index === r.episode) ? r.episode : null;
+        setEpisode(wanted ?? eps[0]?.index ?? null);
+        if (r.dataset === dataset && r.ghost && (r.ghost === DEFAULT || locksRef.current.length === 0 || locksRef.current.some((l) => l.name === r.ghost))) setGhost(r.ghost);
+        restore.current = { dataset: "", episode: null, ghost: null };
         setDsState("ready");
       })
       .catch((e) => {
@@ -454,7 +321,12 @@ export default function App() {
     return () => clearInterval(id);
   }, [dsState]);
 
-  // ---- baseline replay (real arm + default-params ghost) --------------------
+  // The address follows the selection, so a reload (or a pasted link) returns here.
+  useEffect(() => {
+    writeRestore(dataset, episode, ghost);
+  }, [dataset, episode, ghost]);
+
+  // ---- baseline replay (real arm + stock-model ghost) --------------------
   useEffect(() => {
     if (!dataset || episode == null) return;
     let live = true;
@@ -470,8 +342,8 @@ export default function App() {
     };
   }, [dataset, episode, playhead, comparePlayhead]);
 
-  // ---- second episode, side by side -----------------------------------------
-  // Its ghost follows the first pane's choice: default, the same lock, or the
+  // ---- second episode, compared ---------------------------------------------
+  // Its ghost follows the first pane's choice: stock, the same lock, or the
   // live fit's current best parameters. Both panes restart together.
   useEffect(() => {
     setCompareBase(null);
@@ -494,7 +366,7 @@ export default function App() {
   }, [compare, playhead, comparePlayhead]);
 
   // The second pane's ghost with a lock or the live fit is fetched for its
-  // own episode; with the default ghost it is simply the base replay, read at
+  // own episode; with the stock ghost it is simply the base replay, read at
   // render time so no request is made for it. Requests run one at a time:
   // while one is in flight the newest wanted one waits (the live fit lands a
   // new best every few events), and a reply for an older episode or ghost is
@@ -557,6 +429,8 @@ export default function App() {
       .finally(() => live && setReplayBusy(false));
     return () => {
       live = false;
+      // A request dropped mid-flight (another ghost picked) must not leave the spinner on.
+      setReplayBusy(false);
     };
   }, [dataset, episode, ghost, baseline]);
 
@@ -593,6 +467,7 @@ export default function App() {
       .finally(() => live && setCompBusy(false));
     return () => {
       live = false;
+      setCompBusy(false);
     };
   }, [showComp, dataset, episode, ghost]);
 
@@ -635,12 +510,16 @@ export default function App() {
   // ---- calibration -----------------------------------------------------------
   const sourceRef = useRef<EventSource | null>(null);
   useEffect(() => () => sourceRef.current?.close(), []);
+  // The job the user asked to stop; its saved lock is partial.
+  const stoppedJob = useRef<string | null>(null);
 
   const startCalibration = async () => {
     if (!dataset) return;
     setError(null);
     const name = lockNameFor(dataset);
+    const ds = dataset;
     let jobId: string;
+    const perJoint = opts.perJoint;
     const total = MAX_EVALUATIONS + (perJoint ? PER_JOINT_EVALUATIONS : 0);
     try {
       ({ job_id: jobId } = await api.calibrate(
@@ -648,8 +527,8 @@ export default function App() {
         name,
         MAX_EVALUATIONS,
         perJoint ? { maxEvaluations: PER_JOINT_EVALUATIONS } : undefined,
-        fitFactors,
-        { fitGravity, fitDeadband },
+        opts.factors,
+        { fitGravity: opts.fitGravity, fitDeadband: opts.fitDeadband },
       ));
     } catch (e) {
       setError(`Could not start calibration: ${(e as Error).message}`);
@@ -668,11 +547,7 @@ export default function App() {
     src.onmessage = (msg) => {
       const ev = JSON.parse(msg.data) as JobEvent;
       if (ev.type === "progress") {
-        setCalib((c) =>
-          c && c.jobId === jobId
-            ? { ...c, progress: [...c.progress, ev], best: [...c.best, ev.best_score ?? NaN] }
-            : c,
-        );
+        setCalib((c) => (c && c.jobId === jobId ? { ...c, progress: [...c.progress, ev], best: [...c.best, ev.best_score ?? NaN] } : c));
         if (ev.best_score != null && ev.best_score < lastBest - 1e-9) {
           lastBest = ev.best_score;
           liveWanted.current = ev.best_params;
@@ -681,6 +556,18 @@ export default function App() {
       } else if (ev.type === "done") {
         src.close();
         setCalib((c) => (c && c.jobId === jobId ? { ...c, status: "done", result: ev.result } : c));
+        if (stoppedJob.current === jobId && ev.result.n_evaluations < total) {
+          setStoppedRuns(recordPartialRun(ev.lock.name, { n: ev.result.n_evaluations, total }));
+        }
+        pushToast({
+          tone: "good",
+          message: (
+            <>
+              Saved <b>{lockLabel(ev.lock.name, ds)}</b> · held-out {deg(ev.result.eval_score)}
+            </>
+          ),
+          duration: 5000,
+        });
         api.locks().then((ls) => {
           setLocks(ls);
           setGhost(ev.lock.name);
@@ -693,24 +580,42 @@ export default function App() {
     src.onerror = () => {
       // EventSource reconnects on its own; a closed stream after "done" is fine.
       if (src.readyState === EventSource.CLOSED) {
-        setCalib((c) =>
-          c && c.jobId === jobId && c.status === "running" ? { ...c, status: "error", error: "lost the progress stream" } : c,
-        );
+        setCalib((c) => (c && c.jobId === jobId && c.status === "running" ? { ...c, status: "error", error: "lost the progress stream" } : c));
       }
     };
   };
 
   const stopCalibration = async () => {
     if (!calib) return;
+    stoppedJob.current = calib.jobId;
     await api.cancel(calib.jobId).catch(() => {});
     setCalib((c) => (c ? { ...c, status: c.status === "running" ? "cancelled" : c.status } : c));
     // The worker still finishes its current generation and saves the best fit;
     // the stream's "done" event then selects that lock.
   };
 
+  // ---- locks the UI shows (minus those waiting out their undo) ---------------
+  const visibleLocks = useMemo(() => locks.filter((l) => !pendingDeletes.has(l.name)), [locks, pendingDeletes]);
+  const dsLocks = useMemo(() => visibleLocks.filter((l) => l.dataset === dataset), [visibleLocks, dataset]);
+  const dsLockKey = dsLocks.map((l) => l.name).join(",");
+
+  // Each lock's file, for its split, kind and stages; fetched once per name.
+  const detailRequested = useRef(new Set<string>());
+  useEffect(() => {
+    for (const l of dsLocks) {
+      if (detailRequested.current.has(l.name)) continue;
+      detailRequested.current.add(l.name);
+      lockApi.get(l.name).then(
+        (d) => setDetails((x) => ({ ...x, [l.name]: d })),
+        () => detailRequested.current.delete(l.name),
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dsLockKey]);
+
   // ---- cross matrix: every lock on every loaded dataset ----------------------
   const loadedIds = datasets.filter((d) => d.loaded).map((d) => d.id);
-  const lockNames = locks.map((l) => l.name);
+  const lockNames = visibleLocks.map((l) => l.name);
   const crossKey = `${loadedIds.join(",")}|${lockNames.join(",")}`;
   const crossData = cross?.key === crossKey ? cross.data : null;
   const runCross = async () => {
@@ -725,34 +630,61 @@ export default function App() {
       setCrossBusy(false);
     }
   };
-  useEffect(() => {
-    if (!crossOpen) return;
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setCrossOpen(false);
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [crossOpen]);
+  const closeCross = useCallback(() => setCrossOpen(false), []);
 
   // ---- derived ---------------------------------------------------------------
-  const dsLocks = locks.filter((l) => l.dataset === dataset);
-  const lockHome = Object.fromEntries(locks.map((l) => [l.name, l.dataset]));
+  const lockHome = Object.fromEntries(visibleLocks.map((l) => [l.name, l.dataset]));
   const running = calib?.status === "running" || calib?.status === "cancelled";
+  const runningRef = useRef(running);
+  runningRef.current = running;
   const fps = baseline?.fps ?? 30;
   const frames = baseline?.real_poses.length ?? 0;
   const ghostGap = replay?.gap ?? null;
   const baseGap = baseline?.gap ?? null;
   const jointNames = baseline?.joints ?? [];
-  const scored = new Set(baseGap?.scored_joints ?? []);
+  const scored = useMemo(() => new Set(baseGap?.scored_joints ?? []), [baseGap]);
   const jIndex = Math.max(0, jointNames.indexOf(joint));
-  const maxJointErr = Math.max(1e-6, ...Object.values(baseGap?.per_joint_deg ?? {}), ...Object.values(ghostGap?.per_joint_deg ?? {}));
   const lastProgress = calib?.progress[calib.progress.length - 1];
-  const stageLabel =
-    lastProgress?.stage === "per_joint" ? "per-joint refinement"
-    : lastProgress?.stage === "command_map" ? "fitting sensor map"
-    : "fitting shared params";
   const shownParams = replay?.params ?? null;
   const defaultParams = baseline?.params ?? null;
   const clip = `${dataset}#${episode ?? ""}`;
   const dsWarnings = currentDs?.warnings ?? [];
+  const isLock = ghost !== DEFAULT && ghost !== LIVE;
+  const tone: SimTone = ghost === DEFAULT ? "stock" : "sim";
+  const physicsLabel = ghost === DEFAULT ? "stock model" : ghost === LIVE ? "live fit" : lockLabel(ghost, dataset);
+
+  // The selected physics' train / held-out split (a lock's own; the default
+  // split for the stock model and the live fit, which uses it too).
+  const dfltSplit = useMemo(() => defaultSplit(dsLocks, details), [dsLocks, details]);
+  const split = isLock ? splitOf(details[ghost]) : dfltSplit;
+  const roleFor = (ep: number | null) => roleOf(split, ep);
+  const role = roleFor(episode);
+  // The stock model's held-out error, from any lock scored on the default split.
+  const stockHeldOut = useMemo(() => {
+    if (!dfltSplit) return null;
+    const key = JSON.stringify(dfltSplit);
+    const l = dsLocks.find((x) => JSON.stringify(splitOf(details[x.name])) === key && x.scores.baseline_eval_score != null);
+    return l?.scores.baseline_eval_score ?? null;
+  }, [dsLocks, details, dfltSplit]);
+
+  const physicsRows: PhysicsRow[] = useMemo(
+    () =>
+      dsLocks.map((l) => {
+        const rep = repeatOf(l, dsLocks);
+        return {
+          name: l.name,
+          label: lockLabel(l.name, l.dataset),
+          tooltip: `${l.name}\ncreated ${new Date(l.created_at).toLocaleString()}`,
+          kinds: lockKinds(l, details[l.name]),
+          when: fmtWhen(l.created_at, isViewerRun(l.name)),
+          heldOut: l.scores.eval_score,
+          partial: partialOf(l, details[l.name], stoppedRuns),
+          repeatOf: rep ? { name: rep.name, label: lockLabel(rep.name, rep.dataset) } : null,
+          exportUrl: api.exportZipUrl(l.name),
+        };
+      }),
+    [dsLocks, details, stoppedRuns],
+  );
 
   // The trace arrays only change with the replay or the joint, not per frame.
   const traceReal = useMemo(() => baseline?.real_q.map((r) => r[jIndex]) ?? [], [baseline, jIndex]);
@@ -763,14 +695,14 @@ export default function App() {
     const cols = residual.scored_joints.map((j) => residual.joints.indexOf(j)).filter((i) => i >= 0);
     return residual.residual.map((row) => cols.reduce((s, i) => s + Math.abs(row[i]), 0));
   }, [residual]);
-  const hotSpans = useMemo(() => residual?.events.map((e) => [e.start, e.end]) ?? null, [residual]);
+  // [start, end, kind]: the ghost glows critical on contact, warn on an anomaly.
+  const hotSpans = useMemo(() => residual?.events.map((e) => [e.start, e.end, e.kind === "anomaly" ? 1 : 0]) ?? null, [residual]);
   const inEvent = residual?.events.find((e) => frame >= e.start && frame < e.end);
   const compPoses = showComp && ghost !== LIVE && comp ? comp.sim_comp_poses : null;
 
-  const ghostLabel =
-    ghost === DEFAULT ? "default sim" : ghost === LIVE ? "best fit so far" : `lock ${ghost}`;
-  // Camera fits live with a lock: the ghost's, or the dataset's first saved one.
-  const cameraLock = ghost !== DEFAULT && ghost !== LIVE ? ghost : dsLocks[0]?.name ?? null;
+  // Camera fits live with a lock: the ghost's, or the dataset's newest one.
+  const cameraLock = isLock ? ghost : dsLocks[0]?.name ?? null;
+  const cameraLockLabel = cameraLock ? lockLabel(cameraLock, dataset) : "";
 
   const compareFrames = compareBase?.real_poses.length ?? 0;
   // ---- scene fit saved for the camera lock -----------------------------------
@@ -789,11 +721,31 @@ export default function App() {
     };
   }, [cameraLock]);
 
+  // ---- camera fits of the dataset's other locks (for "switch to <lock>") -----
+  const camRequested = useRef(new Set<string>());
+  useEffect(() => {
+    if (tab !== "camera") return;
+    for (const l of dsLocks) {
+      if (camRequested.current.has(l.name)) continue;
+      camRequested.current.add(l.name);
+      api.cameraFits(l.name).then(
+        (r) => setCamFits((x) => ({ ...x, [l.name]: Object.keys(r.cameras) })),
+        () => camRequested.current.delete(l.name),
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, dsLockKey]);
+  const onFitsChange = useCallback((name: string, cams: string[]) => setCamFits((x) => ({ ...x, [name]: cams })), []);
+  const altCamLock = dsLocks.find((l) => l.name !== cameraLock && (camFits[l.name]?.length ?? 0) > 0) ?? null;
+
   // ---- policy: saved policies and evaluations of the camera lock -------------
   const policyLock = cameraLock;
   const policy = policies[0] ?? null;
   const refreshPolicy = useCallback((lock: string) => {
-    api.policies(lock).then((r) => setPolicies(r.policies), () => setPolicies([]));
+    api.policies(lock).then(
+      (r) => setPolicies(r.policies),
+      () => setPolicies([]),
+    );
     api.policyResults(lock).then(setPolResults, () => setPolResults(null));
   }, []);
   useEffect(() => {
@@ -818,12 +770,13 @@ export default function App() {
         (e) => {
           if (!live) return;
           setPolViewer(null);
-          setPolViewerNote(e.status === 400 ? `episode ${episode} is not held out from the policy's training` : e.message);
+          setPolViewerNote(e.status === 400 ? `Episode ${episode} is not held out from the policy's training.` : e.message);
         },
       )
       .finally(() => live && setPolViewerBusy(false));
     return () => {
       live = false;
+      setPolViewerBusy(false);
     };
   }, [showPolicy, policyLock, policy, dataset, episode, polMode, polBusy]);
 
@@ -838,13 +791,7 @@ export default function App() {
     src.onmessage = (msg) => {
       const ev = JSON.parse(msg.data) as PolicyTrainEvent | PolicyEvalEvent;
       if (ev.type === "progress") {
-        setPolJob((j) =>
-          j && j.jobId === jobId
-            ? "epoch" in ev
-              ? { ...j, progress: [...j.progress, ev] }
-              : { ...j, i: ev.i, n: ev.n }
-            : j,
-        );
+        setPolJob((j) => (j && j.jobId === jobId ? ("epoch" in ev ? { ...j, progress: [...j.progress, ev] } : { ...j, i: ev.i, n: ev.n }) : j));
       } else if (ev.type === "done") {
         src.close();
         setPolJob((j) => (j && j.jobId === jobId ? { ...j, status: "done" } : j));
@@ -885,17 +832,10 @@ export default function App() {
     }
   };
 
-  const polResult = polMode === "shadow" ? polResults?.shadow ?? null : polResults?.closedloop ?? null;
-  const polRows = polResult ? Object.entries(polResult.summary.variants) : [];
-  // Typed headline rows per mode (the table below handles both shapes per row).
-  const shadowLock = polResults?.shadow?.summary.variants["lock"] ?? null;
-  const shadowDefault = polResults?.shadow?.summary.variants["default"] ?? null;
-  const clLock = polResults?.closedloop?.summary.variants["lock"] ?? null;
-  const clDefault = polResults?.closedloop?.summary.variants["default"] ?? null;
-  const polHeldOut = policy?.eval_episodes ?? [];
-  const polPoses = (name: string) =>
-    showPolicy && polViewer && polViewer.episode === episode && !polBusy ? polViewer.sims[name]?.poses ?? null : null;
-  const lastEpoch = polJob?.progress[polJob.progress.length - 1];
+  const polPoses = (name: string) => (showPolicy && polViewer && polViewer.episode === episode && !polBusy ? polViewer.sims[name]?.poses ?? null : null);
+  // While the policy's ghosts are drawn, the replay ghost hides: two blue
+  // arms (the replay and the policy in the calibrated sim) would be ambiguous.
+  const policyGhostsShown = !!(polPoses("default") || polPoses("lock"));
 
   // ---- objects fit saved for the camera lock ---------------------------------
   useEffect(() => {
@@ -929,747 +869,583 @@ export default function App() {
     };
   }, [dataset, episode, cameraLock, objects]);
 
+  // ---- delete with undo ---------------------------------------------------------
+  // DELETE /api/locks/{name} unlinks the file at once and has no restore, so
+  // the row hides now and the request goes out only when the undo window
+  // passes. Closing the tab inside the window keeps the lock.
+  const datasetRef = useRef(dataset);
+  datasetRef.current = dataset;
+  const unpend = (name: string) =>
+    setPendingDeletes((p) => {
+      const n = new Set(p);
+      n.delete(name);
+      return n;
+    });
+  const deleteLock = (name: string) => {
+    const wasSelected = ghost === name;
+    const ds = dataset;
+    const label = lockLabel(name, ds);
+    setPendingDeletes((p) => new Set(p).add(name));
+    if (wasSelected) setGhost(DEFAULT);
+    pushToast({
+      duration: UNDO_MS,
+      message: (
+        <>
+          Deleted <b>{label}</b>
+        </>
+      ),
+      action: {
+        label: "Undo",
+        onClick: () => {
+          unpend(name);
+          if (wasSelected && datasetRef.current === ds && !runningRef.current) setGhost((g) => (g === DEFAULT ? name : g));
+        },
+      },
+      onExpire: () => {
+        lockApi.remove(name).then(
+          () =>
+            api.locks().then(
+              (ls) => {
+                setLocks(ls);
+                unpend(name);
+              },
+              () => {
+                setLocks((ls) => ls.filter((l) => l.name !== name));
+                unpend(name);
+              },
+            ),
+          (e) => {
+            unpend(name);
+            setError(`Could not delete ${name}: ${(e as Error).message}. It is still saved.`);
+          },
+        );
+      },
+    });
+  };
+
+  // ---- playback ----------------------------------------------------------------------
   const seek = (f: number) => {
     playhead.frame = f;
     if (compareFrames) comparePlayhead.frame = f % compareFrames;
     setFrame(Math.floor(f));
   };
 
+  const selectEpisode = (ep: number) => {
+    if (ep === compare) setCompare(null);
+    setEpisode(ep);
+  };
+
+  // Keyboard: Space play/pause, ←/→ one frame, Shift+←/→ one second, [ ] episode.
+  const keys = useRef({ toggle: noop, step: (_: number) => {}, episodeBy: (_: number) => {} });
+  keys.current = {
+    toggle: () => frames && setPlaying((p) => !p),
+    step: (df: number) => {
+      if (!frames) return;
+      setPlaying(false);
+      seek(Math.min(frames - 1, Math.max(0, Math.round(playhead.frame) + df)));
+    },
+    episodeBy: (d: number) => {
+      const i = episodes.findIndex((e) => e.index === episode);
+      const next = episodes[i + d];
+      if (i >= 0 && next) selectEpisode(next.index);
+    },
+  };
+  useEffect(() => {
+    if (view !== "viewer") return;
+    // Whether the focused element got focus from a click. `:focus-visible` can't
+    // tell: Chrome turns it on as soon as a key is pressed on the element.
+    let pointerDown = false;
+    let clickFocused = false;
+    const onPointer = () => {
+      pointerDown = true;
+    };
+    const onFocus = () => {
+      clickFocused = pointerDown;
+      pointerDown = false;
+    };
+    const onKey = (e: KeyboardEvent) => {
+      pointerDown = false; // a click that focused nothing must not mark the next Tab focus as a click
+      if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return;
+      const t = e.target as HTMLElement | null;
+      if (t?.closest?.("input, select, textarea, [contenteditable='true'], [contenteditable=''], [role=menu], [role=dialog]")) return;
+      // Keyboard users moving through the tabs keep their keys; a tab focused by a click does not.
+      if (t?.closest?.("[role=tablist]") && !clickFocused) return;
+      if (e.key === " ") {
+        // A button focused from the keyboard keeps Space for itself.
+        if (t?.closest?.("button, a, summary, [role=button]")) {
+          if (!clickFocused) return;
+          t.blur();
+        }
+        e.preventDefault();
+        keys.current.toggle();
+      } else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+        e.preventDefault();
+        keys.current.step((e.key === "ArrowRight" ? 1 : -1) * (e.shiftKey ? Math.round(fps) : 1));
+      } else if (e.key === "[") {
+        keys.current.episodeBy(-1);
+      } else if (e.key === "]") {
+        keys.current.episodeBy(1);
+      }
+    };
+    window.addEventListener("pointerdown", onPointer, true);
+    window.addEventListener("focusin", onFocus);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("pointerdown", onPointer, true);
+      window.removeEventListener("focusin", onFocus);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [view, fps]);
+
+  // ---- render ---------------------------------------------------------------------------
+  const ghostMat = ghostMaterials[tone];
+  const calibBlocker = dsState === "loading" ? "Waiting for the dataset to load." : !baseline ? "Waiting for the episode to load." : null;
+  const savedLabel = calib?.status === "done" ? lockLabel(calib.name, dataset) : null;
+  const savedPartial = calib?.status === "done" ? stoppedRuns[calib.name] ?? null : null;
+  const liveMeta = running ? (
+    <span className="muted">
+      eval {lastProgress?.evaluation ?? 0} / {calib?.total}
+    </span>
+  ) : calib?.status === "error" ? (
+    <span className="muted">run failed; replaying its best</span>
+  ) : (
+    <span className="muted">best fit of the last run</span>
+  );
+
+  const paneLabel = (ep: number | null, gap: number | null | undefined) => {
+    const r = roleFor(ep);
+    return (
+      <>
+        Episode {ep ?? "--"}
+        {r && (
+          <>
+            {" · "}
+            <span title={ROLE_HELP[r]}>{r}</span>
+          </>
+        )}
+        {" · "}
+        <span className="num">{deg(gap)}</span>
+      </>
+    );
+  };
+
   return (
     <div className={`shell${view === "fleet" ? " fleet-shell" : ""}`}>
       <header className="topbar">
-        <span className="brand">antares</span>
-        <span className="tagline">sim, calibrated to this robot</span>
-        <nav className="segmented views" aria-label="view">
-          <button className={view === "viewer" ? "on" : ""} onClick={() => setView("viewer")}>
+        <span className="brand" title="antares: sim, calibrated to this robot">
+          antares
+        </span>
+        <nav className="view-tabs" aria-label="Views">
+          <a
+            href="#"
+            className={view === "viewer" ? "on" : ""}
+            aria-current={view === "viewer" ? "page" : undefined}
+            onClick={(e) => {
+              e.preventDefault();
+              setView("viewer");
+            }}
+          >
             Viewer
-          </button>
-          <button className={view === "fleet" ? "on" : ""} onClick={() => setView("fleet")}>
+          </a>
+          <a
+            href="#fleet"
+            className={view === "fleet" ? "on" : ""}
+            aria-current={view === "fleet" ? "page" : undefined}
+            onClick={(e) => {
+              e.preventDefault();
+              setView("fleet");
+            }}
+          >
             Fleet
-          </button>
+          </a>
         </nav>
         {view === "fleet" ? null : (
-        <div className="picker-wrap">
-          {dsState === "loading" && <span className="muted small">loading dataset…</span>}
-          {currentDs && (
-            <span
-              className={`chip ${currentDs.source} ${dsWarnings.length ? "warn" : ""}`}
-              title={[
-                `${currentDs.source} dataset${currentDs.robot_family ? ` · ${currentDs.robot_family} arm` : ""} · sim model ${currentDs.robot}`,
-                ...dsWarnings,
-              ].join("\n")}
+          <div className="topbar-right">
+            {dsState === "loading" && (
+              <span className="topbar-note">
+                <Spinner /> Loading dataset…
+              </span>
+            )}
+            {running && <span className="topbar-note">Dataset locked while calibrating</span>}
+            {currentDs && (
+              <span
+                className={`ds-chip ${dsWarnings.length ? "tone-warn" : ""}`}
+                title={[
+                  `${currentDs.source} dataset${currentDs.robot_family ? ` · ${currentDs.robot_family} arm` : ""} · sim model ${currentDs.robot}`,
+                  ...dsWarnings,
+                ].join("\n")}
+              >
+                {dsWarnings.length > 0 && <Icon.warn />}
+                {currentDs.source}
+                {currentDs.robot_family && currentDs.robot_family !== currentDs.robot && ` · ${currentDs.robot_family}→${currentDs.robot}`}
+                {dsWarnings.length > 0 && ` · ${dsWarnings.length} warning${dsWarnings.length === 1 ? "" : "s"}`}
+              </span>
+            )}
+            <Select
+              label="Dataset"
+              hideLabel
+              className="dataset-select"
+              value={dataset}
+              disabled={!datasets.length || running}
+              title={running ? "Stop the calibration to switch datasets" : "Dataset"}
+              onChange={(e) => setDataset(e.target.value)}
             >
-              {currentDs.source}
-              {currentDs.robot_family && currentDs.robot_family !== currentDs.robot && ` · ${currentDs.robot_family}→${currentDs.robot}`}
-              {dsWarnings.length > 0 && ` · ${dsWarnings.length} warning${dsWarnings.length === 1 ? "" : "s"}`}
-            </span>
-          )}
-          <select
-            className="picker"
-            value={dataset}
-            disabled={!datasets.length || running}
-            onChange={(e) => setDataset(e.target.value)}
-          >
-            {datasets.map((d) => (
-              <option key={d.id} value={d.id}>
-                {d.id}
-              </option>
-            ))}
-          </select>
-          <AddDataset disabled={running} onAdded={addDataset} />
-        </div>
+              {datasets.map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.id}
+                </option>
+              ))}
+            </Select>
+            <AddDataset disabled={running} disabledReason="Stop the calibration to add a dataset" onAdded={addDataset} />
+          </div>
         )}
       </header>
 
       {view === "fleet" ? (
         <FleetView initialOpen={decodeURIComponent(window.location.hash.replace(/^#fleet\/?/, "")) || null} />
       ) : (
-      <>
-      <main className="viewer">
-        <div className="panes">
-          <div className="pane">
-            <Scene
-              geometry={geometry}
-              realPoses={baseline?.real_poses ?? null}
-              simPoses={replay?.sim_poses ?? null}
-              compPoses={compPoses}
-              hotSpans={hotSpans}
-              clip={clip}
-              show={show}
-              playhead={playhead}
-              playing={playing}
-              fps={fps}
-              frames={frames}
-              speed={speed}
-              onFrame={setFrame}
-            >
-              {geometry && (
-                <>
-                  <Arm geometry={geometry} poses={polPoses("default")} clip={`${clip}#policy`} playhead={playhead} material={policyDefaultMaterial} />
-                  <Arm geometry={geometry} poses={polPoses("lock")} clip={`${clip}#policy`} playhead={playhead} material={policyLockMaterial} />
-                </>
-              )}
-              <SceneGeometry scene={scene} />
-              <ObjectMarker track={track} playhead={playhead} />
-            </Scene>
-            {compare != null && <div className="pane-label">episode {episode ?? "--"} · {deg(ghostGap?.overall_deg)}</div>}
-          </div>
-          {compare != null && (
-            <div className="pane">
-              <Scene
-                geometry={geometry}
-                realPoses={compareBase?.real_poses ?? null}
-                simPoses={shownCompare?.sim_poses ?? null}
-                compPoses={null}
-                hotSpans={null}
-                clip={`${dataset}#${compare}`}
-                show={show}
-                playhead={comparePlayhead}
-                playing={playing}
-                fps={compareBase?.fps ?? fps}
-                frames={compareFrames}
-                speed={speed}
-                onFrame={noop}
-                follow={{ lead: playhead, leadFps: fps }}
-                ghostMat={compareGhostMat}
-              />
-              <div className="pane-label">
-                <select
-                  className="picker"
-                  value={compare}
-                  onChange={(e) => setCompare(Number(e.target.value))}
-                  aria-label="Episode shown beside the first"
+        <>
+          <main className={`viewer${compare != null ? " comparing" : ""}`} aria-label="3D viewer">
+            <div className="panes">
+              <div className="pane">
+                <ArmScene
+                  geometry={geometry}
+                  realPoses={baseline?.real_poses ?? null}
+                  simPoses={replay?.sim_poses ?? null}
+                  compPoses={compPoses}
+                  hotSpans={hotSpans}
+                  clip={clip}
+                  show={show}
+                  hideGhost={policyGhostsShown}
+                  playhead={playhead}
+                  playing={playing}
+                  fps={fps}
+                  frames={frames}
+                  speed={speed}
+                  onFrame={setFrame}
+                  ghostMat={ghostMat}
+                  label={`Episode ${episode ?? ""}: the real arm and the sim on the ${physicsLabel}`}
                 >
-                  {episodes
-                    .filter((e) => e.index !== episode)
-                    .map((e) => (
-                      <option key={e.index} value={e.index}>
-                        episode {e.index} · {e.duration_s.toFixed(1)}s
-                      </option>
-                    ))}
-                </select>
-                {deg(shownCompare?.gap?.overall_deg)}
-                {compareBusy && <span className="dot" />}
-              </div>
-            </div>
-          )}
-        </div>
-
-        <div className="legend">
-          {show !== "sim" && (
-            <span>
-              <i className="swatch real" /> real arm (logged)
-            </span>
-          )}
-          {show !== "real" && (
-            <span>
-              <i className="swatch sim" /> sim ghost, {ghostLabel}
-              {replayBusy && <span className="dot" />}
-            </span>
-          )}
-          {showComp && ghost !== LIVE && show !== "real" && (
-            <span>
-              <i className="swatch comp" /> sim with lag-compensated commands (sim-validated only)
-              {compBusy && <span className="dot" />}
-            </span>
-          )}
-          {showPolicy && policy && (
-            <>
-              <span>
-                <i className="swatch pol-default" /> policy in the default sim
-                {polViewerBusy && <span className="dot" />}
-              </span>
-              <span>
-                <i className="swatch pol-lock" /> policy in the calibrated sim ({polMode === "shadow" ? "its commands replayed" : "closed loop"})
-              </span>
-              {polViewerNote && <span className="muted small">{polViewerNote}</span>}
-            </>
-          )}
-          {scene && (
-            <span className="muted small">
-              table at {(scene.table.z * 1000).toFixed(0)} mm, workspace box from the logs
-            </span>
-          )}
-          {track && (
-            <span className="muted small">
-              <i className="swatch" style={{ background: `rgb(${track.rgb.join(",")})` }} /> object from the video
-              {track.source[Math.min(track.source.length - 1, frame)] === "held" ? " (held: fingertip from FK)" : ""}
-            </span>
-          )}
-          {inEvent && show !== "real" && (
-            <span className="warm">
-              <i className="swatch warm" /> sim disagrees here: {inEvent.kind} on {inEvent.joints.join(", ")} (peak{" "}
-              {inEvent.peak_deg.toFixed(1)}°)
-            </span>
-          )}
-        </div>
-
-        <div className="view-controls">
-          <div className="segmented">
-            <button
-              className={compare != null ? "on" : ""}
-              onClick={() => setCompare(compare != null ? null : episodes.find((e) => e.index !== episode)?.index ?? null)}
-              disabled={episodes.length < 2}
-              title="Play a second episode side by side with the first"
-            >
-              Side by side
-            </button>
-          </div>
-          <div className="segmented" role="group" aria-label="Arms shown">
-            {SHOW.map((v) => (
-              <button key={v} className={show === v ? "on" : ""} onClick={() => setShow(v)}>
-                {v === "both" ? "Real + sim" : v === "real" ? "Real only" : "Sim only"}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {(dsState === "loading" || (!baseline && !error)) && (
-          <div className="overlay">
-            {dsState === "loading" ? (
-              currentDs?.loaded ? (
-                "Loading episodes…"
-              ) : (
-                <div className="loading">
-                  <div>Downloading the dataset from the Hugging Face Hub… {loadSeconds}s</div>
-                  <div className="muted small">
-                    The first load of a dataset can take a couple of minutes. After that it is cached.
-                  </div>
-                </div>
-              )
-            ) : (
-              "Replaying episode…"
-            )}
-          </div>
-        )}
-        {error && (
-          <div className="error" role="alert">
-            {error}
-            <button onClick={() => setError(null)} aria-label="Dismiss">
-              ×
-            </button>
-          </div>
-        )}
-      </main>
-
-      <aside className="panel">
-        <section>
-          <div className="label">Sim-to-real gap</div>
-          <div className="score">{deg(ghostGap?.overall_deg)}</div>
-          <div className="muted small">
-            RMS joint error on episode {episode ?? "--"}, ghost = {ghostLabel}
-            {ghost !== DEFAULT && baseGap && (
-              <>
-                <br />
-                default sim was {deg(baseGap.overall_deg)}
-              </>
-            )}
-          </div>
-        </section>
-
-        <section>
-          <div className="label">Ghost parameters</div>
-          <div className="segmented">
-            <button className={ghost === DEFAULT ? "on" : ""} onClick={() => setGhost(DEFAULT)} disabled={running}>
-              Default
-            </button>
-            {calib && (running || ghost === LIVE) && (
-              <button className={ghost === LIVE ? "on" : ""} onClick={() => setGhost(LIVE)}>
-                Live fit
-              </button>
-            )}
-            {dsLocks.map((l) => (
-              <button
-                key={l.name}
-                className={ghost === l.name ? "on" : ""}
-                onClick={() => setGhost(l.name)}
-                disabled={running}
-                title={`created ${l.created_at}`}
-              >
-                {l.name}
-              </button>
-            ))}
-          </div>
-          {ghost !== DEFAULT && ghost !== LIVE && (
-            <div className="export">
-              <a className="cta secondary" href={api.exportZipUrl(ghost)} download={`${ghost}.zip`}>
-                Download MJCF
-              </a>
-              <span className="muted small">standalone MuJoCo model with the fitted physics</span>
-            </div>
-          )}
-        </section>
-
-        <section>
-          <div className="label">Per joint</div>
-          <div className="bars">
-            {jointNames.map((j) => {
-              const b = baseGap?.per_joint_deg[j];
-              const g = ghostGap?.per_joint_deg[j];
-              return (
-                <button
-                  key={j}
-                  className={`bar-row ${j === jointNames[jIndex] ? "sel" : ""} ${scored.has(j) ? "" : "unscored"}`}
-                  onClick={() => setJoint(j)}
-                  title={scored.has(j) ? "" : "not scored (gripper contact isn't simulated)"}
-                >
-                  <span className="bar-name">{j}</span>
-                  <span className="bar-track">
-                    {ghost !== DEFAULT && b != null && <span className="bar base" style={{ width: `${(b / maxJointErr) * 100}%` }} />}
-                    {g != null && <span className="bar ghost" style={{ width: `${(g / maxJointErr) * 100}%` }} />}
-                  </span>
-                  <span className="bar-val">{deg(g, 1)}</span>
-                </button>
-              );
-            })}
-          </div>
-        </section>
-
-        <section className="calib">
-          {!running ? (
-            <button className="cta" disabled={dsState !== "ready" || !baseline} onClick={startCalibration}>
-              {calib?.status === "done" ? "Calibrate again" : "Calibrate"}
-            </button>
-          ) : (
-            <button className="cta secondary" onClick={stopCalibration} disabled={calib?.status === "cancelled"}>
-              {calib?.status === "cancelled" ? "Stopping…" : "Stop and keep best fit"}
-            </button>
-          )}
-          <label className={`toggle ${running ? "locked" : ""}`} title="After the shared fit, refine one value per joint (7 params × 6 joints, +600 evaluations, about a minute)">
-            <input type="checkbox" checked={perJoint} disabled={running} onChange={(e) => setPerJoint(e.target.checked)} />
-            per-joint refinement
-            <span className="muted">+{PER_JOINT_EVALUATIONS} evals</span>
-          </label>
-          <Factors selected={fitFactors} onChange={setFitFactors} disabled={running} />
-          <label className={`toggle ${running ? "locked" : ""}`} title="Also fit gravity_scale, the arm's gravity load: how much it sags per pose, apart from how fast kp makes it track">
-            <input type="checkbox" checked={fitGravity} disabled={running} onChange={(e) => setFitGravity(e.target.checked)} />
-            fit gravity load
-          </label>
-          <label className={`toggle ${running ? "locked" : ""}`} title="Also fit the servo deadband (firmware deadzone plus gear backlash); one value per joint with per-joint refinement">
-            <input type="checkbox" checked={fitDeadband} disabled={running} onChange={(e) => setFitDeadband(e.target.checked)} />
-            fit servo deadband
-          </label>
-          {calib && (
-            <div className="calib-body">
-              <div className="row">
-                <span className="muted small">
-                  {calib.status === "running" &&
-                    `${stageLabel} · eval ${lastProgress?.evaluation ?? 0}${calib.perJoint ? ` / ${calib.total}` : ""}`}
-                  {calib.status === "cancelled" && "stopping after this generation"}
-                  {calib.status === "done" && `saved as ${calib.name}`}
-                  {calib.status === "error" && <span className="bad">{calib.error}</span>}
-                </span>
-                <span className="mono small">{deg(lastProgress?.best_score)}</span>
-              </div>
-              <Sparkline
-                values={calib.best.filter((v) => isFinite(v))}
-                total={calib.total}
-                baseline={calib.best[0]}
-                stageAt={calib.perJoint ? MAX_EVALUATIONS : null}
-              />
-              {calib.result && (
-                <div className="result">
-                  <div>
-                    <span className="muted small">held-out episodes</span>
-                    <div className="mono">
-                      {deg(calib.result.baseline_eval_score)} → <b>{deg(calib.result.eval_score)}</b>
-                    </div>
-                  </div>
-                  <div>
-                    <span className="muted small">train episodes</span>
-                    <div className="mono">
-                      {deg(calib.result.baseline_train_score)} → {deg(calib.result.train_score)}
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-        </section>
-
-        <CameraView
-          dataset={dataset}
-          episode={episode}
-          frame={frame}
-          playing={playing}
-          lock={cameraLock}
-          busy={running}
-          scene={scene}
-          onSceneChange={setScene}
-          objects={objects}
-          onObjectsChange={setObjects}
-          track={track}
-          onError={setError}
-        />
-
-        <section>
-          <div className="label">Lag compensation</div>
-          <label className={`toggle ${running ? "locked" : ""}`} title="ILC in the calibrated sim: commands that make the model follow the real trajectory despite servo latency">
-            <input type="checkbox" checked={showComp} disabled={running} onChange={(e) => setShowComp(e.target.checked)} />
-            show lag-compensated commands
-          </label>
-          {showComp && (
-            <div className="rms">
-              {(["raw", "shift", "ilc"] as const).map((k) => (
-                <div key={k}>
-                  <span className="muted small">{k === "raw" ? "raw" : k === "shift" ? "shifted" : "ILC"}</span>
-                  <div className={`mono ${k === "ilc" && comp ? "good" : ""}`}>{compBusy ? "…" : deg(comp?.rms[k])}</div>
-                </div>
-              ))}
-              <div className="muted small rms-note">
-                RMS tracking error of the sim on the real trajectory: raw commands, commands shifted by the lock's latency,
-                and iterative learning control{comp && ` (${comp.ilc_iterations} iterations)`}. Sim-validated only: judged
-                in the calibrated MuJoCo model, no hardware driven.
-              </div>
-            </div>
-          )}
-        </section>
-
-        <section>
-          <div className="label">A policy in the loop</div>
-          {!policyLock ? (
-            <div className="muted small">Calibrate first: the policy trains on a lock's training episodes and is judged on its held-out ones.</div>
-          ) : (
-            <>
-              <div className="row">
-                <button
-                  className="cta secondary"
-                  disabled={running || polBusy || dsState !== "ready"}
-                  onClick={startPolicyTraining}
-                  title="State-based chunked policy (ACT without images): the last 2 joint states and the grasp point in, the next 10 commands out. Trained on the lock's training episodes, early-stopped on its held-out ones. Seconds on a CPU; needs the [policy] extra (torch)."
-                >
-                  {polJob?.kind === "train" && polBusy ? "Training…" : policy ? "Retrain policy" : "Train policy"}
-                </button>
-                <span className="muted small">
-                  {polJob?.kind === "train" && polBusy && lastEpoch
-                    ? `epoch ${lastEpoch.epoch} · held-out mse ${lastEpoch.eval_mse.toFixed(3)} (best ${lastEpoch.best_eval_mse.toFixed(3)})`
-                    : policy
-                      ? `${policy.name} · ${policy.train_episodes.length} train / ${policy.eval_episodes.length} held-out episodes`
-                      : `on lock ${policyLock}`}
-                </span>
-              </div>
-              {polJob?.kind === "train" && polBusy && (
-                <div className="progress">
-                  <span style={{ width: `${Math.min(100, (100 * (lastEpoch?.epoch ?? 0)) / POLICY_EPOCHS)}%` }} />
-                </div>
-              )}
-              {polJob?.status === "error" && <div className="bad small">{polJob.error}</div>}
-              {policy && (
-                <div className="result">
-                  <div>
-                    <span className="muted small">held-out chunk error</span>
-                    <div className="mono">
-                      <b>{deg(policy.metrics.policy.eval.rmse_deg)}</b>
-                    </div>
-                  </div>
-                  <div>
-                    <span className="muted small">hold state / repeat command</span>
-                    <div className="mono">
-                      {deg(policy.metrics.baselines.hold_state.eval.rmse_deg)} / {deg(policy.metrics.baselines.repeat_command.eval.rmse_deg)}
-                    </div>
-                  </div>
-                </div>
-              )}
-              {policy && (
-                <>
-                  <div className="segmented">
-                    <button className={polMode === "shadow" ? "on" : ""} onClick={() => setPolMode("shadow")} disabled={polBusy}>
-                      Shadow
-                    </button>
-                    <button className={polMode === "closedloop" ? "on" : ""} onClick={() => setPolMode("closedloop")} disabled={polBusy}>
-                      Closed loop
-                    </button>
-                  </div>
-                  <div className="row">
-                    <button className="cta" disabled={running || polBusy} onClick={() => startPolicyEval(polMode)}>
-                      {polJob?.kind === "evaluate" && polBusy
-                        ? `Evaluating… ${polJob.i}/${polJob.n || polHeldOut.length}`
-                        : `Evaluate (${polMode === "shadow" ? "shadow" : "closed loop"})`}
-                    </button>
-                    <span className="muted small">
-                      {polMode === "shadow"
-                        ? "its commands on the real observations, rolled through each sim"
-                        : "the policy drives each sim from the real start, same goal"}
-                    </span>
-                  </div>
-                  {polJob?.kind === "evaluate" && polBusy && (
-                    <div className="progress">
-                      <span style={{ width: `${polJob.n ? (100 * polJob.i) / polJob.n : 5}%` }} />
-                    </div>
-                  )}
-                  {polResult && (
+                  {geometry && (
                     <>
-                      <div className="subscore">
-                        {polMode === "shadow" && shadowLock && shadowDefault ? (
-                          <>
-                            <span className="mono big">{deg(shadowLock.divergence_deg)}</span>
-                            <span className="muted small">
-                              {" "}
-                              between what the stock and the calibrated sim say this policy does (sim vs real: {deg(shadowDefault.sim_vs_real_deg)} stock, {deg(shadowLock.sim_vs_real_deg)} calibrated)
-                            </span>
-                          </>
-                        ) : polMode === "closedloop" && clLock && clDefault ? (
-                          <>
-                            <span className="mono big">
-                              {clDefault.n_success}/{clDefault.n_judged} → {clLock.n_success}/{clLock.n_judged}
-                            </span>
-                            <span className="muted small">
-                              {" "}
-                              held-out episodes where the fingertip closes within 2 cm of the real grasp point: stock sim → calibrated sim
-                            </span>
-                          </>
-                        ) : null}
-                      </div>
-                      <table className="params">
-                        <thead>
-                          <tr>
-                            <th />
-                            {polMode === "shadow" ? (
-                              <>
-                                <th>sim vs real</th>
-                                <th>vs stock sim</th>
-                                <th>grasp point</th>
-                              </>
-                            ) : (
-                              <>
-                                <th>approach RMS</th>
-                                <th>grasp point</th>
-                                <th>within 2 cm</th>
-                              </>
-                            )}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {polRows.map(([name, row]) => (
-                            <tr key={name}>
-                              <td>{name === "default" ? "stock sim" : name === "lock" ? "calibrated" : name === "perjoint" ? "per-joint lock" : name}</td>
-                              {"sim_vs_real_deg" in row ? (
-                                <>
-                                  <td>{deg(row.sim_vs_real_deg)}</td>
-                                  <td>{"divergence_deg" in row ? deg(row.divergence_deg) : "–"}</td>
-                                  <td>{cm(row.grasp_error_cm)}</td>
-                                </>
-                              ) : (
-                                <>
-                                  <td>{deg(row.approach_rms_deg, 1)}</td>
-                                  <td>{cm(row.grasp_error_cm)}</td>
-                                  <td className={row.n_success > 0 ? "changed" : ""}>
-                                    {row.n_success}/{row.n_judged}
-                                  </td>
-                                </>
-                              )}
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                      <div className="muted small">
-                        {polResult.summary.n_episodes} held-out episodes, sim-only: nothing was driven on hardware.
-                      </div>
+                      <Arm geometry={geometry} poses={polPoses("default")} clip={`${clip}#policy`} playhead={playhead} material={policyDefaultMaterial} />
+                      <Arm geometry={geometry} poses={polPoses("lock")} clip={`${clip}#policy`} playhead={playhead} material={policyLockMaterial} />
                     </>
                   )}
-                  <label className={`toggle ${polBusy ? "locked" : ""}`} title="Two more ghosts: the policy's trajectory in the stock sim (grey) and in the calibrated sim (green) for the current held-out episode">
-                    <input type="checkbox" checked={showPolicy} disabled={polBusy} onChange={(e) => setShowPolicy(e.target.checked)} />
-                    show the policy's ghosts
-                  </label>
-                  {showPolicy && episode != null && !polHeldOut.includes(episode) && polHeldOut.length > 0 && (
-                    <div className="row">
-                      <span className="muted small">episode {episode} is in the policy's training set</span>
-                      <button className="cta secondary" onClick={() => setEpisode(polHeldOut[0])}>
-                        go to held-out episode {polHeldOut[0]}
-                      </button>
-                    </div>
-                  )}
-                  {showPolicy && polViewer && polViewer.episode === episode && (
-                    <div className="muted small">
-                      {polMode === "shadow"
-                        ? `this episode: ${deg(polViewer.sims["default"]?.sim_vs_real_deg)} stock vs ${deg(polViewer.sims["lock"]?.sim_vs_real_deg)} calibrated against the real arm; ${deg(polViewer.sims["lock"]?.divergence_deg)} between the two sims`
-                        : `this episode: grasp point missed by ${cm(polViewer.sims["default"]?.grasp_error_cm)} in the stock sim, ${cm(polViewer.sims["lock"]?.grasp_error_cm)} in the calibrated one`}
-                    </div>
-                  )}
-                </>
-              )}
-            </>
-          )}
-        </section>
-
-        <section>
-          <div className="label">Every robot is different</div>
-          <button className="cta secondary" onClick={() => setCrossOpen(true)} disabled={!locks.length}>
-            Compare locks across robots
-          </button>
-          <div className="muted small">
-            {loadedIds.length} dataset{loadedIds.length === 1 ? "" : "s"} loaded × {locks.length} lock
-            {locks.length === 1 ? "" : "s"}
-            {loadedIds.length < 2 && " · pick another dataset above to add a row"}
-          </div>
-        </section>
-
-        {shownParams && defaultParams && (
-          <section>
-            <div className="label">Parameters</div>
-            <table className="params">
-              <thead>
-                <tr>
-                  <th />
-                  <th>default</th>
-                  <th>ghost</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(servoOf(defaultParams) !== "position" || servoOf(shownParams) !== "position") && (
-                  <tr>
-                    <td>servo</td>
-                    <td>{servoOf(defaultParams)}</td>
-                    <td className={servoOf(shownParams) === servoOf(defaultParams) ? "" : "changed"}>
-                      {servoOf(shownParams)}
-                    </td>
-                  </tr>
-                )}
-                {PARAM_KEYS.map((k) => {
-                  const optional = OPTIONAL_DEFAULTS[k];
-                  if (optional != null && defaultParams[k] == null && shownParams[k] == null) return null;
-                  const d = defaultParams[k] ?? optional;
-                  const g = shownParams[k] ?? optional;
-                  if (d == null || g == null) return null; // older locks have no forcerange
-                  // a servo fit's kp/kv/forcerange are its linearized equivalent, not fitted
-                  const derived = LINEARIZED_KEYS.has(k) && servoOf(shownParams) !== "position";
-                  return (
-                    <tr key={k}>
-                      <td title={derived ? "PD equivalent of the servo model (derived, not fitted)" : undefined}>
-                        {k}
-                        {derived && <span className="muted"> (PD equiv.)</span>}
-                      </td>
-                      <td>{fmtParam(k, d)}</td>
-                      <td className={sameParam(g, d) ? "" : "changed"}>{fmtParam(k, g)}</td>
-                    </tr>
-                  );
-                })}
-                {SERVO_KEYS.map((k) => {
-                  const d = defaultParams[k];
-                  const g = shownParams[k];
-                  if (d == null && g == null) return null; // position-actuator fits have none
-                  return (
-                    <tr key={k}>
-                      <td>{k}</td>
-                      <td>{d == null ? "–" : fmtParam(k, d)}</td>
-                      <td className={d != null && g != null && sameParam(g, d) ? "" : "changed"}>
-                        {g == null ? "–" : fmtParam(k, g)}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </section>
-        )}
-      </aside>
-
-      {crossOpen && (
-        <div className="modal-backdrop" onClick={() => setCrossOpen(false)}>
-          <div className="modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
-            <div className="row">
-              <div>
-                <div className="label">Every robot is different</div>
-                <div className="muted small">
-                  Each saved lock replayed on each loaded dataset's held-out episodes (20 train / 10 eval, seed 0). RMS joint
-                  error in degrees; lower is better. The outlined cell is a lock on the robot it was fitted on.
-                </div>
+                  <SceneGeometry scene={scene} />
+                  <ObjectMarker track={track} playhead={playhead} />
+                </ArmScene>
+                {compare != null && <div className="pane-label">{paneLabel(episode, ghostGap?.overall_deg)}</div>}
               </div>
-              <button className="icon" onClick={() => setCrossOpen(false)} aria-label="Close">
-                ×
-              </button>
+              {compare != null && (
+                <div className="pane">
+                  <ArmScene
+                    geometry={geometry}
+                    realPoses={compareBase?.real_poses ?? null}
+                    simPoses={shownCompare?.sim_poses ?? null}
+                    compPoses={null}
+                    hotSpans={null}
+                    clip={`${dataset}#${compare}`}
+                    show={show}
+                    playhead={comparePlayhead}
+                    playing={playing}
+                    fps={compareBase?.fps ?? fps}
+                    frames={compareFrames}
+                    speed={speed}
+                    onFrame={noop}
+                    follow={{ lead: playhead, leadFps: fps }}
+                    ghostMat={compareGhostMats[tone]}
+                    label={`Episode ${compare}, compared: the real arm and the sim on the ${physicsLabel}`}
+                  />
+                  <div className="pane-label">
+                    <Select label="Compared episode" hideLabel value={compare} onChange={(e) => setCompare(Number(e.target.value))}>
+                      {episodes
+                        .filter((e) => e.index !== episode)
+                        .map((e) => (
+                          <option key={e.index} value={e.index}>
+                            {episodeOptionLabel(e, roleFor(e.index))}
+                          </option>
+                        ))}
+                    </Select>
+                    <span className="num">{deg(shownCompare?.gap?.overall_deg)}</span>
+                    {compareBusy && <Spinner label="Replaying" />}
+                  </div>
+                </div>
+              )}
             </div>
-            {crossData ? (
-              <CrossHeatmap
-                rows={crossData.rows}
-                cols={crossData.cols}
-                scores={crossData.scores}
-                perJoint={crossData.per_joint}
-                home={lockHome}
-              />
-            ) : (
-              <div className="muted small cross-empty">
-                {crossBusy
-                  ? `Replaying ${loadedIds.length * (locks.length + 1)} lock × dataset pairs…`
-                  : "Nothing computed yet for this set of datasets and locks."}
+
+            {inEvent && show !== "real" && (
+              <div
+                className={`status-pill tone-${inEvent.kind === "contact" ? "critical" : "warn"}`}
+                title={`Sim disagrees with the arm here: ${inEvent.kind} on ${inEvent.joints.join(", ")}, peak ${inEvent.peak_deg.toFixed(1)}°`}
+              >
+                {inEvent.kind === "contact" ? <Icon.warn /> : <Icon.info />}
+                <span>
+                  Sim disagrees: {inEvent.kind} on{" "}
+                  {inEvent.joints.length > 2 ? `${inEvent.joints.slice(0, 2).join(", ")} +${inEvent.joints.length - 2}` : inEvent.joints.join(", ")} · peak{" "}
+                  <span className="num">{inEvent.peak_deg.toFixed(1)}°</span>
+                </span>
               </div>
             )}
-            {crossError && <div className="bad small">{crossError}</div>}
-            <div className="row">
-              <span className="muted small">
-                {loadedIds.map(short).join(", ")} × {lockNames.join(", ")}, default
-              </span>
-              <button className="cta" onClick={runCross} disabled={crossBusy || !loadedIds.length}>
-                {crossBusy ? (
-                  <>
-                    Scoring… <span className="dot light" />
-                  </>
-                ) : crossData ? (
-                  "Run again"
-                ) : (
-                  "Run"
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
-      <footer className="timeline">
-        <div className="controls">
-          <button className="icon" onClick={() => setPlaying((p) => !p)} disabled={!frames} aria-label={playing ? "Pause" : "Play"}>
-            {playing ? "❚❚" : "▶"}
-          </button>
-          <div className="speeds">
-            {SPEEDS.map((s) => (
-              <button key={s} className={s === speed ? "on" : ""} onClick={() => setSpeed(s)}>
-                {s}×
-              </button>
-            ))}
-          </div>
-          <select
-            className="picker"
-            value={episode ?? ""}
-            onChange={(e) => {
-              const ep = Number(e.target.value);
-              if (ep === compare) setCompare(null);
-              setEpisode(ep);
-            }}
-            disabled={!episodes.length}
-          >
-            {episodes.map((e) => (
-              <option key={e.index} value={e.index}>
-                episode {e.index} · {e.duration_s.toFixed(1)}s
-              </option>
-            ))}
-          </select>
-          <span className="mono small">
-            {(frame / fps).toFixed(2)}s / {(frames / fps).toFixed(2)}s
-          </span>
-          <span className="muted small trace-label">
-            {joint}: <i className="swatch real" /> real <i className="swatch sim" /> sim
-          </span>
-          <span className="muted small trace-label">
-            |real − sim| <i className="swatch contact" /> contact <i className="swatch anomaly" /> anomaly{" "}
-            <i className="swatch grasp" /> gripper closed
-          </span>
-        </div>
-        {baseline && (
-          <>
-            <JointTrace real={traceReal} sim={traceSim} frame={frame} onSeek={seek} />
-            <ResidualStrip
-              sum={residualSum}
-              events={residual?.events ?? []}
-              grasps={residual?.grasp_windows ?? []}
-              frames={frames}
-              frame={frame}
-              onSeek={seek}
+            <div className="view-toolbar">
+              <SegmentedControl<Show>
+                label="Show"
+                value={show}
+                onChange={setShow}
+                options={[
+                  { value: "both", label: "Both", title: "The real arm and the sim" },
+                  { value: "real", label: "Real", title: "Only the real arm (as logged)" },
+                  { value: "sim", label: "Sim", title: "Only the sim" },
+                ]}
+              />
+              <Button
+                aria-pressed={compare != null}
+                className={compare != null ? "on" : ""}
+                onClick={() => setCompare(compare != null ? null : episodes.find((e) => e.index !== episode)?.index ?? null)}
+                disabled={episodes.length < 2}
+                title={episodes.length < 2 ? "Needs a dataset with two or more episodes" : "Play a second episode next to this one, in step"}
+                icon={compare != null ? <Icon.check /> : undefined}
+              >
+                Compare episode
+              </Button>
+            </div>
+
+            <div className="viewport-foot">
+              {error && (
+                <InlineNotice tone="error" onDismiss={() => setError(null)} className="viewport-error">
+                  {error}
+                </InlineNotice>
+              )}
+              <div className="legend" aria-label="Legend">
+                {show !== "sim" && <LegendItem k={<ArmKey tone="real" />}>real arm (logged)</LegendItem>}
+                {show !== "real" && !policyGhostsShown && (
+                  <LegendItem k={<ArmKey tone={tone} translucent />}>
+                    sim · {physicsLabel}
+                    {ghost === LIVE && " (best so far)"} {replayBusy && <Spinner />}
+                  </LegendItem>
+                )}
+                {show !== "real" && policyGhostsShown && <span className="legend-note">sim replay hidden while the policy ghosts show</span>}
+                {showComp && ghost !== LIVE && show !== "real" && (
+                  <LegendItem k={<ArmKey tone="comp" translucent />}>
+                    sim, lag-compensated (sim-validated) {compBusy && <Spinner />}
+                  </LegendItem>
+                )}
+                {showPolicy && policy && (
+                  <>
+                    <LegendItem k={<ArmKey tone="stock" translucent />}>
+                      policy in the stock model {polViewerBusy && <Spinner />}
+                    </LegendItem>
+                    <LegendItem k={<ArmKey tone="sim" translucent />}>policy in the calibrated sim ({polMode === "shadow" ? "shadow" : "closed loop"})</LegendItem>
+                  </>
+                )}
+                {scene && <span className="legend-note">table at {(scene.table.z * 1000).toFixed(0)} mm, workspace box from the logs</span>}
+                {track && (
+                  <LegendItem k={<span className="key arm-key" style={{ ["--key" as string]: `rgb(${track.rgb.join(",")})` }} />}>
+                    object from the video{track.source[Math.min(track.source.length - 1, frame)] === "held" ? " (held: fingertip from FK)" : ""}
+                  </LegendItem>
+                )}
+              </div>
+            </div>
+
+            {(dsState === "loading" || (!baseline && !error)) && (
+              <div className="overlay">
+                {dsState === "loading" ? (
+                  currentDs?.loaded ? (
+                    <span>
+                      <Spinner /> Loading episodes…
+                    </span>
+                  ) : (
+                    <div className="loading">
+                      <div>
+                        <Spinner /> Downloading the dataset from the Hugging Face Hub… <span className="num">{loadSeconds}s</span>
+                      </div>
+                      <div className="section-hint">The first load of a dataset can take a couple of minutes. After that it is cached.</div>
+                    </div>
+                  )
+                ) : (
+                  <span>
+                    <Spinner /> Replaying episode…
+                  </span>
+                )}
+              </div>
+            )}
+          </main>
+
+          <aside className="inspector" aria-label="Inspector">
+            <Tabs<Tab>
+              idBase="insp"
+              ariaLabel="Inspector"
+              value={tab}
+              onChange={setTab}
+              tabs={[
+                { id: "calibrate", label: "Calibrate", badge: running ? <Spinner /> : undefined },
+                { id: "camera", label: "Camera" },
+                { id: "policy", label: "Policy", badge: polBusy ? <Spinner /> : undefined },
+                { id: "tools", label: "Tools" },
+              ]}
             />
-          </>
-        )}
-      </footer>
-      </>
+            <div className="inspector-body" ref={inspectorBody}>
+              <TabPanel idBase="insp" id="calibrate" active={tab === "calibrate"} className="tab-panel">
+                <GapStat
+                  gap={ghostGap?.overall_deg ?? null}
+                  stockGap={baseGap?.overall_deg ?? null}
+                  episode={episode}
+                  role={role}
+                  tone={tone}
+                  live={ghost === LIVE && running}
+                  busy={replayBusy && ghost !== LIVE}
+                />
+                <PhysicsPicker
+                  rows={physicsRows}
+                  stockHeldOut={stockHeldOut}
+                  stockValue={deg(stockHeldOut)}
+                  live={!!calib && (running || ghost === LIVE)}
+                  liveValue={deg(lastProgress?.best_score)}
+                  liveMeta={liveMeta}
+                  selected={ghost}
+                  onSelect={setGhost}
+                  running={running}
+                  onDelete={deleteLock}
+                  showAll={showAllLocks}
+                  onShowAll={setShowAllLocks}
+                />
+                <JointBars
+                  jointNames={jointNames}
+                  scored={scored}
+                  stock={baseGap?.per_joint_deg}
+                  selected={ghostGap?.per_joint_deg}
+                  tone={tone}
+                  physicsLabel={physicsLabel}
+                  joint={jointNames[jIndex] ?? joint}
+                  onJoint={setJoint}
+                />
+                <CalibrateSection
+                  calib={calib}
+                  running={running}
+                  blocker={calibBlocker}
+                  onStart={startCalibration}
+                  onStop={stopCalibration}
+                  opts={opts}
+                  onOpts={setOpts}
+                  savedLabel={savedLabel}
+                  partial={savedPartial}
+                  onDismissError={() => setCalib(null)}
+                />
+                <ParamsDisclosure stock={defaultParams} shown={shownParams} label={physicsLabel} fullName={isLock ? ghost : null} />
+              </TabPanel>
+
+              <TabPanel idBase="insp" id="camera" active={tab === "camera"} className="tab-panel">
+                <CameraView
+                  dataset={dataset}
+                  episode={episode}
+                  frame={frame}
+                  playing={playing}
+                  active={tab === "camera"}
+                  lock={cameraLock}
+                  lockLabel={cameraLockLabel}
+                  borrowed={!isLock && !!cameraLock}
+                  altLock={altCamLock ? { name: altCamLock.name, label: lockLabel(altCamLock.name, dataset) } : null}
+                  canSwitch={!running}
+                  onSwitchLock={setGhost}
+                  onGoCalibrate={() => setTab("calibrate")}
+                  busy={running}
+                  scene={scene}
+                  onSceneChange={setScene}
+                  objects={objects}
+                  onObjectsChange={setObjects}
+                  track={track}
+                  onFitsChange={onFitsChange}
+                  onError={setError}
+                />
+              </TabPanel>
+
+              <TabPanel idBase="insp" id="policy" active={tab === "policy"} className="tab-panel">
+                <PolicyTab
+                  lock={policyLock}
+                  lockLabel={cameraLockLabel}
+                  borrowed={!isLock && !!policyLock}
+                  policy={policy}
+                  job={polJob}
+                  running={running}
+                  ready={dsState === "ready"}
+                  mode={polMode}
+                  onMode={setPolMode}
+                  onTrain={startPolicyTraining}
+                  onEvaluate={startPolicyEval}
+                  results={polResults}
+                  showGhosts={showPolicy}
+                  onShowGhosts={setShowPolicy}
+                  episode={episode}
+                  onEpisode={selectEpisode}
+                  viewer={polViewer}
+                  viewerNote={polViewerNote}
+                  viewerBusy={polViewerBusy}
+                  onGoCalibrate={() => setTab("calibrate")}
+                  onDismissError={() => setPolJob(null)}
+                />
+              </TabPanel>
+
+              <TabPanel idBase="insp" id="tools" active={tab === "tools"} className="tab-panel">
+                <ToolsTab
+                  showComp={showComp}
+                  onShowComp={setShowComp}
+                  comp={comp}
+                  compBusy={compBusy}
+                  compBlocked={ghost === LIVE ? "Available once the run has saved its lock: it needs fixed physics, not the live fit." : null}
+                  physicsLabel={physicsLabel}
+                  onOpenCross={() => setCrossOpen(true)}
+                  nLoaded={loadedIds.length}
+                  nLocks={visibleLocks.length}
+                  exportLock={isLock ? ghost : null}
+                  exportLabel={physicsLabel}
+                  exportUrl={isLock ? api.exportZipUrl(ghost) : null}
+                />
+              </TabPanel>
+            </div>
+          </aside>
+
+          {crossOpen && (
+            <CrossModal
+              onClose={closeCross}
+              data={crossData}
+              busy={crossBusy}
+              error={crossError}
+              onRun={runCross}
+              datasets={loadedIds}
+              locks={lockNames}
+              home={lockHome}
+            />
+          )}
+
+          <Timeline
+            playing={playing}
+            onPlayPause={() => setPlaying((p) => !p)}
+            speed={speed}
+            onSpeed={setSpeed}
+            episodes={episodes}
+            episode={episode}
+            onEpisode={selectEpisode}
+            roleOf={roleFor}
+            frame={frame}
+            frames={frames}
+            fps={fps}
+            joint={jointNames[jIndex] ?? joint}
+            jointNames={jointNames}
+            onJoint={setJoint}
+            traceReal={traceReal}
+            traceSim={traceSim}
+            simTone={tone}
+            simLabel={physicsLabel}
+            residualSum={residualSum}
+            events={residual?.events ?? []}
+            grasps={residual?.grasp_windows ?? []}
+            hasData={!!baseline}
+            onSeek={seek}
+          />
+        </>
       )}
+      <ToastHost toasts={toasts} onRemove={removeToast} />
     </div>
   );
 }

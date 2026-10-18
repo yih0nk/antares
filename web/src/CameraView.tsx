@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   api,
   type CameraFit,
@@ -13,22 +13,36 @@ import {
   type SceneView,
 } from "./api";
 import { Sparkline } from "./Charts";
+import { Badge, Button, EmptyState, InlineNotice, LegendItem, LineKey, ProgressBar, SegmentedControl, Spinner } from "./ui";
 
-// The dataset's fixed cameras, fitted to the robot's own logs: pick a
-// camera, fit it (a job streamed over SSE), and see the sim arm's outline
-// drawn over the real frame at the playhead. The overlay is fetched when
-// the playhead pauses or a scrub settles, never per frame while playing.
-// The Scene block below it recovers the table and workspace from the logs
-// and swaps the overlay for the sim's own view of the same instant.
+// The Camera tab. Camera, scene and object fits are saved per lock, as three
+// steps that build on each other: fit a fixed camera to the robot's own logs
+// (a job streamed over SSE) and see the sim arm's outline over the real frame
+// at the playhead; recover the table and workspace (the scene) from the logs,
+// which also gives the sim's own view of the same instant; then find, track
+// and weigh the manipulated object. Frames are fetched when the playhead
+// pauses or a scrub settles, never per frame while playing, and only while
+// this tab is open.
 
 type Props = {
   dataset: string;
   episode: number | null;
   frame: number;
   playing: boolean;
-  // Lock the camera fits belong to (the ghost's lock, or the dataset's default).
+  // This tab is the one on screen; frames are fetched only then.
+  active: boolean;
+  // Lock the fits belong to (the selected physics' lock, or the dataset's newest).
   lock: string | null;
-  // Another job (calibration) is running; fits are disabled meanwhile.
+  lockLabel: string;
+  // The stock model is selected, so `lock` is borrowed (the dataset's newest lock).
+  borrowed: boolean;
+  // Another lock of this dataset that has a camera fit, to offer switching to.
+  altLock: { name: string; label: string } | null;
+  // Switching physics is allowed (not while calibrating).
+  canSwitch: boolean;
+  onSwitchLock: (name: string) => void;
+  onGoCalibrate: () => void;
+  // Another job (calibration) is running; fits are paused meanwhile.
   busy: boolean;
   // The scene fit saved for `lock`, owned by the app (the 3D viewer draws it too).
   scene: SceneFit | null;
@@ -38,6 +52,8 @@ type Props = {
   objects: ObjectsFit | null;
   onObjectsChange: (fit: ObjectsFit | null) => void;
   track: ObjectTrack | null;
+  // Tells the app which cameras `lock` has fitted (for "switch to a lock with a camera fit").
+  onFitsChange: (lock: string, cameras: string[]) => void;
   onError: (message: string) => void;
 };
 
@@ -66,34 +82,77 @@ type Job = {
 const pct = (v: number | null | undefined) => (v == null || !isFinite(v) ? "--" : `${(v * 100).toFixed(0)}%`);
 
 const stageLabel = (ev?: CameraProgressEvent) => {
-  if (!ev) return "starting";
-  if (ev.stage === "sample") return `sampled ${ev.stage_evaluation} poses`;
-  if (ev.stage === "start") return `start ${ev.start + 1} / ${ev.n_starts}`;
-  if (ev.stage === "refine") return "refining at full resolution";
-  return "scoring held-out frames";
+  if (!ev) return "Starting";
+  if (ev.stage === "sample") return `Sampled ${ev.stage_evaluation} poses`;
+  if (ev.stage === "start") return `Start ${ev.start + 1} / ${ev.n_starts}`;
+  if (ev.stage === "refine") return "Refining at full resolution";
+  return "Scoring held-out frames";
 };
 
 const mm = (v: number | null | undefined) => (v == null || !isFinite(v) ? "--" : `${(v * 1000).toFixed(1)} mm`);
 const cm = (v: number) => `${(v * 100).toFixed(0)}`;
 
-export function CameraView({ dataset, episode, frame, playing, lock, busy, scene, onSceneChange, objects, onObjectsChange, track, onError }: Props) {
+function Step({ n, title, needs, children }: { n: number; title: string; needs?: string | null; children: ReactNode }) {
+  return (
+    <section className="section step">
+      <div className="section-head">
+        <h2 className="section-title">
+          <span className="step-n" aria-hidden="true">
+            {n}
+          </span>
+          {title}
+        </h2>
+        {needs && <Badge tone="muted">Needs: {needs}</Badge>}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+export function CameraView({
+  dataset,
+  episode,
+  frame,
+  playing,
+  active,
+  lock,
+  lockLabel,
+  borrowed,
+  altLock,
+  canSwitch,
+  onSwitchLock,
+  onGoCalibrate,
+  busy,
+  scene,
+  onSceneChange,
+  objects,
+  onObjectsChange,
+  track,
+  onFitsChange,
+  onError,
+}: Props) {
   const [cameras, setCameras] = useState<CameraInfo[]>([]);
   const [objectsJob, setObjectsJob] = useState<ObjectsJob | null>(null);
   const objectsSourceRef = useRef<EventSource | null>(null);
   useEffect(() => () => objectsSourceRef.current?.close(), []);
   const [camera, setCamera] = useState<string>("");
-  const [fits, setFits] = useState<Record<string, CameraFit>>({});
+  // Fits saved for `fitsLock`; null until the first answer for it.
+  const [fits, setFits] = useState<Record<string, CameraFit> | null>(null);
+  const [fitsLock, setFitsLock] = useState<string | null>(null);
   const [job, setJob] = useState<Job | null>(null);
   const [overlay, setOverlay] = useState<CameraOverlay | null>(null);
   const [overlayBusy, setOverlayBusy] = useState(false);
   const [overlayError, setOverlayError] = useState<string | null>(null);
   const [mode, setMode] = useState<ViewMode>("overlay");
-  const [view, setView] = useState<SceneView | null>(null);
+  // The sim view and the scene fit (created_at) it was composited for.
+  const [view, setView] = useState<{ v: SceneView; stamp: string } | null>(null);
   const [viewBusy, setViewBusy] = useState(false);
   const [viewError, setViewError] = useState<string | null>(null);
   const [sceneBusy, setSceneBusy] = useState(false);
   const sourceRef = useRef<EventSource | null>(null);
   useEffect(() => () => sourceRef.current?.close(), []);
+  const frameRef = useRef(frame);
+  frameRef.current = frame;
 
   // ---- cameras in the dataset's info -----------------------------------------
   useEffect(() => {
@@ -115,61 +174,133 @@ export function CameraView({ dataset, episode, frame, playing, lock, busy, scene
   }, [dataset]);
 
   // ---- fits saved for the lock ------------------------------------------------
+  const onFitsChangeRef = useRef(onFitsChange);
+  onFitsChangeRef.current = onFitsChange;
+  const lockRef = useRef(lock);
+  lockRef.current = lock;
   const refreshFits = (name: string | null) => {
     if (!name) {
       setFits({});
+      setFitsLock(null);
       return;
     }
-    api.cameraFits(name).then((r) => setFits(r.cameras), () => setFits({}));
+    api.cameraFits(name).then(
+      (r) => {
+        onFitsChangeRef.current(name, Object.keys(r.cameras));
+        if (lockRef.current !== name) return; // an answer for a lock no longer shown
+        setFits(r.cameras);
+        setFitsLock(name);
+      },
+      () => {
+        if (lockRef.current !== name) return;
+        setFits({});
+        setFitsLock(name);
+      },
+    );
   };
-  useEffect(() => refreshFits(lock), [lock]);
-
-  // ---- overlay at the playhead, only while paused ---------------------------
-  const running = job?.status === "running" || job?.status === "cancelled";
-  const fit = camera ? fits[camera] : undefined;
-  const info = cameras.find((c) => c.name === camera);
   useEffect(() => {
-    if (!dataset || episode == null || !camera || !info?.fixed || playing) return;
+    setFits(null);
+    refreshFits(lock);
+  }, [lock]);
+
+  const fitsReady = fits != null && fitsLock === lock;
+  const fit = camera && fitsReady ? fits[camera] : undefined;
+  const info = cameras.find((c) => c.name === camera);
+  const running = job?.status === "running" || job?.status === "cancelled";
+
+  // ---- overlay at the playhead ----------------------------------------------------
+  // The overlay must match what the panel says it shows: the camera, the
+  // episode, the lock whose fit draws the outline, and that fit itself (a
+  // refit of the same lock has a new created_at). Anything else is stale.
+  const wantLock = fit ? lock : null;
+  const fitStamp = fit?.created_at ?? null;
+  const overlayMatches = (o: CameraOverlay | null): boolean =>
+    !!o && o.dataset === dataset && o.camera === camera && o.episode === episode && o.lock === wantLock && (fit ? o.fit?.created_at === fitStamp : true);
+  const overlayRef = useRef(overlay);
+  overlayRef.current = overlay;
+
+  const fetchOverlay = (f: number, isLive: () => boolean) => {
+    if (episode == null) return;
+    setOverlayBusy(true);
+    setOverlayError(null);
+    api
+      .cameraOverlay(dataset, camera, episode, f, wantLock)
+      .then(
+        (o) => isLive() && setOverlay(o),
+        (e) => isLive() && setOverlayError((e as Error).message),
+      )
+      .finally(() => isLive() && setOverlayBusy(false));
+  };
+
+  // Paused: follow the playhead, once a scrub settles.
+  useEffect(() => {
+    if (!active || !dataset || episode == null || !camera || !info?.fixed || playing || !fitsReady) return;
     let live = true;
-    const id = setTimeout(() => {
-      setOverlayBusy(true);
-      setOverlayError(null);
-      api
-        .cameraOverlay(dataset, camera, episode, frame, fit ? lock : null)
-        .then(
-          (o) => live && setOverlay(o),
-          (e) => live && setOverlayError((e as Error).message),
-        )
-        .finally(() => live && setOverlayBusy(false));
-    }, 180);
+    const id = setTimeout(() => fetchOverlay(frame, () => live), 180);
     return () => {
       live = false;
       clearTimeout(id);
     };
-  }, [dataset, episode, camera, frame, playing, lock, fit, info?.fixed]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, dataset, episode, camera, frame, playing, wantLock, fitStamp, info?.fixed, fitsReady]);
+
+  // Playing: when the lock, the fit, the camera or the episode changes, fetch
+  // once (at the frame last shown, or the playhead) so the picture never
+  // belongs to another fit than the numbers next to it.
+  useEffect(() => {
+    if (!active || !dataset || episode == null || !camera || !info?.fixed || !playing || !fitsReady) return;
+    if (overlayMatches(overlayRef.current)) return;
+    let live = true;
+    const prev = overlayRef.current;
+    fetchOverlay(prev && prev.episode === episode && prev.dataset === dataset ? prev.frame : frameRef.current, () => live);
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, dataset, episode, camera, playing, wantLock, fitStamp, info?.fixed, fitsReady]);
 
   // ---- sim view at the playhead: needs the lock's scene fit with this camera's backdrop ----
   const backdrop = scene && scene.lock === lock && camera ? scene.backdrops[camera] : undefined;
   const wantView = mode !== "overlay" && !!backdrop && !!fit;
+  const sceneStamp = scene?.created_at ?? "";
+  const viewMatches = (x: { v: SceneView; stamp: string } | null) =>
+    !!x && x.v.camera === camera && x.v.dataset === dataset && x.v.lock === lock && x.v.episode === episode && x.stamp === sceneStamp;
+  const viewRef = useRef(view);
+  viewRef.current = view;
+  const fetchView = (f: number, isLive: () => boolean) => {
+    if (episode == null || !lock) return;
+    const stamp = sceneStamp;
+    setViewBusy(true);
+    setViewError(null);
+    api
+      .sceneView(dataset, camera, episode, f, lock)
+      .then(
+        (v) => isLive() && setView({ v, stamp }),
+        (e) => isLive() && setViewError((e as Error).message),
+      )
+      .finally(() => isLive() && setViewBusy(false));
+  };
   useEffect(() => {
-    if (!wantView || !dataset || episode == null || !camera || !lock || playing) return;
+    if (!active || !wantView || !dataset || episode == null || !camera || !lock || playing) return;
     let live = true;
-    const id = setTimeout(() => {
-      setViewBusy(true);
-      setViewError(null);
-      api
-        .sceneView(dataset, camera, episode, frame, lock)
-        .then(
-          (v) => live && setView(v),
-          (e) => live && setViewError((e as Error).message),
-        )
-        .finally(() => live && setViewBusy(false));
-    }, 180);
+    const id = setTimeout(() => fetchView(frame, () => live), 180);
     return () => {
       live = false;
       clearTimeout(id);
     };
-  }, [wantView, dataset, episode, camera, frame, playing, lock, scene?.created_at]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, wantView, dataset, episode, camera, frame, playing, lock, sceneStamp]);
+  useEffect(() => {
+    if (!active || !wantView || !dataset || episode == null || !camera || !lock || !playing) return;
+    if (viewMatches(viewRef.current)) return;
+    let live = true;
+    const prev = viewRef.current;
+    fetchView(prev && prev.v.episode === episode ? prev.v.frame : frameRef.current, () => live);
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, wantView, dataset, episode, camera, playing, lock, sceneStamp]);
 
   // ---- scene fit (synchronous: FK over the grasp instants + the backdrops) ----
   const fitScene = async () => {
@@ -186,7 +317,7 @@ export function CameraView({ dataset, episode, frame, playing, lock, busy, scene
     }
   };
 
-  // ---- fit job ------------------------------------------------------------------
+  // ---- camera fit job ----------------------------------------------------------------
   const startFit = async () => {
     if (!dataset || !camera || !lock) return;
     let jobId: string;
@@ -275,27 +406,21 @@ export function CameraView({ dataset, episode, frame, playing, lock, busy, scene
     setObjectsJob((j) => (j ? { ...j, status: j.status === "running" ? "cancelled" : j.status } : j));
   };
 
-  const polygons = useMemo(
-    () => (overlay?.sim_polygons ?? []).map((p) => p.map(([x, y]) => `${x},${y}`).join(" ")),
-    [overlay],
-  );
-  const realPolys = useMemo(
-    () => (overlay?.real_mask_polygon ?? []).map((p) => p.map(([x, y]) => `${x},${y}`).join(" ")),
-    [overlay],
-  );
-  const showOverlay = overlay && overlay.camera === camera && overlay.dataset === dataset;
-  const showView = wantView && view && view.camera === camera && view.dataset === dataset && view.lock === lock;
-  const w = overlay?.width ?? info?.width ?? 640;
-  const h = overlay?.height ?? info?.height ?? 480;
-  const anyFit = Object.keys(fits).length > 0;
+  const shownOverlay = overlay && overlayMatches(overlay) ? overlay : null;
+  const polygons = useMemo(() => (shownOverlay?.sim_polygons ?? []).map((p) => p.map(([x, y]) => `${x},${y}`).join(" ")), [shownOverlay]);
+  const realPolys = useMemo(() => (shownOverlay?.real_mask_polygon ?? []).map((p) => p.map(([x, y]) => `${x},${y}`).join(" ")), [shownOverlay]);
+  const shownView = wantView && viewMatches(view) ? view!.v : null;
+  const w = shownOverlay?.width ?? info?.width ?? 640;
+  const h = shownOverlay?.height ?? info?.height ?? 480;
+  const anyFit = fitsReady && Object.keys(fits).length > 0;
   const sceneForLock = scene && scene.lock === lock ? scene : null;
   const objectsForLock = objects && objects.lock === lock ? objects : null;
   const objectsRunning = objectsJob?.status === "running" || objectsJob?.status === "cancelled";
   // The tracked object's box on the shown frame: solid when the camera saw it
   // there, dashed when the position is the FK fingertip (held) or carried forward.
   const objectBox = useMemo(() => {
-    if (!track || !showOverlay || track.episode !== overlay.episode || track.camera !== camera) return null;
-    const f = Math.min(track.xyz.length - 1, Math.max(0, overlay.frame));
+    if (!track || !shownOverlay || track.episode !== shownOverlay.episode || track.camera !== camera) return null;
+    const f = Math.min(track.xyz.length - 1, Math.max(0, shownOverlay.frame));
     const source = track.source[f];
     const bbox = track.bbox[f];
     const colour = `rgb(${track.rgb.join(",")})`;
@@ -304,15 +429,38 @@ export function CameraView({ dataset, episode, frame, playing, lock, busy, scene
     const c = track.centroid[f];
     const side = Math.sqrt(objectsForLock?.prior.area_px ?? 900);
     return c ? { source, x: c[0] - side / 2, y: c[1] - side / 2, w: side, h: side, colour } : null;
-  }, [track, showOverlay, overlay, camera, objectsForLock]);
+  }, [track, shownOverlay, camera, objectsForLock]);
 
   if (!dataset) return null;
 
+  if (!lock) {
+    return (
+      <EmptyState
+        title="No lock to save fits with"
+        actions={
+          <Button variant="primary" onClick={onGoCalibrate}>
+            Go to Calibrate
+          </Button>
+        }
+      >
+        Camera, scene and object fits are saved per lock. This dataset has none yet: calibrate first.
+      </EmptyState>
+    );
+  }
+
+  const fixedCams = cameras.filter((c) => c.fixed);
+  const movingCams = cameras.filter((c) => !c.fixed);
+  // One primary button per view: the next step that isn't done yet.
+  const next: "camera" | "scene" | "objects" | null = !anyFit ? "camera" : !sceneForLock ? "scene" : !objectsForLock ? "objects" : null;
+  const fitBlocker = busy ? "Paused while a calibration runs." : !info?.fixed ? "Pick a fixed camera: wrist cameras move with the arm." : null;
+  const emptyText = (playingText: string) =>
+    playing ? (overlayBusy ? "Loading frame…" : playingText) : overlayBusy ? "Loading frame…" : overlayError ?? "No frame";
+
   const overlayPane = (
     <div className="cam-view" style={{ aspectRatio: `${w} / ${h}` }}>
-      {showOverlay && <img src={overlay.image} alt={`${camera} camera, episode ${overlay.episode} frame ${overlay.frame}`} />}
-      {showOverlay && (
-        <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none">
+      {shownOverlay && <img src={shownOverlay.image} alt={`${camera} camera, episode ${shownOverlay.episode} frame ${shownOverlay.frame}`} />}
+      {shownOverlay && (
+        <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" aria-hidden="true">
           {realPolys.map((p, i) => (
             <polygon key={`r${i}`} points={p} className="cam-real" vectorEffect="non-scaling-stroke" />
           ))}
@@ -335,258 +483,338 @@ export function CameraView({ dataset, episode, frame, playing, lock, busy, scene
           )}
         </svg>
       )}
-      {!showOverlay && (
-        <div className="cam-empty muted small">
-          {playing ? "pause to see the frame" : overlayBusy ? "loading frame…" : overlayError ?? "no frame"}
-        </div>
+      {!shownOverlay && <div className="cam-empty">{emptyText(fit ? "Pause to see the overlay for this fit" : "Pause to see the frame")}</div>}
+      {shownOverlay && overlayBusy && (
+        <span className="cam-dot">
+          <Spinner />
+        </span>
       )}
-      {showOverlay && overlayBusy && <span className="dot cam-dot" />}
-      {showOverlay && playing && <div className="cam-paused muted small">paused frame {overlay.frame}</div>}
-      {mode === "both" && showOverlay && <div className="cam-tag muted small">real</div>}
+      {shownOverlay && playing && <div className="cam-tag bottom">frame {shownOverlay.frame} · pause to follow the playhead</div>}
+      {mode === "both" && shownOverlay && <div className="cam-tag">real</div>}
     </div>
   );
 
   const simPane = (
     <div className="cam-view" style={{ aspectRatio: `${w} / ${h}` }}>
-      {showView && <img src={view.sim_image} alt={`sim view of ${camera}, episode ${view.episode} frame ${view.frame}`} />}
-      {!showView && (
-        <div className="cam-empty muted small">
+      {shownView && <img src={shownView.sim_image} alt={`sim view of ${camera}, episode ${shownView.episode} frame ${shownView.frame}`} />}
+      {!shownView && (
+        <div className="cam-empty">
           {!fit
-            ? "fit the camera first"
+            ? "Needs: camera fit"
             : !backdrop
-              ? "fit the scene first: the sim view needs this camera's backdrop"
+              ? "Needs: scene fit with this camera's backdrop"
               : playing
-                ? "pause to see the sim view"
+                ? viewBusy
+                  ? "Compositing…"
+                  : "Pause to see the sim view"
                 : viewBusy
-                  ? "compositing…"
-                  : viewError ?? "no frame"}
+                  ? "Compositing…"
+                  : viewError ?? "No frame"}
         </div>
       )}
-      {showView && viewBusy && <span className="dot cam-dot" />}
-      {showView && <div className="cam-tag muted small">sim view</div>}
+      {shownView && viewBusy && (
+        <span className="cam-dot">
+          <Spinner />
+        </span>
+      )}
+      {shownView && <div className="cam-tag">sim view</div>}
     </div>
   );
 
   return (
-    <section className="camera">
-      <div className="label">Camera</div>
-      {cameras.length ? (
-        <div className="segmented">
-          {cameras.map((c) => (
-            <button
-              key={c.name}
-              className={c.name === camera ? "on" : ""}
-              onClick={() => setCamera(c.name)}
-              disabled={!c.fixed || running}
-              title={c.fixed ? `${c.key} · ${c.width}×${c.height}` : `${c.key} moves with the arm; only fixed cameras can be fitted`}
-            >
-              {c.name}
-              {fits[c.name] ? " ✓" : ""}
-            </button>
-          ))}
-        </div>
-      ) : (
-        <div className="muted small">no video streams listed for this dataset</div>
-      )}
+    <>
+      <div className="section-hint lock-line" title={lock}>
+        Fits saved with <b>{lockLabel}</b>
+        {borrowed && " (the stock model has none of its own, so this is the dataset's newest lock)"}
+      </div>
 
-      {camera && (
-        <>
-          {mode === "overlay" ? overlayPane : mode === "sim" ? simPane : <div className="cam-pair">{overlayPane}{simPane}</div>}
-          <div className="row">
-            <span className="muted small">
-              {fit ? (
+      <Step n={1} title="Camera">
+        {cameras.length ? (
+          <SegmentedControl
+            label="Camera"
+            value={camera}
+            onChange={setCamera}
+            options={cameras.map((c) => ({
+              value: c.name,
+              label: (
                 <>
-                  fit IoU <span className="mono">{pct(fit.fit_iou)}</span> · held-out{" "}
-                  <span className="mono">{pct(fit.heldout_iou)}</span>
+                  {c.name}
+                  {fitsReady && fits[c.name] ? " ✓" : ""}
                 </>
-              ) : (
-                "not fitted yet: sim outline needs a camera pose"
-              )}
-            </span>
-            {mode === "overlay" && showOverlay && overlay.iou != null && (
-              <span className="mono small" title="IoU of the sim outline and the segmented arm on this frame">
-                {pct(overlay.iou)}
-              </span>
-            )}
-            {mode !== "overlay" && showView && (
-              <span className="mono small" title="IoU of the sim view's arm and the segmented real arm on this frame">
-                {pct(view.iou)}
-              </span>
-            )}
+              ),
+              title: c.fixed ? `${c.key} · ${c.width}×${c.height}${fitsReady && fits[c.name] ? " · fitted" : ""}` : `${c.key} moves with the arm; only fixed cameras can be fitted`,
+              disabled: !c.fixed || running,
+            }))}
+          />
+        ) : (
+          <div className="section-hint">No video streams listed for this dataset.</div>
+        )}
+        {movingCams.length > 0 && (
+          <div className="section-hint">
+            {movingCams.map((c) => c.name).join(", ")} {movingCams.length === 1 ? "moves" : "move"} with the arm and can't be fitted.
           </div>
-          {!running ? (
-            <button className="cta secondary" onClick={startFit} disabled={busy || !lock || !info?.fixed} title={lock ? `saved to locks/${lock}.camera.json` : "calibrate first so there is a lock to attach the camera to"}>
-              {fit ? "Fit again from logs" : "Fit from logs"}
-            </button>
-          ) : (
-            <button className="cta secondary" onClick={stopFit} disabled={job?.status === "cancelled"}>
-              {job?.status === "cancelled" ? "Stopping…" : "Stop and keep best"}
-            </button>
-          )}
-          {job && job.camera === camera && (
-            <div className="calib-body">
-              <div className="row">
-                <span className="muted small">
-                  {job.status === "running" && `${stageLabel(job.last)} · ${job.last?.elapsed_s?.toFixed(0) ?? 0}s`}
-                  {job.status === "cancelled" && "stopping after this generation"}
-                  {job.status === "done" && `saved for lock ${lock}`}
-                  {job.status === "error" && <span className="bad">{job.error}</span>}
-                </span>
-                <span className="mono small">best IoU {pct(job.last?.best_iou)}</span>
-              </div>
-              <Sparkline values={job.best} total={job.best.length} />
-            </div>
-          )}
-          <div className="muted small">
-            <i className="swatch sim" /> sim arm outline (convex hulls) · <i className="swatch warm" /> segmented real arm
-          </div>
+        )}
 
-          <div className="label">Scene</div>
-          <div className="segmented" title="Real frame with the sim outline, the sim's own view from this camera, or both">
-            {(["overlay", "sim", "both"] as ViewMode[]).map((m) => (
-              <button key={m} className={m === mode ? "on" : ""} onClick={() => setMode(m)} disabled={m !== "overlay" && !sceneForLock}>
-                {m === "overlay" ? "real + outline" : m === "sim" ? "sim view" : "side by side"}
-              </button>
-            ))}
+        {!fitsReady ? (
+          <div className="section-hint">
+            <Spinner /> Checking fits saved with {lockLabel}…
           </div>
-          {sceneForLock ? (
-            <div className="scene-stats">
-              <div>
-                <span className="muted small">table height</span>
-                <div className="mono" title={`fingertips at ${sceneForLock.table.n_on_table} of ${sceneForLock.table.n_grasps} grasps sat at ${mm(sceneForLock.table.z_grasp)}, minus an assumed object half-height of ${mm(sceneForLock.table.object_half_height)}`}>
-                  {mm(sceneForLock.table.z)}
-                </div>
-              </div>
-              <div>
-                <span className="muted small">tilt</span>
-                <div className="mono" title={sceneForLock.table.horizontal ? "assumed horizontal; the fitted plane through the grasp points tilts this much" : "the grasp points disagree with a horizontal table; the fitted plane is used"}>
-                  {sceneForLock.table.tilt_deg.toFixed(1)}°{sceneForLock.table.horizontal ? "" : " (used)"}
-                </div>
-              </div>
-              <div>
-                <span className="muted small">workspace</span>
-                <div className="mono">
-                  {cm(sceneForLock.workspace.size[0])}×{cm(sceneForLock.workspace.size[1])}×{cm(sceneForLock.workspace.size[2])} cm
-                </div>
-              </div>
-              <div>
-                <span className="muted small">picks / places</span>
-                <div className="mono">
-                  {sceneForLock.grasp_points.length} / {sceneForLock.release_points.length}
-                </div>
-              </div>
-              {backdrop && (
-                <div style={{ gridColumn: "1 / -1" }}>
-                  <span className="muted small">table plane vs {camera} image</span>
-                  <div className="mono" title="share of the projected table plane that lands on the backdrop's dominant colour region · IoU of the two">
-                    {pct(backdrop.plane_in_region)} on the table colour · IoU {pct(backdrop.iou)}
-                  </div>
-                </div>
+        ) : !anyFit ? (
+          <EmptyState
+            title="No camera fit yet"
+            actions={
+              <>
+                {!running ? (
+                  <Button variant="primary" onClick={startFit} disabled={!!fitBlocker || !fixedCams.length}>
+                    Fit camera from video
+                  </Button>
+                ) : (
+                  <Button variant="primary" busy>
+                    Fitting camera…
+                  </Button>
+                )}
+                {altLock && (
+                  <Button onClick={() => onSwitchLock(altLock.name)} disabled={!canSwitch} title={canSwitch ? `Select ${altLock.name} in Sim physics` : "Stop the calibration first"}>
+                    Switch to {altLock.label}
+                  </Button>
+                )}
+              </>
+            }
+          >
+            <span>
+              Camera, scene and object fits are saved per lock. <b>{lockLabel}</b> has none yet.
+            </span>
+            {fitBlocker && <div className="section-hint">{fitBlocker}</div>}
+            {altLock && !canSwitch && <div className="section-hint">Switching locks waits for the calibration to finish.</div>}
+          </EmptyState>
+        ) : (
+          <>
+            {!fit && camera && (
+              <InlineNotice tone="info">
+                The {camera} camera has no fit with {lockLabel}; another camera does ({Object.keys(fits).join(", ")}).
+              </InlineNotice>
+            )}
+            <SegmentedControl<ViewMode>
+              label="View"
+              value={mode}
+              onChange={setMode}
+              options={[
+                { value: "overlay", label: "Real + outline", title: "The real frame with the sim arm's outline" },
+                { value: "sim", label: "Sim view", title: "The sim's own view from this camera (needs the scene fit)" },
+                { value: "both", label: "Both", title: "Real frame and sim view next to each other (needs the scene fit)" },
+              ]}
+            />
+            {mode !== "overlay" && !sceneForLock && <div className="section-hint">The sim view needs the scene fit (step 2).</div>}
+            {mode === "overlay" ? overlayPane : mode === "sim" ? simPane : <div className="cam-pair">{overlayPane}{simPane}</div>}
+            <div className="cam-stats">
+              {fit ? (
+                <span title="IoU of the sim outline and the segmented real arm, averaged over the fit's frames and over held-out frames">
+                  fit <span className="num">{pct(fit.fit_iou)}</span> · held-out <span className="num">{pct(fit.heldout_iou)}</span>
+                  {fit.cancelled && (
+                    <>
+                      {" "}
+                      <Badge tone="warn" glyph="◐" title="This camera fit was stopped early: the best pose so far was saved.">
+                        partial
+                      </Badge>
+                    </>
+                  )}
+                </span>
+              ) : (
+                <span className="muted">not fitted</span>
+              )}
+              {mode === "overlay" && shownOverlay && shownOverlay.iou != null && (
+                <span title="IoU of the sim outline and the segmented arm on the frame shown">
+                  this frame <span className="num">{pct(shownOverlay.iou)}</span>
+                </span>
+              )}
+              {mode !== "overlay" && shownView && (
+                <span title="IoU of the sim view's arm and the segmented real arm on the frame shown">
+                  this frame <span className="num">{pct(shownView.iou)}</span>
+                </span>
               )}
             </div>
-          ) : (
-            <div className="muted small">
-              {anyFit ? "table height and workspace from the grasps in the logs" : "fit a camera first; the scene needs its backdrop"}
+            <div className="legend-row">
+              <LegendItem k={<LineKey tone="real" />}>segmented real arm</LegendItem>
+              <LegendItem k={<LineKey tone="sim" dashed />}>sim arm outline</LegendItem>
             </div>
-          )}
-          <button
-            className="cta secondary"
+            {!running ? (
+              <Button onClick={startFit} disabled={!!fitBlocker} title={`saved to locks/${lock}.camera.json`}>
+                {fit ? `Fit ${camera} camera again` : `Fit ${camera} camera from video`}
+              </Button>
+            ) : null}
+            {fitBlocker && <div className="section-hint">{fitBlocker}</div>}
+          </>
+        )}
+        {job && job.camera === camera && (
+          <div className="run">
+            <div className="run-head">
+              <span>
+                {job.status === "running" && `${stageLabel(job.last)} · ${job.last?.elapsed_s?.toFixed(0) ?? 0}s`}
+                {job.status === "cancelled" && "Stopping after this generation"}
+                {job.status === "done" && `Saved with ${lockLabel}`}
+                {job.status === "error" && <span className="tone-critical">{job.error}</span>}
+              </span>
+              <span className="num">best IoU {pct(job.last?.best_iou)}</span>
+            </div>
+            {running && <ProgressBar value={null} label="Camera fit in progress" />}
+            <Sparkline values={job.best} total={job.best.length} label="Best IoU so far" />
+            {running && (
+              <Button block busy={job.status === "cancelled"} onClick={stopFit}>
+                {job.status === "cancelled" ? "Stopping…" : "Stop and save best so far"}
+              </Button>
+            )}
+          </div>
+        )}
+      </Step>
+
+      <Step n={2} title="Scene" needs={anyFit ? null : "camera fit"}>
+        <div className="section-hint">Table height and workspace from the grasps in the logs; the camera fit gives the backdrop.</div>
+        {sceneForLock && (
+          <dl className="result">
+            <div>
+              <dt>Table height</dt>
+              <dd
+                className="num"
+                title={`fingertips at ${sceneForLock.table.n_on_table} of ${sceneForLock.table.n_grasps} grasps sat at ${mm(sceneForLock.table.z_grasp)}, minus an assumed object half-height of ${mm(sceneForLock.table.object_half_height)}`}
+              >
+                {mm(sceneForLock.table.z)}
+              </dd>
+            </div>
+            <div>
+              <dt>Tilt</dt>
+              <dd
+                className="num"
+                title={sceneForLock.table.horizontal ? "assumed horizontal; the fitted plane through the grasp points tilts this much" : "the grasp points disagree with a horizontal table; the fitted plane is used"}
+              >
+                {sceneForLock.table.tilt_deg.toFixed(1)}°{sceneForLock.table.horizontal ? "" : " (used)"}
+              </dd>
+            </div>
+            <div>
+              <dt>Workspace</dt>
+              <dd className="num">
+                {cm(sceneForLock.workspace.size[0])}×{cm(sceneForLock.workspace.size[1])}×{cm(sceneForLock.workspace.size[2])} cm
+              </dd>
+            </div>
+            <div>
+              <dt>Picks / places</dt>
+              <dd className="num">
+                {sceneForLock.grasp_points.length} / {sceneForLock.release_points.length}
+              </dd>
+            </div>
+            {backdrop && (
+              <div className="span2">
+                <dt>Table plane vs {camera} image</dt>
+                <dd className="num" title="share of the projected table plane that lands on the backdrop's dominant colour region · IoU of the two">
+                  {pct(backdrop.plane_in_region)} on the table colour · IoU {pct(backdrop.iou)}
+                </dd>
+              </div>
+            )}
+          </dl>
+        )}
+        {anyFit && (
+          <Button
+            variant={next === "scene" ? "primary" : "secondary"}
+            busy={sceneBusy}
             onClick={fitScene}
-            disabled={busy || sceneBusy || running || !lock || !anyFit}
-            title={lock ? `saved to locks/${lock}.scene.json and locks/scene/` : "calibrate first so there is a lock to attach the scene to"}
+            disabled={busy || running}
+            title={`saved to locks/${lock}.scene.json and locks/scene/`}
           >
             {sceneBusy ? "Fitting scene…" : sceneForLock ? "Fit scene again" : "Fit scene from logs"}
-          </button>
+          </Button>
+        )}
+        {anyFit && (busy || running) && <div className="section-hint">{busy ? "Paused while a calibration runs." : "Waits for the camera fit to finish."}</div>}
+      </Step>
 
-          <div className="label">Objects</div>
-          {objectsForLock ? (
-            <>
-              <div className="muted small">
-                <i className="swatch" style={{ background: `rgb(${objectsForLock.prior.rgb.join(",")})` }} /> {objectsForLock.description} · seen in{" "}
-                {objectsForLock.camera}, {objectsForLock.n_tracked} of {objectsForLock.n_episodes} episodes
-              </div>
-              <div className="scene-stats">
-                <div>
-                  <span className="muted small">footprint</span>
-                  <div className="mono" title="oriented extent of the object's pixels back-projected onto the table plane, median over episodes (height assumed from the scene fit)">
-                    {objectsForLock.footprint_m?.long && objectsForLock.footprint_m?.short
-                      ? `${(objectsForLock.footprint_m.long.median * 100).toFixed(1)} × ${(objectsForLock.footprint_m.short.median * 100).toFixed(1)} cm`
-                      : "--"}
-                  </div>
-                </div>
-                <div>
-                  <span className="muted small">vision vs FK</span>
-                  <div
-                    className="mono"
-                    title={`distance between where the camera saw the object before the grasp and where FK puts the fingertip at the grasp, median over episodes${
-                      objectsForLock.vision_vs_fk_offset_m ? ` (of which a fixed offset of ${objectsForLock.vision_vs_fk_offset_m.map((v) => (v * 100).toFixed(1)).join(", ")} cm)` : ""
-                    }`}
-                  >
-                    {objectsForLock.vision_vs_fk_m ? `${(objectsForLock.vision_vs_fk_m.median * 100).toFixed(1)} cm` : "--"}
-                  </div>
-                </div>
-                <div>
-                  <span className="muted small">start pose spread</span>
-                  <div className="mono" title="std of the vision start poses over episodes (x, y)">
-                    {objectsForLock.start ? `${(objectsForLock.start.std[0] * 100).toFixed(1)} × ${(objectsForLock.start.std[1] * 100).toFixed(1)} cm` : "--"}
-                  </div>
-                </div>
-                <div>
-                  <span className="muted small">mass from the residual</span>
-                  <div className="mono" title={objectsForLock.payload?.verdict ?? "payload estimate not run"}>
-                    {objectsForLock.payload?.mass_kg != null && objectsForLock.payload.verdict.startsWith("consistent")
-                      ? `${grams(objectsForLock.payload.mass_kg)} ± ${grams((objectsForLock.payload.mass_iqr_kg ?? 0) / 2)}`
-                      : objectsForLock.payload
-                        ? "below the noise"
-                        : "--"}
-                  </div>
-                </div>
-              </div>
-              {objectsForLock.payload && !objectsForLock.payload.verdict.startsWith("consistent") && (
-                <div className="muted small">{objectsForLock.payload.verdict}</div>
-              )}
-            </>
-          ) : (
-            <div className="muted small">
-              {sceneForLock ? "find the object in the video, track it, and weigh it from the residual" : "fit the scene first; the object sits on its table plane"}
+      <Step n={3} title="Objects" needs={!anyFit ? "camera fit" : !sceneForLock ? "scene fit" : null}>
+        <div className="section-hint">Find the object in the video, track it through every episode, and weigh it from the residual.</div>
+        {objectsForLock && (
+          <>
+            <div className="section-hint">
+              <span className="key arm-key" style={{ ["--key" as string]: `rgb(${objectsForLock.prior.rgb.join(",")})` }} aria-hidden="true" /> {objectsForLock.description} · seen
+              in {objectsForLock.camera}, {objectsForLock.n_tracked} of {objectsForLock.n_episodes} episodes
             </div>
-          )}
-          {!objectsRunning ? (
-            <button
-              className="cta secondary"
+            <dl className="result">
+              <div>
+                <dt>Footprint</dt>
+                <dd className="num" title="oriented extent of the object's pixels back-projected onto the table plane, median over episodes (height assumed from the scene fit)">
+                  {objectsForLock.footprint_m?.long && objectsForLock.footprint_m?.short
+                    ? `${(objectsForLock.footprint_m.long.median * 100).toFixed(1)} × ${(objectsForLock.footprint_m.short.median * 100).toFixed(1)} cm`
+                    : "--"}
+                </dd>
+              </div>
+              <div>
+                <dt>Vision vs FK</dt>
+                <dd
+                  className="num"
+                  title={`distance between where the camera saw the object before the grasp and where FK puts the fingertip at the grasp, median over episodes${
+                    objectsForLock.vision_vs_fk_offset_m ? ` (of which a fixed offset of ${objectsForLock.vision_vs_fk_offset_m.map((v) => (v * 100).toFixed(1)).join(", ")} cm)` : ""
+                  }`}
+                >
+                  {objectsForLock.vision_vs_fk_m ? `${(objectsForLock.vision_vs_fk_m.median * 100).toFixed(1)} cm` : "--"}
+                </dd>
+              </div>
+              <div>
+                <dt>Start pose spread</dt>
+                <dd className="num" title="std of the vision start poses over episodes (x, y)">
+                  {objectsForLock.start ? `${(objectsForLock.start.std[0] * 100).toFixed(1)} × ${(objectsForLock.start.std[1] * 100).toFixed(1)} cm` : "--"}
+                </dd>
+              </div>
+              <div>
+                <dt>Mass from the residual</dt>
+                <dd className="num" title={objectsForLock.payload?.verdict ?? "payload estimate not run"}>
+                  {objectsForLock.payload?.mass_kg != null && objectsForLock.payload.verdict.startsWith("consistent")
+                    ? `${grams(objectsForLock.payload.mass_kg)} ± ${grams((objectsForLock.payload.mass_iqr_kg ?? 0) / 2)}`
+                    : objectsForLock.payload
+                      ? "below the noise"
+                      : "--"}
+                </dd>
+              </div>
+            </dl>
+            {objectsForLock.payload && !objectsForLock.payload.verdict.startsWith("consistent") && (
+              <div className="section-hint">{objectsForLock.payload.verdict}</div>
+            )}
+            <div className="section-hint">Box on the frame: solid where the camera sees the object, dashed while it is held (fingertip from FK) or hidden.</div>
+          </>
+        )}
+        {sceneForLock &&
+          (!objectsRunning ? (
+            <Button
+              variant={next === "objects" ? "primary" : "secondary"}
               onClick={startObjectsFit}
-              disabled={busy || running || sceneBusy || !lock || !sceneForLock}
-              title={lock ? `saved to locks/${lock}.objects.json (a few minutes: every frame of every episode)` : "calibrate first so there is a lock to attach the objects to"}
+              disabled={busy || running || sceneBusy}
+              title={`saved to locks/${lock}.objects.json (a few minutes: every frame of every episode)`}
             >
               {objectsForLock ? "Track object again" : "Find and track the object"}
-            </button>
+            </Button>
           ) : (
-            <button className="cta secondary" onClick={stopObjectsFit} disabled={objectsJob?.status === "cancelled"}>
+            <Button block busy={objectsJob?.status === "cancelled"} onClick={stopObjectsFit}>
               {objectsJob?.status === "cancelled" ? "Stopping…" : "Stop and keep what is tracked"}
-            </button>
-          )}
-          {objectsJob && (
-            <div className="muted small">
-              {objectsJob.status === "running" &&
-                (objectsJob.stage === "track"
-                  ? `tracking episode ${objectsJob.i} / ${objectsJob.n}`
+            </Button>
+          ))}
+        {sceneForLock && !objectsRunning && (busy || running || sceneBusy) && (
+          <div className="section-hint">{busy ? "Paused while a calibration runs." : running ? "Waits for the camera fit to finish." : "Waits for the scene fit."}</div>
+        )}
+        {objectsJob && (
+          <div className="section-hint">
+            {objectsJob.status === "running" && (
+              <>
+                <Spinner />{" "}
+                {objectsJob.stage === "track"
+                  ? `Tracking episode ${objectsJob.i} / ${objectsJob.n}`
                   : objectsJob.stage === "payload"
-                    ? `weighing: ${objectsJob.i} / ${objectsJob.n} episodes replayed`
+                    ? `Weighing: ${objectsJob.i} / ${objectsJob.n} episodes replayed`
                     : objectsJob.stage === "cross"
-                      ? "cross-camera check"
-                      : "learning the object's colour")}
-              {objectsJob.status === "cancelled" && "stopping after this episode"}
-              {objectsJob.status === "done" && `saved for lock ${lock}`}
-              {objectsJob.status === "error" && <span className="bad">{objectsJob.error}</span>}
-            </div>
-          )}
-          {objectsForLock && (
-            <div className="muted small">
-              box on the frame: solid where the camera sees the object, dashed while it is held (fingertip from FK) or hidden
-            </div>
-          )}
-        </>
-      )}
-    </section>
+                      ? "Cross-camera check"
+                      : "Learning the object's colour"}
+              </>
+            )}
+            {objectsJob.status === "cancelled" && "Stopping after this episode"}
+            {objectsJob.status === "done" && `Saved with ${lockLabel}`}
+            {objectsJob.status === "error" && <span className="tone-critical">{objectsJob.error}</span>}
+          </div>
+        )}
+        {objectsRunning && objectsJob && objectsJob.n > 0 && <ProgressBar value={objectsJob.i / objectsJob.n} label="Object tracking progress" />}
+      </Step>
+    </>
   );
 }
