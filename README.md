@@ -341,12 +341,13 @@ through the locked sim, and fail if the tracking error has grown past
 ```
 joint          rmse (deg)  reference  limit  status
 -------------  ----------  ---------  -----  -----------------
-shoulder_pan   0.405       0.349      0.524  PASS  <- worst
-shoulder_lift  0.854       0.968      1.452  PASS
-elbow_flex     2.095       2.031      3.046  PASS
+shoulder_pan   0.592       0.522      0.783  PASS  <- worst
+shoulder_lift  0.841       0.813      1.220  PASS
+elbow_flex     1.122       1.121      1.682  PASS
 ...
-overall        1.067       1.054      1.582  PASS
-OK: lerobot/svla_so101_pickplace vs lock svla_so101_pickplace: 1.067 deg RMSE on 10 episodes (reference 1.054, limit 1.582)
+overall        0.752       0.736      1.103  PASS
+OK: lerobot/svla_so101_pickplace vs lock svla_so101_pickplace: 0.752 deg RMSE on 50 episodes (reference 0.736, limit 1.103); worst joint shoulder_pan 0.592 deg (limit 0.783)
+
 ```
 
 Exit codes: `0` pass, `1` drifted, `2` usage error or too few episodes
