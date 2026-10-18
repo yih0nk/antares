@@ -993,6 +993,82 @@ Locks fitted this way carry a `command_map`. Replay, the viewer, `cross`,
 back in raw units), `export` (in the sidecar) and the drift and DR refits
 (which hold the map fixed) all use it. Locks without one behave as before.
 
+### Use your arm's LeRobot calibration
+
+Everything above infers the meaning of the dataset's numbers from the
+MJCF: `UnitMap.from_model` spreads -100..100 over each joint's modelled
+range. But LeRobot already measured that for your arm. `lerobot-calibrate`
+writes one file per follower with, for every motor, the homing offset it
+set and the encoder range (`range_min`/`range_max`, in 4096-tick STS3215
+steps) the joint was moved through, and that file defines the dataset's
+normalized values exactly:
+
+```
+~/.cache/huggingface/lerobot/calibration/robots/so101_follower/<robot.id>.json   # LeRobot 0.4.x
+~/.cache/huggingface/lerobot/calibration/robots/so_follower/<robot.id>.json      # LeRobot >= 0.5
+```
+
+(`$HF_LEROBOT_CALIBRATION` moves the root; both directory names are tried.)
+Hand it to Antares by path or by the `--robot.id` you gave LeRobot:
+
+```sh
+.venv/bin/antares inspect my/dataset --robot-id my_awesome_follower_arm      # diagnose first
+.venv/bin/antares calibrate my/dataset --robot-id my_awesome_follower_arm    # or --calibration PATH
+.venv/bin/antares calibrate my/dataset --calibration ~/.cache/huggingface/lerobot/calibration/robots/so_follower/arm.json --fit-sensor
+curl "localhost:8000/api/datasets/calibration-check?dataset=my/dataset&robot_id=my_awesome_follower_arm"
+```
+
+`antares/lerobot_calib.py` turns the file into the arm's own unit map:
+`rad(n) = mid + k * (present(n) - 2047)`, with `present(n)` LeRobot's inverse
+normalization (`(n + 100) / 200 * (range_max - range_min) + range_min`),
+`k = 2*pi/4096` per tick, the half turn 2047 the pose LeRobot's homing made the
+calibration pose read, and `mid` the MJCF mid-range that pose is taken to be
+(LeRobot asks for the arm in the middle of its range; `anchor="range"`
+centres the recorded range instead). The gripper is anchored at its closed
+stop (`range_min` = MJCF `lo`), one unit = span/100 ticks. `drive_mode` flips
+the direction; the homing offset is already folded into the ranges LeRobot
+recorded and is kept for the record. The module docstring has the LeRobot
+sources and versions.
+
+What it buys:
+
+* **An exact unit map.** The replay is driven to, and reads back, the
+  physical angles this arm's numbers mean, instead of the model's guess:
+  gravity, forward kinematics, the viewer's ghost, camera fits and exports
+  all see the right pose. The lock records it (`calibration`: source path,
+  robot id, sha256, the per-joint `range_min`/`range_max`/`homing_offset`,
+  the map and its disagreement with the model in degrees), and `replay`,
+  `check`, `/api/replay` and the lock-based refits rebuild the map from the
+  lock, so it stays self-contained.
+* **A measured starting point for `--fit-sensor`.** Under the arm's own map
+  the prior is identity: the follower un-normalizes every command and
+  normalizes every reading with the same ranges, so the file leaves no
+  command-vs-state disagreement to express, and the fit measures only what
+  the file cannot (servo load error, dead band).
+* **A diagnosis instead of a bent servo.** `inspect --calibration` prints,
+  per joint, the calibration map minus the model map in degrees at
+  -100/0/+100 and flags anything over 2 degrees with "the model's assumed
+  range does not match this arm's calibration; use --calibration when
+  calibrating". A wrist roll calibrated as LeRobot's full turn (0..4095) over
+  a model range of 320 degrees, or a range the arm never reached one end of,
+  shows up here as a scale or offset in degrees rather than as fitted
+  dynamics. A caveat on what it fixes: the follower closes its loop in its
+  own ticks, so command and state share the map and a map error leaves the
+  dataset-unit tracking residual almost untouched; an offset-looking
+  residual such as `codywang`'s wrist roll is diagnosed by this table, not
+  removed by it.
+
+Only the **follower's** file matters. A teleoperation dataset's `action` is
+the leader's normalized reading, but the follower un-normalizes it in its
+own calibration before writing `Goal_Position`, and `observation.state` is
+the follower's reading in that same calibration; the leader's file never
+enters what the arm did, so it is not needed for replay. LeRobot >= 0.5
+records body joints in degrees by default (`use_degrees=True`); the module
+handles that normalization (`norm_mode="degrees"`) but the CLI assumes the
+-100..100 range mode Antares replays. Community Hub datasets almost never
+ship their calibration file and `meta/info.json` does not embed it, so this
+is for your own arm; without a file, nothing changes.
+
 ## Cameras from the logs
 
 Every LeRobot dataset ships video from fixed cameras, and the joint angles
@@ -1061,6 +1137,7 @@ wrist cameras are skipped; the sim is the SO-101 model for both datasets.
 | `antares/sim.py` | MuJoCo model, unit mapping, replay and rollout |
 | `antares/calibrate.py` | CMA-ES parameter fit |
 | `antares/sensor.py` | Per-joint command offset/scale fit |
+| `antares/lerobot_calib.py` | The follower's LeRobot motor calibration as the arm's unit map; `inspect --calibration`, `/api/datasets/calibration-check` |
 | `antares/gap.py` | Tracking-error metrics |
 | `antares/lock.py` | Calibrated sim saved per robot as a lock file |
 | `antares/export.py` | Lock -> standalone MJCF, sidecar, scene, zip |
