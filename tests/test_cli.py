@@ -446,6 +446,9 @@ def test_history_missing_lock_and_empty_history(tmp_path, capsys):
     (tmp_path / "locks" / "fresh.lock.json").write_text("{}")
     assert cli.main(["history", "fresh"]) == 0
     assert "no checks recorded for lock fresh" in capsys.readouterr().out
+    # the lock is looked up in the lock dir even when the history lives elsewhere
+    assert cli.main(["history", "fresh", "--history-dir", str(tmp_path / "elsewhere")]) == 0
+    assert str(tmp_path / "elsewhere" / "fresh.history.jsonl") in capsys.readouterr().out
     assert cli.main(["history", "fresh", "--json"]) == 0
     d = json.loads(capsys.readouterr().out)
     assert d["entries"] == [] and d["trend"]["n"] == 0 and d["trend"]["slope_deg_per_day"] is None

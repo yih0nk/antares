@@ -540,9 +540,9 @@ def cmd_history(args: argparse.Namespace) -> int:
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return EXIT_USAGE
-    lock_file = Path(d) / f"{name}{server.LOCK_SUFFIX}"
+    lock_file = Path(server.LOCK_DIR) / f"{name}{server.LOCK_SUFFIX}"
     if not records and not lock_file.is_file() and not Path(args.lock).is_file():
-        print(f"error: no lock named {name!r} in {d}", file=sys.stderr)
+        print(f"error: no lock named {name!r} in {server.LOCK_DIR}", file=sys.stderr)
         return EXIT_USAGE
     shown = records[-args.last:] if args.last else records
     if args.json:
