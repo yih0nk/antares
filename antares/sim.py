@@ -90,6 +90,14 @@ class SimParams:
     #: independently of how fast ``kp`` makes it track. 1.0 is the stock model.
     #: Shared by all joints (it scales the gravity vector).
     gravity_scale: ParamValue = 1.0
+    #: Position-error deadband of the servo (rad, >= 0): within it the servo
+    #: pushes no torque, past it the gain acts on the excess. Lumps the
+    #: STS3215's firmware deadzone and its gearbox backlash, which sit inside
+    #: the loop because the encoder reads the output shaft. A held arm then
+    #: rests at the edge of the band on the side gravity pulls it to, and a
+    #: moving one trails by it, so the error flips sign with the motion. 0 is
+    #: the stock smooth actuator.
+    deadband: ParamValue = 0.0
 
     def __post_init__(self) -> None:
         for f in fields(self):
@@ -101,6 +109,8 @@ class SimParams:
             raise ValueError("gravity_scale is shared by all joints; per-joint values must be equal")
         if g[0] < 0:
             raise ValueError("gravity_scale must be >= 0")
+        if np.any(self.per_joint("deadband") < 0):
+            raise ValueError("deadband must be >= 0")
 
     @classmethod
     def default(cls) -> SimParams:
@@ -156,13 +166,15 @@ class SimParams:
     def to_dict(self) -> dict[str, Any]:
         """Scalars stay scalars; per-joint values become 6-element lists.
 
-        ``gravity_scale`` is left out at its default of 1.0, so locks fitted
-        without it serialize exactly as before.
+        ``gravity_scale`` and ``deadband`` are left out at their defaults (1.0
+        and 0), so locks fitted without them serialize exactly as before.
         """
         out: dict[str, Any] = {}
         for n in self.field_names():
             v = getattr(self, n)
             if n == "gravity_scale" and self.per_joint(n)[0] == 1.0:
+                continue
+            if n == "deadband" and not np.any(self.per_joint(n)):
                 continue
             out[n] = list(v) if isinstance(v, tuple) else v
         return out
@@ -455,10 +467,24 @@ class Arm:
             qpos = d.qpos
             dctrl = d.ctrl
             step = mujoco.mj_step
-            for t in range(1, T):
-                dctrl[:] = ctrl[t]
-                step(m, d, n_sub)
-                sim_q[t] = qpos
+            band = self.params.per_joint("deadband")
+            if not np.any(band):
+                for t in range(1, T):
+                    dctrl[:] = ctrl[t]
+                    step(m, d, n_sub)
+                    sim_q[t] = qpos
+            else:
+                # The position actuator pushes kp * (ctrl - q); feeding it
+                # q + shrink(target - q) makes that kp * shrink(error). Updated
+                # every physics substep, so the band is exact, not per frame.
+                lo, hi = self._ctrl_lo, self._ctrl_hi
+                for t in range(1, T):
+                    target = ctrl[t]
+                    for _ in range(n_sub):
+                        e = target - qpos
+                        dctrl[:] = np.clip(qpos + np.sign(e) * np.maximum(np.abs(e) - band, 0.0), lo, hi)
+                        step(m, d)
+                    sim_q[t] = qpos
         finally:
             m.opt.timestep = old_dt
         return sim_q

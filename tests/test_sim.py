@@ -592,3 +592,35 @@ def test_gravity_scale_sets_the_static_sag():
     assert abs(half[lift] - weightless[lift]) == pytest.approx(sag / 2, rel=0.1)
     arm.apply(soft)
     np.testing.assert_array_equal(arm.replay(ep)[-1], stock)  # apply restores gravity
+
+
+# -- deadband --------------------------------------------------------------
+
+
+def test_deadband_defaults_off_and_serializes_only_when_set():
+    p = SimParams()
+    assert p.deadband == 0.0 and "deadband" not in p.to_dict()
+    q = p.replace(deadband=[0.0, 0.0, 0.01, 0.0, 0.0, 0.0])
+    assert q.to_dict()["deadband"] == [0.0, 0.0, 0.01, 0.0, 0.0, 0.0]
+    assert SimParams.from_dict(q.to_dict()) == q
+    with pytest.raises(ValueError):
+        SimParams(deadband=-0.01)
+
+
+def test_deadband_leaves_the_arm_parked_inside_the_band():
+    elbow = JOINTS.index("elbow_flex")
+    T = 90
+    action = np.zeros((T, 6))
+    action[5:, elbow] = 30.0  # a step, dataset units
+    ep = Episode(index=0, fps=30.0, joint_names=JOINTS, state=np.zeros((T, 6)), action=action)
+    base = SimParams(kp=20.0, kv=0.3, frictionloss=0.001, gravity_scale=0.0)
+    arm = Arm(base)
+    target = arm.unit_map.to_rad(action[-1])[elbow]
+    smooth = arm.replay(ep)
+    assert abs(smooth[-1, elbow] - target) < np.radians(0.05)
+    np.testing.assert_array_equal(Arm(base.replace(deadband=0.0)).replay(ep), smooth)
+    band = np.radians(1.0)
+    arm.apply(base.replace(deadband=band))
+    off = abs(target - arm.replay(ep)[-1, elbow])
+    # with no torque inside the band the arm stops wherever it coasts to in it
+    assert np.radians(0.1) < off <= 1.05 * band
