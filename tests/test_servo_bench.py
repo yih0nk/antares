@@ -79,3 +79,35 @@ def test_cross_scores_and_payload_check_tell_servos_apart(tmp_path):
         assert scores[own][own] < 0.5 * scores[own]["default"]
     assert sb.payload_check(dsa, locks["a"]).verdict == "ok"
     assert sb.payload_check(dsc, locks["a"]).verdict == "drifted"
+
+
+def test_live_step_sim_matches_a_batch_rollout():
+    from antares.servo_live import StepSim
+
+    params = Arm(robot="sg92r").default_params().replace(kp=(2.0,), latency_frames=2)
+    cmd = sb.program(400)
+    arm = Arm(robot="sg92r")
+    arm.apply(params)
+    batch = np.degrees(arm.rollout(np.radians(cmd[:, None]), np.radians([cmd[0]]), sb.FPS)[:, 0])
+    live = StepSim(params)
+    live.reset(cmd[0], cmd[0])
+    stepped = [cmd[0]] + [live.step(c) for c in cmd[1:]]
+    np.testing.assert_allclose(stepped, batch, atol=1e-6)
+
+
+def test_live_ticks_publish_three_angles(tmp_path):
+    from antares import servo_live
+
+    csv = sb.simulate_run(tmp_path / "a.csv", seed=3)
+    _, pot, _ = sb.import_runs([csv], "a", tmp_path / "ds")
+    run = sb.read_run(csv)
+    ticks = list(zip(run.t[:100], run.cmd[:100], run.raw["a"][:100]))
+    out = servo_live.Broadcaster()
+    q = out.subscribe()
+    base = Arm(robot="sg92r").default_params()
+    servo_live.run_ticks(iter(ticks), pot, base, base, out, {})
+    import json
+
+    msgs = [json.loads(q.get_nowait()) for _ in range(100)]
+    assert set(msgs[-1]) >= {"t", "cmd", "real", "lock", "default", "err_lock", "err_default"}
+    assert msgs[-1]["lock"] == msgs[-1]["default"]  # same params, same ghost
