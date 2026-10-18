@@ -2210,7 +2210,11 @@ class CalibrateRequest(BaseModel):
 @app.post("/api/calibrate")
 def calibrate_start(req: CalibrateRequest) -> dict:
     if req.name is not None:
-        _lock_path(req.name)  # validate early
+        if _lock_path(req.name).exists():  # validates the name too
+            raise HTTPException(
+                status_code=409,
+                detail=f"a lock named {req.name!r} already exists; pick another name or delete it first",
+            )
     if req.robot_id is not None:
         from antares.registry import RegistryError, validate_robot_id
 

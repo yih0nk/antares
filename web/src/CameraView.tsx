@@ -10,7 +10,7 @@ import {
   type ObjectsJobEvent,
   type ObjectTrack,
   type SceneFit,
-  type SceneView,
+  type SceneView, followJob,
 } from "./api";
 import { Sparkline } from "./Charts";
 
@@ -200,8 +200,7 @@ export function CameraView({ dataset, episode, frame, playing, lock, busy, scene
     sourceRef.current?.close();
     const src = api.jobEvents(jobId);
     sourceRef.current = src;
-    src.onmessage = (msg) => {
-      const ev = JSON.parse(msg.data) as CameraJobEvent;
+    followJob<CameraJobEvent>(src, (ev) => {
       if (ev.type === "progress") {
         setJob((j) => (j && j.jobId === jobId ? { ...j, last: ev, best: [...j.best, ev.best_iou] } : j));
       } else if (ev.type === "done") {
@@ -212,7 +211,7 @@ export function CameraView({ dataset, episode, frame, playing, lock, busy, scene
         src.close();
         setJob((j) => (j && j.jobId === jobId ? { ...j, status: "error", error: ev.message } : j));
       }
-    };
+    });
     src.onerror = () => {
       if (src.readyState === EventSource.CLOSED) {
         setJob((j) => (j && j.jobId === jobId && j.status === "running" ? { ...j, status: "error", error: "lost the progress stream" } : j));
@@ -222,7 +221,12 @@ export function CameraView({ dataset, episode, frame, playing, lock, busy, scene
 
   const stopFit = async () => {
     if (!job) return;
-    await api.cancelJob(job.jobId).catch(() => {});
+    try {
+      await api.cancelJob(job.jobId);
+    } catch (e) {
+      onError(`Could not stop the camera fit: ${(e as Error).message}`);
+      return;
+    }
     setJob((j) => (j ? { ...j, status: j.status === "running" ? "cancelled" : j.status } : j));
   };
 
@@ -240,8 +244,7 @@ export function CameraView({ dataset, episode, frame, playing, lock, busy, scene
     objectsSourceRef.current?.close();
     const src = api.jobEvents(jobId);
     objectsSourceRef.current = src;
-    src.onmessage = (msg) => {
-      const ev = JSON.parse(msg.data) as ObjectsJobEvent;
+    followJob<ObjectsJobEvent>(src, (ev) => {
       if (ev.type === "progress") {
         setObjectsJob((j) =>
           j && j.jobId === jobId
@@ -261,7 +264,7 @@ export function CameraView({ dataset, episode, frame, playing, lock, busy, scene
         src.close();
         setObjectsJob((j) => (j && j.jobId === jobId ? { ...j, status: "error", error: ev.message } : j));
       }
-    };
+    });
     src.onerror = () => {
       if (src.readyState === EventSource.CLOSED) {
         setObjectsJob((j) => (j && j.jobId === jobId && j.status === "running" ? { ...j, status: "error", error: "lost the progress stream" } : j));
@@ -271,7 +274,12 @@ export function CameraView({ dataset, episode, frame, playing, lock, busy, scene
 
   const stopObjectsFit = async () => {
     if (!objectsJob) return;
-    await api.cancelJob(objectsJob.jobId).catch(() => {});
+    try {
+      await api.cancelJob(objectsJob.jobId);
+    } catch (e) {
+      onError(`Could not stop the object fit: ${(e as Error).message}`);
+      return;
+    }
     setObjectsJob((j) => (j ? { ...j, status: j.status === "running" ? "cancelled" : j.status } : j));
   };
 
