@@ -257,7 +257,7 @@ entry through `Arm`. Other arms are described in [Other robots](#other-robots).
 
 ## Other robots
 
-`antares robots` lists every arm antares can simulate:
+`antares models` lists every arm antares can simulate:
 
 | name | robot | columns | model |
 |---|---|---|---|
@@ -352,7 +352,7 @@ MuJoCo `MjModel` field (`opt.gravity`, `body_mass`, `jnt_stiffness`,
 express takes `apply = "module:function"`, a function of `(arm, values)`.
 
 ```bash
-antares calibrate <id> --factors-file examples/factors.toml --factors +gravity_scale
+antares calibrate <id> --factors-file examples/factors.toml --factors +link_mass
 ```
 
 `$ANTARES_FACTORS` loads the same files for the server and every command.
@@ -2155,7 +2155,7 @@ cube being visible inside its box from above.
 | `antares/data.py` | LeRobot dataset loader (tabular only) |
 | `antares/validate.py` | Dataset checks shared by upload, `inspect` and the fleet scan |
 | `antares/sim.py` | MuJoCo model, column-to-joint mapping, unit mapping, replay and rollout |
-| `antares/robots.py` | Robot profiles: columns, joints, units, grippers, model file (`antares robots`) |
+| `antares/robots.py` | Robot profiles: columns, joints, units, grippers, model file (`antares models`) |
 | `antares/factors.py` | What the fit can account for, and what it can't yet (`antares factors`) |
 | `antares/menagerie.py` | Fetches non-vendored MuJoCo Menagerie models at a pinned commit |
 | `antares/catalog.py` | Public datasets of other arms to test on (`antares datasets`) |

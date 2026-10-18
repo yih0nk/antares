@@ -56,8 +56,8 @@ class FakeCommandMap:
         self.gain, self.bias = np.asarray(gain, float), np.asarray(bias, float)
 
     @classmethod
-    def identity(cls):
-        return cls(np.ones(6), np.zeros(6))
+    def identity(cls, n=6):
+        return cls(np.ones(n), np.zeros(n))
 
     @classmethod
     def from_dict(cls, d):

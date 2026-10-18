@@ -144,7 +144,7 @@ def test_cli_lists(capsys):
     d = json.loads(capsys.readouterr().out)
     assert [f["name"] for f in d["factors"]][:6] == list(factors.names("shared"))[:6]
     assert d["not_modelled"]
-    assert main(["robots"]) == 0
+    assert main(["models"]) == 0
     assert "aloha" in capsys.readouterr().out
     assert main(["datasets"]) == 0
     assert "lerobot/aloha_static_coffee" in capsys.readouterr().out

@@ -61,19 +61,19 @@ def test_describe_lists_everything_with_identifiability():
 
 def test_register_from_config_and_unregister():
     f, fn = factors.factor_from_config(
-        {"name": "gravity_scale", "target": "opt.gravity", "bounds": [0.5, 1.5], "neutral": 1.0,
-         "explains": "gravity stronger or weaker than modelled"}
+        {"name": "link_mass", "target": "body_mass", "bounds": [0.5, 1.5], "neutral": 1.0,
+         "explains": "links heavier or lighter than the CAD model"}
     )
     assert f.origin == "model" and f.stages == ("shared",)
     factors.register(f, fn)
     try:
-        assert factors.is_extra("gravity_scale")
-        assert "gravity_scale" in factors.names("shared")
+        assert factors.is_extra("link_mass")
+        assert "link_mass" in factors.names("shared")
         with pytest.raises(ValueError):
             factors.register(f, fn)
     finally:
-        factors.unregister("gravity_scale")
-    assert "gravity_scale" not in factors.REGISTRY
+        factors.unregister("link_mass")
+    assert "link_mass" not in factors.REGISTRY
 
 
 def test_config_errors():

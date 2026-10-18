@@ -2453,7 +2453,7 @@ def cmd_factors(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_robots(args: argparse.Namespace) -> int:
+def cmd_models(args: argparse.Namespace) -> int:
     from antares.robots import REGISTRY
 
     rows = []
@@ -2884,9 +2884,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_factors)
 
-    p = sub.add_parser("robots", help="list the robots antares can simulate")
+    p = sub.add_parser("models", help="list the robot models antares can simulate")
     p.add_argument("--json", action="store_true")
-    p.set_defaults(func=cmd_robots)
+    p.set_defaults(func=cmd_models)
 
     p = sub.add_parser("fetch-model", help="download a robot's model from MuJoCo Menagerie (otherwise fetched on first use)")
     p.add_argument("robot", help="registry name, or 'all'")
