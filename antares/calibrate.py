@@ -32,6 +32,7 @@ from typing import Any
 
 import numpy as np
 
+from antares import factors
 from antares.data import Episode
 from antares.sim import JOINTS, SimParams
 
@@ -112,22 +113,16 @@ def _fallback_aggregate(reports: Sequence[Any]) -> _FallbackGapReport:
 
 #: name -> (lo, hi, scale). ``log`` dims are searched in log10, ``int`` dims
 #: are continuous during the search and rounded on decode. This is the
-#: shared space: one value of each parameter for all six joints.
-SPACE: dict[str, tuple[float, float, str]] = {
-    "kp": (10.0, 5000.0, "log"),  # SO-101 fits sat on the old 50 floor
-    "kv": (0.1, 50.0, "log"),
-    "damping": (0.01, 10.0, "log"),
-    "armature": (1e-4, 0.5, "log"),
-    "frictionloss": (1e-3, 2.0, "log"),
-    "latency_frames": (0.0, 5.0, "int"),
-}
+#: shared space: one value of each parameter for all six joints. Bounds and
+#: order come from :mod:`antares.factors`.
+SPACE: dict[str, tuple[float, float, str]] = factors.space("shared")
 
 #: Bounds for the per-joint refinement: the shared parameters plus the
-#: actuator force limit (N*m; the STS3215 stalls near 3). Each is searched
-#: once per joint, so the space has ``6 * len(PER_JOINT_SPACE)`` dims.
+#: actuator force limit. Each is searched once per joint, so the space has
+#: ``6 * len(PER_JOINT_SPACE)`` dims.
 PER_JOINT_SPACE: dict[str, tuple[float, float, str]] = {
     **SPACE,
-    "forcerange": (0.5, 30.0, "log"),
+    **factors.space("per_joint", per_joint=True),
 }
 
 DIMS: tuple[str, ...] = tuple(SPACE)
