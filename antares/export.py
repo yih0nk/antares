@@ -177,6 +177,49 @@ def insert_header(xml: str, comment: str) -> str:
     return f"{xml[: m.end()]}\n  {comment}{xml[m.end():]}"
 
 
+def _vec(values: Sequence[float]) -> str:
+    return " ".join(_fmt(v) for v in values)
+
+
+def camera_elements(cameras: Mapping[str, Mapping[str, Any]]) -> str:
+    """``<camera>`` elements (one per fitted camera) as MJCF text, with a comment each.
+
+    ``cameras`` is a lock's ``cameras`` field: short name -> CameraFit dict
+    (``pos``, ``quat`` wxyz, ``fovy``, ``width``, ``height``, IoUs). The
+    cameras are in the world frame, which is the arm's base frame.
+    """
+    lines = []
+    for name in sorted(cameras):
+        c = cameras[name]
+        fit = c.get("fit_iou")
+        held = c.get("heldout_iou")
+        note = (
+            f"Antares camera fit for {c.get('key', name)} ({c.get('width', '?')}x{c.get('height', '?')}): "
+            f"silhouette IoU {fit:.3f} fit / {held:.3f} held-out"
+            if isinstance(fit, (int, float)) and isinstance(held, (int, float)) and math.isfinite(float(fit))
+            else f"Antares camera fit for {c.get('key', name)}"
+        )
+        lines.append(f"<!-- {note.replace('--', '- -')} -->")
+        lines.append(f'<camera name="{name}" pos="{_vec(c["pos"])}" quat="{_vec(c["quat"])}" fovy="{_fmt(c["fovy"])}"/>')
+    return "\n".join(lines)
+
+
+def insert_cameras(xml: str, cameras: Mapping[str, Mapping[str, Any]]) -> str:
+    """Add a fixed ``<camera>`` per fitted camera at the top of ``<worldbody>``."""
+    if not cameras:
+        return xml
+    for name in cameras:
+        if not re.match(r"^[A-Za-z0-9_.-]+$", name):
+            raise ExportError(f"camera name {name!r} is not a valid MJCF name")
+        if re.search(r'<camera\b[^>]*\bname="%s"' % re.escape(name), xml):
+            raise ExportError(f"the MJCF already has a camera named {name!r}")
+    m = re.search(r"<worldbody\b[^>]*>", xml)
+    if m is None:
+        raise ExportError("no <worldbody> element")
+    body = camera_elements(cameras).replace("\n", "\n    ")
+    return f"{xml[: m.end()]}\n    {body}{xml[m.end():]}"
+
+
 # --------------------------------------------------------------------------
 # lock -> files
 # --------------------------------------------------------------------------
@@ -206,8 +249,15 @@ def header_lines(lock: RobotLock) -> list[str]:
         f"armature={_fmt(p.armature)} frictionloss={_fmt(p.frictionloss)}",
         f"latency_frames: {p.latency_frames} (command delay in dataset frames; MJCF cannot "
         f"express this, apply it in your control loop; see the .antares.json sidecar)",
-        "Base model: MuJoCo Menagerie robotstudio_so101 (see assets LICENSE).",
     ]
+    if lock.cameras:
+        lines.append(
+            "cameras:     "
+            + ", ".join(f"{n} ({c.get('key', n)})" for n, c in sorted(lock.cameras.items()))
+            + " fitted from the dataset videos; see <camera> in <worldbody>"
+        )
+    lines.append("Base model: MuJoCo Menagerie robotstudio_so101 (see assets LICENSE).")
+    return lines
 
 
 def sidecar_dict(lock: RobotLock, model: mujoco.MjModel, model_file: str, meshdir: str) -> dict[str, Any]:
@@ -299,6 +349,7 @@ def export_mjcf(lock: RobotLock, out_path: Path, bundle_assets: bool = True) -> 
     else:
         meshdir = str(MESH_DIR.resolve())
     xml = set_meshdir(xml, meshdir)
+    xml = insert_cameras(xml, lock.cameras)
     xml = insert_header(xml, _comment(header_lines(lock)))
     out_path.write_text(xml)
 

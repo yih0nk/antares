@@ -14,7 +14,7 @@ import json
 import re
 import warnings
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import Any
 from datetime import datetime, timezone
 from pathlib import Path
@@ -67,6 +67,9 @@ class RobotLock:
     antares_version: str
     command_map: dict[str, Any] | None = None  # CommandMap.to_dict(); None = identity
     dynamics_only: dict[str, Any] | None = None  # CalibrationResult.to_dict()
+    # Fitted fixed cameras by short name (antares.camera.CameraFit.to_dict());
+    # locks saved before camera fits existed load with none.
+    cameras: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def create(
@@ -108,7 +111,12 @@ class RobotLock:
             d["command_map"] = self.command_map
         if self.dynamics_only is not None:
             d["dynamics_only"] = self.dynamics_only
+        if self.cameras:
+            d["cameras"] = dict(self.cameras)
         return d
+
+    def replace(self, **changes: Any) -> "RobotLock":
+        return replace(self, **changes)
 
     @classmethod
     def from_dict(cls, d: dict) -> "RobotLock":
@@ -128,6 +136,7 @@ class RobotLock:
             antares_version=str(d.get("antares_version", "")),
             command_map=d.get("command_map"),
             dynamics_only=d.get("dynamics_only"),
+            cameras=dict(d.get("cameras") or {}),
         )
 
     def default_path(self, lock_dir: Path = LOCK_DIR) -> Path:
