@@ -189,7 +189,7 @@ def test_refit_and_held_out_halves_are_disjoint():
     eps = make_episodes(TRUE.replace(latency_frames=2), n=6)
     d = diagnose(eps, lock_of(), simulate=toy_simulate, max_evaluations=20)
     assert d.refit_episodes == [0, 2, 4] and d.held_out_episodes == [1, 3, 5]
-    assert d.n_evaluations == 20  # the budget is exact: no generation overshoots it
+    assert 6 <= d.n_evaluations <= 20  # the budget is a cap, prune included: nothing overshoots it
 
 
 def test_budget_is_exact_and_bounded_below():
@@ -197,12 +197,16 @@ def test_budget_is_exact_and_bounded_below():
     calls = []
     d = diagnose(eps, lock_of(), simulate=lambda p, e: calls.append(1) or toy_simulate(p, e),
                  max_evaluations=37, on_progress=lambda n, best: calls.append(("p", n, best)))
-    assert d.n_evaluations == 37
+    assert d.n_evaluations <= 37
     progress = [c for c in calls if isinstance(c, tuple)]
-    assert [n for _, n, _ in progress] == list(range(1, 38))
-    assert all(b2 <= b1 for (_, _, b1), (_, _, b2) in zip(progress, progress[1:]))  # best never worsens
-    with pytest.raises(ValueError, match="max_evaluations must be >= 10"):
-        diagnose(eps, lock_of(), simulate=toy_simulate, max_evaluations=9)
+    # up to the last progress event every simulation belongs to a counted evaluation
+    # (2 refit episodes each); only the held-out scoring comes after
+    last = max(i for i, c in enumerate(calls) if isinstance(c, tuple))
+    assert sum(1 for c in calls[:last] if c == 1) == d.n_evaluations * 2
+    assert [n for _, n, _ in progress] == list(range(1, d.n_evaluations + 1))
+    assert all(math.isfinite(b) for _, _, b in progress)  # the refit error in degrees, not the penalized value
+    with pytest.raises(ValueError, match="max_evaluations must be >= 20"):
+        diagnose(eps, lock_of(), simulate=toy_simulate, max_evaluations=19)
 
 
 def test_should_stop_ends_the_search_with_the_best_so_far():
@@ -259,9 +263,9 @@ def test_latency_shifts_the_lock_clamps_alike_are_scanned_once():
     eps = make_episodes(p, n=4)
     scanned = []
     d = diagnose(eps, lock_of(p), simulate=lambda q, e: scanned.append(q.latency_frames) or toy_simulate(q, e),
-                 max_evaluations=10)
-    assert d.n_evaluations == 10  # 5 distinct shifts scanned, not 6, then the refit
-    assert set(scanned[:10]) == {0, 2, 4, 6, 8} or sorted(set(scanned[:10])) == [0, 1, 2, 3, 4]
+                 max_evaluations=20)
+    assert d.n_evaluations <= 20  # 5 distinct shifts scanned, not 6, then the refit and prune
+    assert sorted(set(scanned[:10])) == [0, 1, 2, 3, 4]
 
 
 def test_causes_are_gated_on_the_lock_pinned_parameters():

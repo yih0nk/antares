@@ -92,8 +92,11 @@ EXPLAINED_FRACTION = 0.5
 #: share of the reference) is reported as unchanged rather than unexplained.
 UNCHANGED_EXCESS_DEG = 0.1
 UNCHANGED_EXCESS_FRACTION = 0.15
-#: Smallest refit budget: enough for the latency scan and a little more.
-MIN_EVALUATIONS = 10
+#: Evaluations held back from the CMA-ES search for the prune: one per kept
+#: change per pass, at most two passes over the six fields.
+PRUNE_RESERVE = 2 * len(FIELDS) + 1
+#: Smallest refit budget: the latency scan, the prune reserve and a little more.
+MIN_EVALUATIONS = 20
 #: A factor this close to 1 is "no change" (it would print as +0%).
 NEUTRAL_TOL = 0.005
 
@@ -237,15 +240,14 @@ class Diagnosis:
 
     @property
     def unchanged(self) -> bool:
-        """True when the search kept no change and the lock is still about as
-        good as when it was fitted (within :data:`UNCHANGED_EXCESS_DEG`, or
-        :data:`UNCHANGED_EXCESS_FRACTION` of its reference)."""
-        if self.excess_deg is None:
-            return False
-        if not all(_is_neutral(c.name, c.value) for c in self.changes):
+        """True when the lock is still about as good as when it was fitted
+        (within :data:`UNCHANGED_EXCESS_DEG`, or :data:`UNCHANGED_EXCESS_FRACTION`
+        of its reference) and the refit does not improve on it by more than
+        :data:`MIN_GAP_DEG` held out, whatever small changes it kept."""
+        if self.excess_deg is None or self.explained:
             return False
         tol = max(UNCHANGED_EXCESS_DEG, UNCHANGED_EXCESS_FRACTION * self.reference_deg)
-        return self.excess_deg <= tol
+        return self.excess_deg <= tol and self.gap_deg <= MIN_GAP_DEG
 
     @property
     def recovered(self) -> float | None:
@@ -302,8 +304,8 @@ class Diagnosis:
             return f"{head}; the lock carries no held-out score, so the drift cannot be judged"
         if self.unchanged:
             return (
-                f"{head}; no change found: no parameter change improves the fit "
-                f"by {STEP_GAIN_DEG:g} deg, and the lock is {abs(self.excess_deg):.3f} deg "
+                f"{head}; no change found: refitting improves the held-out error by less than "
+                f"{MIN_GAP_DEG:g} deg, and the lock is {abs(self.excess_deg):.3f} deg "
                 f"{'above' if self.excess_deg >= 0 else 'below'} its own reference"
             )
         if not self.explained:
@@ -417,17 +419,18 @@ def diagnose(
 
     evaluations = 0
     best: dict[str, float] = neutral()
-    best_value = math.inf
+    best_value = math.inf  # error + complexity, what the search minimizes
+    best_error = math.inf  # the refit error of ``best``, in degrees
 
     def objective(change: Mapping[str, float]) -> float:
-        nonlocal evaluations, best, best_value
+        nonlocal evaluations, best, best_value, best_error
         _, error = _safe_score(apply_change(params, change), refit_eps, simulate)
         value = error + complexity(change)
         evaluations += 1
         if value < best_value:
-            best, best_value = dict(change), value
+            best, best_value, best_error = dict(change), value, error
         if on_progress is not None:
-            on_progress(evaluations, best_value)
+            on_progress(evaluations, best_error)
         return value
 
     # Latency is a handful of whole frames, which CMA-ES steps over poorly,
@@ -454,7 +457,7 @@ def diagnose(
     for i, start in enumerate(candidates):
         if stop():
             break
-        budget = (max_evaluations - evaluations) // (len(candidates) - i)
+        budget = (max_evaluations - PRUNE_RESERVE - evaluations) // (len(candidates) - i)
         if budget < 1:
             continue
         shift = start["latency_frames"]
@@ -488,25 +491,31 @@ def diagnose(
 
     # Prune: drop a kept change while the unpenalized refit error rises by
     # less than STEP_GAIN_DEG without it, smallest cost first. What is left
-    # is the fewest changes that still explain the recording.
-    def refit_error(change: Mapping[str, float]) -> float:
-        return _safe_score(apply_change(params, change), refit_eps, simulate)[1]
-
-    if not stop():
-        kept_error = refit_error(best)
-        while True:
-            costs = []
-            for f in FIELDS:
-                if _is_neutral(f, best[f]):
-                    continue
-                trial = {**best, f: neutral()[f]}
-                costs.append((refit_error(trial) - kept_error, f, trial))
-            if not costs:
+    # is the fewest changes that still explain the recording. A factor
+    # within NEUTRAL_TOL of 1 is snapped to exactly 1. The prune spends the
+    # evaluations held back from the search (counted, reported, cancellable)
+    # and stops when the budget is used up.
+    best = {f: (neutral()[f] if _is_neutral(f, v) else v) for f, v in best.items()}
+    kept_error = best_error
+    while not stop() and evaluations < max_evaluations:
+        costs = []
+        for f in FIELDS:
+            if _is_neutral(f, best[f]):
+                continue
+            if stop() or evaluations >= max_evaluations:
                 break
-            cost, f, trial = min(costs)
-            if cost >= STEP_GAIN_DEG:
-                break
-            best, kept_error = trial, kept_error + cost
+            trial = {**best, f: neutral()[f]}
+            _, trial_error = _safe_score(apply_change(params, trial), refit_eps, simulate)
+            evaluations += 1
+            if on_progress is not None:
+                on_progress(evaluations, kept_error)
+            costs.append((trial_error - kept_error, f, trial, trial_error))
+        if not costs:
+            break
+        cost, f, trial, trial_error = min(costs, key=lambda t: (t[0], t[1]))
+        if cost >= STEP_GAIN_DEG:
+            break
+        best, kept_error = trial, trial_error
 
     stale_report, stale = _safe_score(params, held_out, simulate)
     refit_params = apply_change(params, best)
