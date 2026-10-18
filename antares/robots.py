@@ -334,6 +334,30 @@ REGISTRY: dict[str, RobotModel] = {
         license="Apache-2.0",
         label="Koch",
     ),
+    "sg92r": RobotModel(
+        name="sg92r",
+        model_path=ASSETS_DIR / "sg92r" / "sg92r.xml",
+        mesh_dir=ASSETS_DIR / "sg92r" / "assets",
+        scene_path=ASSETS_DIR / "sg92r" / "sg92r.xml",
+        joint_names=("shaft",),
+        description="One Tower Pro SG92R hobby servo with a stick on its horn, logged by an Arduino "
+        "(see antares.servo_bench). Shaft angle in degrees, 0..180 as commanded.",
+        joints=("shaft",),
+        grippers=(),
+        units=("degrees_raw",),
+        robot_types=(r"sg92r", r"hobby_servo"),
+        bounds={
+            "kp": (0.05, 50.0, "log"),
+            "kv": (1e-4, 1.0, "log"),
+            "damping": (1e-5, 0.5, "log"),
+            "armature": (1e-6, 1e-2, "log"),
+            "frictionloss": (1e-5, 0.2, "log"),
+            "forcerange": (0.02, 2.0, "log"),
+        },
+        default_params="model",
+        export_class=None,
+        label="SG92R servo",
+    ),
 }
 
 def variant(base: RobotModel, name: str, **changes: Any) -> RobotModel:
