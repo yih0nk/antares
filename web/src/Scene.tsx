@@ -6,7 +6,7 @@ import { palette } from "./theme";
 // The static scene a lock's scene fit recovered from the logs, drawn in the
 // 3D viewer (MuJoCo z-up frame; the caller applies the y-up rotation): the
 // table as a thin dark plane at the fitted height, and the fingertip
-// workspace as a faint grey wireframe box (chrome, not a sim, so not blue).
+// workspace as a faint dashed grey box (chrome, not a sim, so not blue).
 
 // Same margin antares.scene uses around the workspace for the table geom.
 const TABLE_MARGIN = 0.1;
@@ -39,8 +39,9 @@ export function SceneGeometry({ scene }: Props) {
         <boxGeometry args={table.size} />
         <meshStandardMaterial color={palette.raised} roughness={0.9} metalness={0} />
       </mesh>
-      <lineSegments geometry={box.edges} position={box.pos}>
-        <lineBasicMaterial color={palette.textMuted} transparent opacity={0.35} />
+      {/* a faint dashed guide, so the workspace never reads as an object */}
+      <lineSegments geometry={box.edges} position={box.pos} ref={(l) => l?.computeLineDistances()}>
+        <lineDashedMaterial color={palette.textMuted} transparent opacity={0.2} dashSize={0.01} gapSize={0.008} />
       </lineSegments>
     </group>
   );
