@@ -469,7 +469,9 @@ def _seeds_from_dict(s: Mapping[str, Any]) -> dict:
 # --------------------------------------------------------------------------
 
 
-def default_simulate(command_map: Any | None = None, robot: str | None = None) -> SimulateFn:
+def default_simulate(
+    command_map: Any | None = None, robot: str | None = None, unit_map: Any | None = None
+) -> SimulateFn:
     """Build one MuJoCo :class:`antares.sim.Arm` and wrap it as a ``SimulateFn``.
 
     The arm is reused across calls (``apply`` is cheap); the real trajectory
@@ -477,11 +479,13 @@ def default_simulate(command_map: Any | None = None, robot: str | None = None) -
     ``command_map`` (an :class:`antares.sim.CommandMap`) corrects every
     replay's commands, e.g. a lock's sensor calibration held fixed.
     ``robot`` picks the model from :data:`antares.robots.REGISTRY` (default
-    SO-101).
+    SO-101). ``unit_map`` (an :class:`antares.sim.UnitMap`) replaces the
+    model-derived map, e.g. the arm's own LeRobot calibration
+    (:mod:`antares.lerobot_calib`).
     """
     from antares.sim import Arm
 
-    arm = Arm(command_map=command_map, robot=robot)
+    arm = Arm(command_map=command_map, robot=robot, unit_map=unit_map)
     real_cache: dict[int, tuple[Episode, np.ndarray]] = {}
 
     def simulate(params: SimParams, episode: Episode) -> tuple[np.ndarray, np.ndarray]:
