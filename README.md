@@ -493,18 +493,51 @@ LeRobot normalizes the commands (the leader arm's readings) and the
 measured state (the follower's) with two separate per-arm calibrations, so
 the same number can mean slightly different angles on each side. No
 dynamics parameter can model that, so a plain fit bends stiffness and
-latency to hide it. `--fit-sensor` fits `command = gain * logged + bias`
-per body joint through the simulator, alternating with the dynamics fit,
-and reports held-out error with and without it:
+latency to hide it. `--fit-sensor` fits a per-joint
+`command = gain * logged + bias` (a `CommandMap`, dataset units, gripper
+left at identity) and stores it in the lock:
 
 ```sh
-.venv/bin/antares calibrate lerobot/svla_so101_pickplace --fit-sensor --name so101-sensor
+.venv/bin/antares calibrate lerobot/svla_so101_pickplace --fit-sensor --name so101_sensor
+.venv/bin/antares calibrate lerobot/svla_so101_pickplace --fit-sensor --sensor-mode kinematic
 ```
 
-Locks fitted this way carry a `command_map`, and replay, the viewer and
-`antares cross` use it. Older locks replay unchanged.
-`scripts/sensor_synthetic.py` checks the fit on a simulated arm with a
-known mismatch.
+Two ways to fit it (`--sensor-mode`, or `sensor_mode` in
+`POST /api/calibrate`):
+
+* **`sim`** (default): Levenberg-Marquardt on the replay residual with the
+  dynamics held fixed, alternating with a CMA-ES refit of the dynamics
+  under the new map, then a last map fit.
+* **`kinematic`**: a least-squares line through frames where command and
+  joint have both been still for 10 frames, with no sim, frozen before the
+  physics fit so it cannot absorb dynamics error. Its catch: a still joint
+  under gravity sags below its command by an amount the sim models through
+  `kp`, and this fit puts that sag into the bias.
+
+The table compares against a dynamics-only fit given the **same** CMA-ES
+budget, refit round for round under the identity map, so a gain is not
+just extra evaluations. It also works with `--per-joint`.
+
+Synthetic check (`scripts/sensor_synthetic.py`): a hidden MuJoCo arm with
+the SO-101 lock's dynamics, 0.2-unit state noise and teleop-style pauses,
+10 train / 4 held-out episodes, held-out RMSE in degrees:
+
+| hidden arm | default sim | dynamics only | `sim` mode | `kinematic` mode |
+|---|---|---|---|---|
+| calibration mismatch (bias up to 3 units, gain ±4%) | 7.50 | 2.30 | **0.40** | 0.48 |
+| no mismatch (control) | 7.11 | **1.08** | 1.11 | 1.17 |
+
+Both modes recover the hidden bias to within 0.35 units and the gain to
+within 0.007. On an arm with no mismatch the map stays within 0.35 units
+of identity, at a small held-out cost (0.03° for `sim`, 0.09° for
+`kinematic`), mostly on the gravity-loaded shoulder and elbow. Whether
+real arms carry a mismatch worth fitting is a question for the real
+datasets.
+
+Locks fitted this way carry a `command_map`. Replay, the viewer, `cross`,
+`check`, residuals and events, `compensate` (whose `--out` commands come
+back in raw units), `export` (in the sidecar) and the drift and DR refits
+(which hold the map fixed) all use it. Locks without one behave as before.
 
 ## Layout
 
