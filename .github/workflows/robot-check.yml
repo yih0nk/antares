@@ -47,6 +47,8 @@ jobs:
           lock: ${{ inputs.lock || 'svla_so101_pickplace' }}
           threshold: ${{ inputs.threshold }}
           last: ${{ inputs.last }}
+          # Alerts: add a Slack incoming webhook (or any JSON endpoint) as a repository secret, then uncomment.
+          # webhook: ${{ secrets.ANTARES_WEBHOOK_URL }}
 
       - name: Report
         if: always()
