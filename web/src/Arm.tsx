@@ -2,9 +2,36 @@ import { useEffect, useMemo, useRef } from "react";
 import { useFrame, useLoader } from "@react-three/fiber";
 import * as THREE from "three";
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
+import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader.js";
+import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { api, type Geometry } from "./api";
 
-// One SO-101 drawn from the API's geometry: a group per MuJoCo body, posed
+// An OBJ file's meshes as one geometry (Menagerie models ship OBJ as well as STL).
+function objGeometry(group: THREE.Group): THREE.BufferGeometry {
+  const parts: THREE.BufferGeometry[] = [];
+  group.traverse((o) => {
+    if (o instanceof THREE.Mesh) parts.push((o.geometry as THREE.BufferGeometry).clone().toNonIndexed());
+  });
+  if (parts.length === 1) return parts[0];
+  // mergeGeometries needs every part to carry the same attributes: keep
+  // position and normal, and give a part without normals computed ones.
+  for (const p of parts) {
+    for (const k of Object.keys(p.attributes)) if (k !== "position" && k !== "normal") p.deleteAttribute(k);
+    if (!p.getAttribute("normal")) p.computeVertexNormals();
+  }
+  let merged = mergeGeometries(parts);
+  if (!merged) {
+    // Still mismatched (e.g. normal item sizes differ): merge positions alone.
+    for (const p of parts) p.deleteAttribute("normal");
+    merged = mergeGeometries(parts);
+    merged?.computeVertexNormals();
+  }
+  return merged ?? new THREE.BufferGeometry();
+}
+
+const isObj = (f: string) => f.toLowerCase().endsWith(".obj");
+
+// One arm drawn from the API's geometry: a group per MuJoCo body, posed
 // every frame from (T, nbody, 7) world poses. When `poses` changes the arm
 // eases from the old trajectory to the new one, which is the ghost snapping
 // onto the real arm as calibration finds better parameters.
@@ -24,6 +51,8 @@ type Props = {
   // playhead is inside one, the material's emissive eases toward `warm`.
   // Only meaningful for a MeshStandardMaterial.
   hotSpans?: number[][] | null;
+  // Hidden by the viewer's real/sim toggle; keeps the trajectory loaded.
+  hidden?: boolean;
 };
 
 const WARM = new THREE.Color("#ff8a5b");
@@ -34,13 +63,26 @@ const toQuat = (q: number[]) => new THREE.Quaternion(q[1], q[2], q[3], q[0]);
 
 const easeOut = (t: number) => 1 - Math.pow(1 - t, 3);
 
-export function Arm({ geometry, poses, clip, playhead, material, snapSeconds = 0.6, hotSpans = null }: Props) {
+export function Arm({ geometry, poses, clip, playhead, material, snapSeconds = 0.6, hotSpans = null, hidden = false }: Props) {
   const files = useMemo(() => [...new Set(geometry.geoms.map((g) => g.mesh))], [geometry]);
-  const loaded = useLoader(
+  const stlFiles = useMemo(() => files.filter((f) => !isObj(f)), [files]);
+  const objFiles = useMemo(() => files.filter(isObj), [files]);
+  const stl = useLoader(
     STLLoader,
-    files.map((f) => api.meshUrl(f, geometry.robot)),
+    stlFiles.map((f) => api.meshUrl(f, geometry.robot)),
   );
-  const meshes = useMemo(() => new Map(files.map((f, i) => [f, loaded[i]])), [files, loaded]);
+  const obj = useLoader(
+    OBJLoader,
+    objFiles.map((f) => api.meshUrl(f, geometry.robot)),
+  );
+  const meshes = useMemo(
+    () =>
+      new Map<string, THREE.BufferGeometry>([
+        ...stlFiles.map((f, i) => [f, stl[i]] as const),
+        ...objFiles.map((f, i) => [f, objGeometry(obj[i])] as const),
+      ]),
+    [stlFiles, objFiles, stl, obj],
+  );
 
   const bodyRefs = useRef<(THREE.Group | null)[]>([]);
   const prev = useRef<number[][][] | null>(null);
@@ -123,7 +165,7 @@ export function Arm({ geometry, poses, clip, playhead, material, snapSeconds = 0
   }, [geometry]);
 
   return (
-    <group visible={!!poses}>
+    <group visible={!!poses && !hidden}>
       {geometry.bodies.map((body) => (
         <group key={body.id} ref={(el) => (bodyRefs.current[body.id] = el)}>
           {(geomsByBody.get(body.id) ?? []).map((g, i) => (
@@ -133,6 +175,7 @@ export function Arm({ geometry, poses, clip, playhead, material, snapSeconds = 0
               material={material}
               position={g.pos as [number, number, number]}
               quaternion={toQuat(g.quat)}
+              scale={(g.scale ?? [1, 1, 1]) as [number, number, number]}
               castShadow
               receiveShadow
             />

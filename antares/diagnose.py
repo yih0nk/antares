@@ -6,7 +6,11 @@ but instead of searching the parameters from scratch it searches one
 *change* per parameter on top of the lock: a factor on each of ``kp``,
 ``kv``, ``damping``, ``armature`` and ``frictionloss`` (x1/4 to x4,
 log-uniform) and a shift of whole frames on ``latency_frames``. A per-joint
-lock keeps its per-joint shape; every joint gets the same change.
+lock keeps its per-joint shape; every joint gets the same change. A
+servo-model lock (``--servo sts3215``) is searched on its own fields
+(:data:`SERVO_FIELDS`): a factor on ``servo_gain`` instead of ``kp`` (the
+lock's ``kp`` is derived from the gain, so scaling it would change nothing)
+and none on ``kv`` (the servo's back-EMF is a motor constant).
 
 The search prefers few, small changes. It minimizes the refit error plus a
 cost per change (:func:`complexity`), so a factor has to earn its size,
@@ -53,20 +57,27 @@ from typing import Any
 
 import numpy as np
 
+from antares import factors
 from antares.calibrate import PENALTY, _per_joint, _safe_score
 from antares.data import Episode
 
-#: Largest factor searched for each scaled parameter, either way.
-FACTOR_RANGE: dict[str, float] = {
-    "kp": 4.0,
-    "kv": 4.0,
-    "damping": 4.0,
-    "armature": 4.0,
-    "frictionloss": 4.0,
+#: Largest factor searched for each scaled parameter, either way (from
+#: :mod:`antares.factors`).
+FACTOR_RANGE: dict[str, float] = factors.drift_factors()
+#: The same for a servo-model lock (``params.uses_servo_model``): the
+#: firmware's gain ratio stands in for ``kp`` (the lock's ``kp`` is derived
+#: from it, so scaling ``kp`` itself would change nothing), and there is no
+#: ``kv`` to scale (back-EMF is a motor constant).
+SERVO_FACTOR_RANGE: dict[str, float] = {
+    "servo_gain": 4.0,
+    **{n: r for n, r in FACTOR_RANGE.items() if n in ("damping", "armature", "frictionloss")},
 }
+_ALL_FACTORS: dict[str, float] = {**FACTOR_RANGE, **SERVO_FACTOR_RANGE}
 #: Frames ``latency_frames`` may shift by, (fewest, most).
-LATENCY_SHIFT: tuple[int, int] = (-2, 3)
+LATENCY_SHIFT: tuple[int, int] = factors.drift_shifts()["latency_frames"]
 FIELDS: tuple[str, ...] = (*FACTOR_RANGE, "latency_frames")
+#: The change space of a servo-model lock (see :func:`change_fields`).
+SERVO_FIELDS: tuple[str, ...] = (*SERVO_FACTOR_RANGE, "latency_frames")
 
 #: Latency shifts (best first, by the scan with no other change) whose
 #: factors are each refitted.
@@ -106,38 +117,67 @@ NEUTRAL_TOL = 0.005
 # --------------------------------------------------------------------------
 
 
-def neutral() -> dict[str, float]:
+def change_fields(params) -> tuple[str, ...]:
+    """The fields a diagnosis of ``params`` searches: :data:`SERVO_FIELDS`
+    for a servo-model lock, :data:`FIELDS` (the position actuator's) otherwise."""
+    return SERVO_FIELDS if getattr(params, "uses_servo_model", False) else FIELDS
+
+
+def _factors(fields: Sequence[str]) -> list[str]:
+    return [f for f in fields if f != "latency_frames"]
+
+
+def neutral(fields: Sequence[str] = FIELDS) -> dict[str, float]:
     """No change: factor 1 on every scaled parameter, latency shift 0."""
-    return {**{f: 1.0 for f in FACTOR_RANGE}, "latency_frames": 0}
+    return {**{f: 1.0 for f in _factors(fields)}, "latency_frames": 0}
 
 
-def decode_change(x: np.ndarray) -> dict[str, float]:
-    """``[0, 1]^6`` search vector -> ``{param: factor or frame shift}``."""
+def decode_change(x: np.ndarray, fields: Sequence[str] = FIELDS) -> dict[str, float]:
+    """``[0, 1]^n`` search vector -> ``{param: factor or frame shift}`` over
+    ``fields`` (one dim per field, latency last)."""
     x = np.clip(np.asarray(x, dtype=np.float64).reshape(-1), 0.0, 1.0)
-    if x.shape[0] != len(FIELDS):
-        raise ValueError(f"expected {len(FIELDS)} dims, got {x.shape[0]}")
+    if x.shape[0] != len(fields):
+        raise ValueError(f"expected {len(fields)} dims, got {x.shape[0]}")
     out: dict[str, float] = {}
-    for i, f in enumerate(FACTOR_RANGE):
-        out[f] = float(FACTOR_RANGE[f] ** (2.0 * x[i] - 1.0))
+    for i, f in enumerate(_factors(fields)):
+        out[f] = float(_ALL_FACTORS[f] ** (2.0 * x[i] - 1.0))
     lo, hi = LATENCY_SHIFT
     out["latency_frames"] = int(round(lo + x[-1] * (hi - lo)))
     return out
 
 
-def encode_change(change: Mapping[str, float]) -> np.ndarray:
+def encode_change(change: Mapping[str, float], fields: Sequence[str] = FIELDS) -> np.ndarray:
     """Inverse of :func:`decode_change` (clipped to the ranges)."""
     x = []
-    for f, r in FACTOR_RANGE.items():
-        x.append(0.5 * (math.log(float(change.get(f, 1.0))) / math.log(r) + 1.0))
+    for f in _factors(fields):
+        x.append(0.5 * (math.log(float(change.get(f, 1.0))) / math.log(_ALL_FACTORS[f]) + 1.0))
     lo, hi = LATENCY_SHIFT
     x.append((float(change.get("latency_frames", 0)) - lo) / (hi - lo))
     return np.clip(np.asarray(x, dtype=np.float64), 0.0, 1.0)
 
 
+def servo_change(change: Mapping[str, float]) -> dict[str, float]:
+    """``change`` as a servo-model lock can take it: a ``kp`` factor
+    multiplies ``servo_gain`` (the derived ``kp`` follows it), and a ``kv``
+    factor is dropped, since the servo's velocity gain is its back-EMF, a
+    motor constant the model does not expose as a change."""
+    out = {f: v for f, v in change.items() if f not in ("kp", "kv")}
+    if "kp" in change:
+        out["servo_gain"] = float(out.get("servo_gain", 1.0)) * float(change["kp"])
+    return out
+
+
 def apply_change(params, change: Mapping[str, float]):
-    """``params`` with each factor multiplied in and the latency shift added."""
+    """``params`` with each factor multiplied in and the latency shift added.
+
+    On a servo-model lock the change is first mapped by :func:`servo_change`,
+    so ``{"kp": 0.5}`` halves the servo's gain rather than touching the
+    derived ``kp`` (which would change nothing).
+    """
     from antares.synth import worn
 
+    if getattr(params, "uses_servo_model", False):
+        change = servo_change(change)
     return worn(params, change)
 
 
@@ -413,12 +453,15 @@ def diagnose(
         raise ValueError("diagnose needs at least two episodes")
     if simulate is None:
         from antares.calibrate import default_simulate
+        from antares.check import lock_robot
 
-        simulate = default_simulate()
+        simulate = default_simulate(robot=lock_robot(lock))
     stop = should_stop or (lambda: False)
 
+    fields = change_fields(params)
+    factors = _factors(fields)
     evaluations = 0
-    best: dict[str, float] = neutral()
+    best: dict[str, float] = neutral(fields)
     best_value = math.inf  # error + complexity, what the search minimizes
     best_error = math.inf  # the refit error of ``best``, in degrees
 
@@ -447,13 +490,12 @@ def diagnose(
         if shift in seen:
             continue
         seen.add(shift)
-        change = {**neutral(), "latency_frames": shift}
+        change = {**neutral(fields), "latency_frames": shift}
         scanned.append((objective(change), shift != 0, change))
         if stop():
             break
     scanned.sort(key=lambda t: (t[0], t[1]))
     candidates = [c for _, _, c in scanned[:SHIFT_CANDIDATES]]
-    factors = list(FACTOR_RANGE)
     for i, start in enumerate(candidates):
         if stop():
             break
@@ -462,7 +504,7 @@ def diagnose(
             continue
         shift = start["latency_frames"]
         es = cma.CMAEvolutionStrategy(
-            encode_change(start)[: len(factors)],
+            encode_change(start, fields)[: len(factors)],
             sigma0,
             {
                 "bounds": [0.0, 1.0],
@@ -479,7 +521,7 @@ def diagnose(
             # Never past the budget; a partial generation still counts toward
             # the best but is not fed back to CMA-ES (as in calibrate).
             for x in xs[: budget - spent]:
-                change = decode_change(np.append(x, 0.0))
+                change = decode_change(np.append(x, 0.0), fields)
                 change["latency_frames"] = shift
                 values.append(objective(change))
                 spent += 1
@@ -495,16 +537,16 @@ def diagnose(
     # within NEUTRAL_TOL of 1 is snapped to exactly 1. The prune spends the
     # evaluations held back from the search (counted, reported, cancellable)
     # and stops when the budget is used up.
-    best = {f: (neutral()[f] if _is_neutral(f, v) else v) for f, v in best.items()}
+    best = {f: (neutral(fields)[f] if _is_neutral(f, v) else v) for f, v in best.items()}
     kept_error = best_error
     while not stop() and evaluations < max_evaluations:
         costs = []
-        for f in FIELDS:
+        for f in fields:
             if _is_neutral(f, best[f]):
                 continue
             if stop() or evaluations >= max_evaluations:
                 break
-            trial = {**best, f: neutral()[f]}
+            trial = {**best, f: neutral(fields)[f]}
             _, trial_error = _safe_score(apply_change(params, trial), refit_eps, simulate)
             evaluations += 1
             if on_progress is not None:
@@ -521,10 +563,10 @@ def diagnose(
     refit_params = apply_change(params, best)
     refit_report, refit = _safe_score(refit_params, held_out, simulate)
     if refit > stale:  # the refit did not generalize; the lock stands
-        best, refit_params, refit_report, refit = neutral(), params, stale_report, stale
+        best, refit_params, refit_report, refit = neutral(fields), params, stale_report, stale
 
     changes = []
-    for f in FIELDS:
+    for f in fields:
         v = best[f]
         if _is_neutral(f, v):
             alone = stale
@@ -559,6 +601,8 @@ __all__ = [
     "FACTOR_RANGE",
     "FIELDS",
     "LATENCY_SHIFT",
+    "SERVO_FACTOR_RANGE",
+    "SERVO_FIELDS",
     "MIN_EVALUATIONS",
     "MIN_GAP_DEG",
     "NEUTRAL_TOL",
@@ -570,11 +614,13 @@ __all__ = [
     "Diagnosis",
     "ParamChange",
     "apply_change",
+    "change_fields",
     "decode_change",
     "describe_change",
     "diagnose",
     "effective_shift",
     "encode_change",
     "neutral",
+    "servo_change",
     "split_alternating",
 ]

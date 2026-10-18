@@ -13,17 +13,21 @@ from antares.validate import JOINTS as CANONICAL
 
 
 def test_registry_entries_are_complete():
-    assert set(REGISTRY) >= {"so101", "so100"}
+    assert set(REGISTRY) >= {"so101", "so100", "aloha", "trossen_ai", "piper", "koch"}
     assert robots.DEFAULT_ROBOT == "so101"
     for name, r in REGISTRY.items():
         assert r.name == name
+        assert len(r.joint_names) == len(r.joints) == r.n_joints
+        assert set(r.grippers) <= set(r.joints) and r.scored_joints
+        d = r.to_dict()
+        assert d["joints"] == list(r.joints) and d["mjcf_joint_names"] == list(r.joint_names)
+        if r.menagerie is not None:
+            continue  # fetched on first use; see test_menagerie_models_load
         assert r.model_path.is_file(), r.model_path
         assert r.scene_path.is_file(), r.scene_path
         assert r.mesh_dir.is_dir() and any(r.mesh_dir.glob("*.stl")), r.mesh_dir
         assert (r.model_path.parent / "LICENSE").is_file()
         assert len(r.joint_names) == 6 and r.canonical_joints == CANONICAL
-        d = r.to_dict()
-        assert d["joints"] == list(CANONICAL) and d["mjcf_joint_names"] == list(r.joint_names)
 
 
 def test_get_robot_default_and_unknown():
@@ -31,17 +35,23 @@ def test_get_robot_default_and_unknown():
     assert get_robot(None) is REGISTRY["so101"]
     assert get_robot("SO100") is REGISTRY["so100"]
     with pytest.raises(ValueError, match="unknown robot"):
-        get_robot("koch")
+        get_robot("ur5e")
 
 
-def test_robot_model_needs_six_joints(tmp_path):
+def test_robot_model_needs_one_mjcf_joint_per_column(tmp_path):
     with pytest.raises(ValueError):
         RobotModel("x", tmp_path, tmp_path, tmp_path, ("a", "b"), "two joints")
+    r = RobotModel("x", tmp_path, tmp_path, tmp_path, ("a", "b"), "two joints", joints=("a", "gripper"))
+    assert r.scored_joints == ("a",) and r.unit_kinds() == ("range_m100_100", "range_0_100")
+    with pytest.raises(ValueError):
+        RobotModel("x", tmp_path, tmp_path, tmp_path, ("a",), "", joints=("a",), grippers=("g",))
+    with pytest.raises(ValueError):
+        RobotModel("x", tmp_path, tmp_path, tmp_path, ("a",), "", joints=("a",), grippers=(), units=("furlongs",))
 
 
 @pytest.mark.parametrize(
     "robot_type, model",
-    [("so101_follower", "so101"), ("so_follower", "so101"), ("so100", "so101"), ("koch", "so101"), (None, "so101")],
+    [("so101_follower", "so101"), ("so_follower", "so101"), ("so100", "so101"), ("koch", "koch"), ("aloha", "aloha"), ("ur5e", "so101"), (None, "so101")],
 )
 def test_model_for_dataset_follows_the_family_table(robot_type, model):
     assert model_for_dataset(robot_type) == model

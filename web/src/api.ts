@@ -18,7 +18,21 @@ export type Params = {
   // omitted at their defaults, so older locks have neither.
   gravity_scale?: ParamValue;
   deadband?: ParamValue;
+  // Actuator model: absent or "position" is MuJoCo's position actuator;
+  // "sts3215" simulates the Feetech servo's firmware and motor. With a
+  // servo model the fields below are written too, and kp/kv/forcerange hold
+  // the model's linearized PD equivalent rather than fitted values.
+  servo?: string;
+  servo_gain?: ParamValue;
+  p_coefficient?: ParamValue;
+  vin?: ParamValue;
+  kt?: ParamValue;
+  resistance?: ParamValue;
+  max_velocity?: ParamValue;
 };
+
+// The numeric parameters (everything but the actuator model's name).
+export type NumericParamKey = Exclude<keyof Params, "servo">;
 
 // Where a dataset came from: pinned demo, any Hub id, a zip/parquet upload,
 // or a directory on the server's disk.
@@ -61,10 +75,29 @@ export type UploadResponse = DatasetInfo & { verdict: Verdict };
 
 export type EpisodeInfo = { index: number; frames: number; duration_s: number };
 
+export type FactorInfo = {
+  name: string;
+  label: string;
+  explains: string;
+  unit: string;
+  bounds: [number, number];
+  needs: string;
+  identifiable: "yes" | "partly" | "no" | "untested";
+  evidence: string;
+  stages: string[];
+  origin: string;
+};
+
+export type FactorRegistry = {
+  version: number;
+  factors: FactorInfo[];
+  not_modelled: { name: string; label: string; symptom: string; would_need: string }[];
+};
+
 export type Geometry = {
   robot: string;
   bodies: { id: number; name: string; parent: number }[];
-  geoms: { body: number; mesh: string; pos: number[]; quat: number[]; rgba: number[] }[];
+  geoms: { body: number; mesh: string; pos: number[]; quat: number[]; rgba: number[]; scale?: number[] }[];
   joints: { name: string; body: number; axis: number[]; range: number[] }[];
 };
 
@@ -741,7 +774,7 @@ export const api = {
   // Geometry of one registry model (default so101); meshes are fetched per robot too.
   model: (robot?: string) => fetch(robot ? `/api/model?${q({ robot })}` : "/api/model").then((r) => json<Geometry>(r)),
   meshUrl: (file: string, robot?: string) =>
-    `/api/model/mesh/${encodeURIComponent(file)}${robot ? `?${q({ robot })}` : ""}`,
+    `/api/model/mesh/${file.split("/").map(encodeURIComponent).join("/")}${robot ? `?${q({ robot })}` : ""}`,
   locks: () => fetch("/api/locks").then((r) => json<LockSummary[]>(r)),
   replay: (dataset: string, episode: number, lock: string | null) =>
     fetch(`/api/replay?${q(lock ? { dataset, episode, lock } : { dataset, episode })}`).then((r) =>
@@ -753,13 +786,15 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ dataset, episode, params }),
     }).then((r) => json<Replay>(r)),
-  // `perJoint` adds the per-joint refinement stage after the shared fit;
+  // `perJoint` adds the per-joint refinement stage after the shared fit.
+  // `factors` (null: the defaults) picks what the shared fit accounts for;
   // `terms` adds the optional gravity load and servo deadband parameters.
   calibrate: (
     dataset: string,
     name: string,
     maxEvaluations: number,
     perJoint?: { maxEvaluations: number },
+    factors?: string[] | null,
     terms?: { fitGravity?: boolean; fitDeadband?: boolean },
   ) =>
     fetch("/api/calibrate", {
@@ -770,10 +805,12 @@ export const api = {
         name,
         max_evaluations: maxEvaluations,
         ...(perJoint ? { per_joint: true, per_joint_max_evaluations: perJoint.maxEvaluations } : {}),
+        ...(factors ? { factors } : {}),
         ...(terms?.fitGravity ? { fit_gravity: true } : {}),
         ...(terms?.fitDeadband ? { fit_deadband: true } : {}),
       }),
     }).then((r) => json<{ job_id: string }>(r)),
+  factors: () => fetch("/api/factors").then((r) => json<FactorRegistry>(r)),
   cancel: (jobId: string) => fetch(`/api/calibrate/${jobId}/cancel`, { method: "POST" }).then((r) => json(r)),
   events: (jobId: string) => new EventSource(`/api/calibrate/${jobId}/events`),
   residual: (dataset: string, episode: number, lock: string | null) =>

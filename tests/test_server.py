@@ -38,9 +38,15 @@ class FakeParams:
     armature: float = 0.01
     frictionloss: float = 0.05
     latency_frames: int = 0
+    # the servo model's name and its gain, written only with a servo model (as SimParams)
+    servo: str = "position"
+    servo_gain: float = 1.0
 
     def to_dict(self):
-        return self.__dict__.copy()
+        d = self.__dict__.copy()
+        if self.servo == "position":
+            del d["servo"], d["servo_gain"]
+        return d
 
     @classmethod
     def from_dict(cls, d):
@@ -56,8 +62,8 @@ class FakeCommandMap:
         self.gain, self.bias = np.asarray(gain, float), np.asarray(bias, float)
 
     @classmethod
-    def identity(cls):
-        return cls(np.ones(6), np.zeros(6))
+    def identity(cls, n=6):
+        return cls(np.ones(n), np.zeros(n))
 
     @classmethod
     def from_dict(cls, d):
@@ -323,13 +329,23 @@ def make_dataset(repo_id: str, n_episodes: int = 6, T: int = 20, offset: float =
 @pytest.fixture
 def fakes(monkeypatch, tmp_path):
     """Stub the sibling modules, inject a dataset, and point locks at tmp."""
+    # Modules that import names from the real antares.calibrate / antares.lock
+    # must be loaded before those are stubbed below, or their first import
+    # (which depends on which test files were collected first) fails.
+    import antares.diagnose  # noqa: F401
+    import antares.drift  # noqa: F401
+    import antares.specificity  # noqa: F401
+
     sim = _module("antares.sim", JOINTS=JOINTS, SimParams=FakeParams, Arm=FakeArm, CommandMap=FakeCommandMap,
                   MODEL_PATH=tmp_path / "so101.xml",
                   model_geometry=lambda model=None: {"bodies": [], "geoms": [], "joints": []})
     gap = _module("antares.gap", GapReport=FakeGap, tracking_error=fake_tracking_error,
                   aggregate=fake_aggregate)
-    cal = _module("antares.calibrate", calibrate=fake_calibrate, split_episodes=fake_split,
-                  default_simulate=lambda command_map=None, robot=None: (lambda params, ep: (ep.state, ep.action)))
+    from antares.calibrate import scoring_names  # the real one: pure, reads the robot off its argument
+
+    cal = _module("antares.calibrate", calibrate=fake_calibrate, split_episodes=fake_split, PENALTY=1e3,
+                  default_simulate=lambda command_map=None, robot=None: (lambda params, ep: (ep.state, ep.action)),
+                  scoring_names=scoring_names)
     lock = _module("antares.lock", RobotLock=FakeLock, dataset_digest=lambda eps: "deadbeef",
                    slug=lambda r: r.replace("/", "__"), LOCK_DIR=tmp_path / "locks",
                    LOCK_SUFFIX=LOCK_SUFFIX,
@@ -555,6 +571,19 @@ def test_replay_with_explicit_params(client, fakes):
     assert bad.status_code == 404
 
 
+def test_replay_with_servo_model_params(client, fakes):
+    # A --servo calibration's best_params carry the string ``servo``; the web
+    # UI posts them for the live ghost, so the request model must accept it
+    # and hand it to SimParams.from_dict rather than answering 422.
+    params = {**FakeParams().to_dict(), "servo": "sts3215", "servo_gain": 1.2}
+    r = client.post("/api/replay", json={"dataset": FAKE_DS, "episode": 0, "params": params})
+    assert r.status_code == 200, r.text
+    assert r.json()["params"]["servo"] == "sts3215" and r.json()["params"]["servo_gain"] == 1.2
+    # a value that is neither a number, a list nor a string is still a 422
+    bad = client.post("/api/replay", json={"dataset": FAKE_DS, "episode": 0, "params": {**params, "kp": {"a": 1}}})
+    assert bad.status_code == 422
+
+
 def test_replay_with_per_joint_param_lists(client, fakes):
     # Per-joint locks carry a list per parameter; the request model must let
     # them through to SimParams.from_dict rather than rejecting them at 422.
@@ -712,6 +741,12 @@ def test_calibrate_rejects_bad_input(client, fakes):
     assert client.post("/api/calibrate", json={"dataset": FAKE_DS, "n_train": 0}).status_code == 422
     assert client.post("/api/calibrate", json={"dataset": FAKE_DS, "name": "../evil"}).status_code == 400
     assert client.post("/api/calibrate", json={}).status_code == 422
+    # a factor selection the stage cannot fit, or that fits nothing, is a usage error
+    r = client.post("/api/calibrate", json={"dataset": FAKE_DS, "factors": []})
+    assert r.status_code == 400 and "nothing to fit" in r.json()["detail"]
+    r = client.post("/api/calibrate", json={"dataset": FAKE_DS, "factors": ["+sensor_gain"]})
+    assert r.status_code == 400 and "sensor" in r.json()["detail"]
+    assert client.post("/api/calibrate", json={"dataset": FAKE_DS, "factors": ["+nope"]}).status_code == 400
 
 
 def test_calibrate_error_event(client, fakes):
@@ -2099,3 +2134,31 @@ def test_dashboard_rows_carry_registry_fields(client, monkeypatch, tmp_path):
     r = client.get("/api/dashboard")
     assert r.status_code == 200 and all(x["robot_id"] is None for x in r.json()["robots"])
     assert client.get("/api/registry").status_code == 500
+
+
+def test_calibrate_request_forwards_servo(client, fakes, monkeypatch):
+    seen = {}
+
+    def spy(ds, **kw):
+        seen.update(kw)
+        raise HTTPException(status_code=400, detail="stop here")
+
+    monkeypatch.setattr(server, "run_calibration", spy)
+    for body, want in (({"dataset": FAKE_DS}, "position"), ({"dataset": FAKE_DS, "servo": "sts3215"}, "sts3215")):
+        seen.clear()
+        job = client.post("/api/calibrate", json=body).json()["job_id"]
+        for _ in range(100):
+            if client.get(f"/api/calibrate/{job}").json()["status"] != "running":
+                break
+            time.sleep(0.01)
+        assert seen["servo"] == want
+    assert client.post("/api/calibrate", json={"dataset": FAKE_DS, "servo": "dynamixel"}).status_code == 422
+
+
+def test_start_params_for_each_servo():
+    from antares.sim import SimParams
+
+    assert server.start_params() == SimParams()
+    assert server.start_params("sts3215") == SimParams.sts3215()
+    with pytest.raises(HTTPException):
+        server.start_params("dynamixel")

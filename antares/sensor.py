@@ -29,6 +29,7 @@ from typing import Any
 
 import numpy as np
 
+from antares import factors
 from antares.calibrate import CalibrationResult, ProgressEvent, SimParams, calibrate
 from antares.data import Episode
 from antares.sim import GRIPPER_INDEX, JOINTS, CommandMap
@@ -39,8 +40,8 @@ SensorSimulateFn = Callable[[SimParams, CommandMap, Episode], tuple[np.ndarray, 
 FIT_JOINTS: tuple[int, ...] = tuple(i for i in range(len(JOINTS)) if i != GRIPPER_INDEX)
 
 #: Bounds, in dataset units for bias. Wider than any sane calibration error.
-BIAS_BOUND = 25.0
-GAIN_BOUNDS = (0.75, 1.33)
+BIAS_BOUND = factors.get("sensor_bias").bounds[1]
+GAIN_BOUNDS = factors.get("sensor_gain").bounds
 
 
 def sensor_simulate(robot: str | None = None, unit_map: Any | None = None) -> SensorSimulateFn:
@@ -64,7 +65,24 @@ def sensor_simulate(robot: str | None = None, unit_map: Any | None = None) -> Se
             real_cache[id(episode)] = hit
         return hit[1], arm.replay(episode)
 
+    from antares.calibrate import describe_simulate
+
+    describe_simulate(simulate, arm)
+    simulate.unit_scale = arm.unit_map.scale.copy()  # type: ignore[attr-defined]
     return simulate
+
+
+def _robot_fit_args(simulate: Any) -> dict[str, Any]:
+    """Column indices, count and unit rescale for a tagged simulate of a
+    robot other than the SO arms; empty (the old defaults) otherwise."""
+    from antares.calibrate import robot_of
+
+    r = robot_of(simulate)
+    if r is None or (tuple(r.joints) == tuple(JOINTS) and r.units is None):
+        return {}
+    scale = getattr(simulate, "unit_scale", None)
+    unit_k = None if scale is None else np.abs((np.pi / 180.0) / np.asarray(scale, dtype=np.float64))
+    return {"joints": tuple(r.body_indices), "n_joints": r.n_joints, "unit_k": unit_k}
 
 
 # --------------------------------------------------------------------------
@@ -79,11 +97,14 @@ def _pack(cmap: CommandMap, joints: Sequence[int], fit_gain: bool) -> np.ndarray
     return np.array(theta, dtype=np.float64)
 
 
-def _unpack(theta: np.ndarray, base: CommandMap, joints: Sequence[int], fit_gain: bool) -> CommandMap:
+def _unpack(
+    theta: np.ndarray, base: CommandMap, joints: Sequence[int], fit_gain: bool, unit_k: np.ndarray | None = None
+) -> CommandMap:
     bias, gain = base.bias.copy(), base.gain.copy()
     n = len(joints)
     for k, j in enumerate(joints):
-        bias[j] = np.clip(theta[k], -BIAS_BOUND, BIAS_BOUND)
+        bound = BIAS_BOUND if unit_k is None else BIAS_BOUND * float(unit_k[j])
+        bias[j] = np.clip(theta[k], -bound, bound)
         if fit_gain:
             gain[j] = np.clip(theta[n + k], *GAIN_BOUNDS)
     return CommandMap(gain=gain, bias=bias)
@@ -123,6 +144,7 @@ def fit_command_map(
     coupled: bool = False,
     should_stop: Callable[[], bool] | None = None,
     on_simulation: Callable[[int, float, float], None] | None = None,
+    unit_k: np.ndarray | None = None,
 ) -> CommandMapFit:
     """Levenberg-Marquardt fit of the command map with ``params`` fixed.
 
@@ -138,6 +160,11 @@ def fit_command_map(
     ``should_stop`` is polled between simulations; when it returns True the
     best map so far is returned. ``on_simulation(n, candidate_rms, best_rms)``
     is called after every full pass over ``episodes``.
+
+    Bias bounds and steps are in dataset units sized for LeRobot's
+    normalized SO units (one unit is about a degree). ``unit_k`` (dataset
+    units per degree, one per column) rescales them for robots logged in
+    other units, such as radians.
     """
     episodes = list(episodes)
     if not episodes:
@@ -148,11 +175,13 @@ def fit_command_map(
     base = start if start is not None else CommandMap.identity()
     theta = _pack(base, joints, fit_gain)
     steps = np.array([0.5] * n_j + ([0.01] * n_j if fit_gain else []))
+    if unit_k is not None:
+        steps[:n_j] *= np.asarray(unit_k, dtype=np.float64)[list(joints)]
     n_sim = 0
 
     def res(th: np.ndarray, cur_best: float) -> np.ndarray:
         nonlocal n_sim
-        out = _residual(params, _unpack(th, base, joints, fit_gain), episodes, simulate, joints)
+        out = _residual(params, _unpack(th, base, joints, fit_gain, unit_k), episodes, simulate, joints)
         n_sim += 1
         if on_simulation is not None:
             on_simulation(n_sim, _rms(out), min(cur_best, _rms(out)))
@@ -196,7 +225,7 @@ def fit_command_map(
             if stop():
                 break
             delta = np.linalg.solve(JtJ + lam * np.diag(np.diag(JtJ) + 1e-9), -Jtr)
-            cand = _pack(_unpack(theta + delta, base, joints, fit_gain), joints, fit_gain)
+            cand = _pack(_unpack(theta + delta, base, joints, fit_gain, unit_k), joints, fit_gain)
             r_c = res(cand, cur)
             if _rms(r_c) < cur:
                 theta, r, cur = cand, r_c, _rms(r_c)
@@ -206,7 +235,7 @@ def fit_command_map(
             lam *= 10
         if not improved or np.max(np.abs(delta) / steps) < 0.02:
             break
-    return CommandMapFit(_unpack(theta, base, joints, fit_gain), rms0, cur, n_sim)
+    return CommandMapFit(_unpack(theta, base, joints, fit_gain, unit_k), rms0, cur, n_sim)
 
 
 # --------------------------------------------------------------------------
@@ -232,6 +261,8 @@ def prefit_command_map(
     min_frames: int = 30,
     min_spread: float = 15.0,
     joints: Sequence[int] = FIT_JOINTS,
+    n_joints: int | None = None,
+    unit_k: np.ndarray | None = None,
 ) -> CommandMap:
     """Fit the command map from kinematics alone, without the sim.
 
@@ -247,22 +278,25 @@ def prefit_command_map(
     the sim models through kp, so this bias also absorbs that sag. Fitting
     through the sim (:func:`fit_command_map`) does not.
     """
-    gain, bias = np.ones(len(JOINTS)), np.zeros(len(JOINTS))
+    n = len(JOINTS) if n_joints is None else int(n_joints)
+    gain, bias = np.ones(n), np.zeros(n)
     for j in joints:
+        k = 1.0 if unit_k is None else float(unit_k[j])
+        bound = BIAS_BOUND * k
         a_parts, s_parts = [], []
         for ep in episodes:
-            m = _static_mask(ep.action[:, j], window, tol) & _static_mask(ep.state[:, j], window, tol)
+            m = _static_mask(ep.action[:, j], window, tol * k) & _static_mask(ep.state[:, j], window, tol * k)
             a_parts.append(ep.action[m, j])
             s_parts.append(ep.state[m, j])
         a, st = np.concatenate(a_parts), np.concatenate(s_parts)
         if a.size < min_frames:
             continue
-        if fit_gain and np.ptp(a) >= min_spread:
+        if fit_gain and np.ptp(a) >= min_spread * k:
             g, b = np.polyfit(a, st, 1)
             gain[j] = float(np.clip(g, *GAIN_BOUNDS))
-            bias[j] = float(np.clip(b, -BIAS_BOUND, BIAS_BOUND))
+            bias[j] = float(np.clip(b, -bound, bound))
         else:
-            bias[j] = float(np.clip(np.mean(st - a), -BIAS_BOUND, BIAS_BOUND))
+            bias[j] = float(np.clip(np.mean(st - a), -bound, bound))
     return CommandMap(gain=gain, bias=bias)
 
 
@@ -355,8 +389,15 @@ def calibrate_with_sensor(
         if on_progress is not None:
             on_progress(replace(ev, evaluation=ev.evaluation + offset["n"]))
 
+    rargs = _robot_fit_args(simulate)
+    n_cols = rargs.get("n_joints", len(JOINTS))
+
     def with_map(cmap: CommandMap):
-        return lambda p, ep: simulate(p, cmap, ep)
+        fn = lambda p, ep: simulate(p, cmap, ep)  # noqa: E731
+        for attr in ("robot", "default_params"):
+            if hasattr(simulate, attr):
+                setattr(fn, attr, getattr(simulate, attr))
+        return fn
 
     def refit(start_p: SimParams, sim, k: int, budget: int, extra_budget: bool = False, on_prog=None):
         """One dynamics refit from ``start_p``. ``budget`` is the shared-stage
@@ -377,7 +418,7 @@ def calibrate_with_sensor(
             seed=seed + k, on_progress=on_prog, should_stop=stop, **kw,
         )
 
-    ident = prior if prior is not None else CommandMap.identity()
+    ident = prior if prior is not None else CommandMap.identity(n_cols)
     first = calibrate(
         train, eval, simulate=with_map(ident), start=start, max_evaluations=max_evaluations,
         seed=seed, on_progress=progress, should_stop=stop, **calibrate_kwargs,
@@ -402,7 +443,8 @@ def calibrate_with_sensor(
                 ))
 
         fit = fit_command_map(p, train, simulate, start=start_map, fit_gain=fit_gain,
-                              should_stop=stop, on_simulation=on_sim)
+                              should_stop=stop, on_simulation=on_sim,
+                              **{k: v for k, v in rargs.items() if k in ("joints", "unit_k")})
         stages.append({
             "name": "command_map",
             "n_evaluations": fit.n_simulations,
@@ -418,7 +460,7 @@ def calibrate_with_sensor(
         if stop():
             break
         if mode == "kinematic":
-            cmap = prefit_command_map(train, fit_gain=fit_gain)
+            cmap = prefit_command_map(train, fit_gain=fit_gain, **rargs)
         else:
             cmap = fit_map(params, cmap)
         if stop():

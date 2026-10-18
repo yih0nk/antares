@@ -4,10 +4,13 @@ A :class:`~antares.lock.RobotLock` holds fitted :class:`~antares.sim.SimParams`.
 :func:`export_mjcf` bakes those values into a copy of the SO-101 MJCF so the
 model can be dropped into any MuJoCo or RL pipeline without Antares:
 
-* ``kp``/``kv`` go on the ``sts3215`` default class's ``<position>`` and
+* ``kp``/``kv``/``forcerange`` go on the ``sts3215`` default class's
+  ``<position>`` (``forcerange`` as the symmetric ``"-f f"``) and
   ``damping``/``armature``/``frictionloss`` on its ``<joint>``. Per-joint
   values (a sequence of six) are written on the named ``<joint>`` /
-  ``<position>`` elements instead.
+  ``<position>`` elements instead. A servo-model lock bakes its PD
+  equivalent (:meth:`~antares.sim.SimParams.linearized`), so the effort
+  limit is the servo's stall torque.
 * ``gravity_scale``, when the lock fitted one, scales ``<option gravity>``.
 * ``meshdir`` is rewritten: either the STL meshes are copied into an
   ``assets/`` directory next to the output, or it points (absolute) at the
@@ -25,6 +28,12 @@ sidecar.
 Edits are done on the XML text with targeted substitutions (not a DOM
 round-trip), so comments, formatting and everything else in the Menagerie
 file are preserved verbatim.
+
+Robots without a shared servo class (``export_class=None`` in their
+profile, e.g. ALOHA) are exported through :class:`mujoco.MjSpec` instead:
+the lock's parameters are applied to the compiled model exactly as the fit
+saw them, then each mapped joint and actuator's values are written onto its
+own element and the spec is saved flattened (includes inlined).
 """
 
 from __future__ import annotations
@@ -43,7 +52,7 @@ from typing import Any
 import mujoco
 import numpy as np
 
-from antares import __version__
+from antares import __version__, factors
 from antares.lock import RobotLock
 from antares.sim import JOINTS, MESH_DIR, MODEL_PATH, STANDARD_GRAVITY, Arm, CommandMap, SimParams, UnitMap
 from antares.task import OBJECT_BODY, OBJECT_JOINT, OBJECT_MASS, OBJECT_SIZE, PLACE_SITE, TaskDistribution, scene_xml
@@ -58,8 +67,26 @@ EXPORT_FORMAT = "antares.export/1"
 
 #: Default class in the MJCF that all six servos share.
 SERVO_CLASS = "sts3215"
-JOINT_PARAMS: tuple[str, ...] = ("damping", "armature", "frictionloss")
-ACTUATOR_PARAMS: tuple[str, ...] = ("kp", "kv")
+#: Floor and light for robots whose own scene file isn't fetched.
+_GENERIC_SCENE = """<mujoco model="scene">
+  <include file="robot.xml"/>
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+  </visual>
+  <asset>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4"
+      rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8" width="300" height="300"/>
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
+  </asset>
+  <worldbody>
+    <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
+    <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
+  </worldbody>
+</mujoco>
+"""
+JOINT_PARAMS: tuple[str, ...] = factors.mjcf_attrs("joint")
+#: ``forcerange`` is the symmetric force limit, written as ``"-f f"``.
+ACTUATOR_PARAMS: tuple[str, ...] = factors.mjcf_attrs("position")
 #: Written on ``<option>`` (``gravity_scale`` scales the gravity vector).
 OPTION_PARAMS: tuple[str, ...] = ("gravity_scale",)
 #: Everything :func:`bake_params` writes into the MJCF.
@@ -86,6 +113,17 @@ def _fmt(v: float) -> str:
     if not math.isfinite(v):
         raise ExportError(f"cannot write non-finite value {v!r} into MJCF")
     return repr(v)
+
+
+def _fmt_attr(key: str, v: float) -> str:
+    """One parameter as its MJCF attribute text: ``forcerange`` is the
+    symmetric pair ``"-f f"`` (MuJoCo's ``forcerange="lo hi"``), the rest a number."""
+    if key == "forcerange":
+        f = float(v)
+        if f < 0:
+            raise ExportError(f"forcerange must be >= 0, got {f!r}")
+        return f"{_fmt(-f)} {_fmt(f)}"
+    return _fmt(v)
 
 
 def _set_attrs(tag: str, attrs: Mapping[str, str]) -> str:
@@ -134,12 +172,12 @@ def bake_params(xml: str, params: Mapping[str, ParamValue], joints: Sequence[str
         if key not in BAKED_PARAMS or key in OPTION_PARAMS:
             continue
         if np.ndim(value) == 0:
-            scalar[key] = _fmt(value)  # type: ignore[arg-type]
+            scalar[key] = _fmt_attr(key, value)  # type: ignore[arg-type]
         else:
             vals = [float(v) for v in np.asarray(value, dtype=np.float64).reshape(-1)]
             if len(vals) != len(joints):
                 raise ExportError(f"{key}: expected {len(joints)} per-joint values, got {len(vals)}")
-            per_joint[key] = [_fmt(v) for v in vals]
+            per_joint[key] = [_fmt_attr(key, v) for v in vals]
 
     start, end = _class_block(xml, SERVO_CLASS)
     block = xml[start:end]
@@ -445,6 +483,17 @@ def _score_text(v: float, unit: str = " deg") -> str:
     return "n/a" if s is None else f"{s:.3f}{unit}"
 
 
+def _lock_robot(lock: RobotLock):
+    from antares.robots import get_robot
+
+    return get_robot(getattr(lock, "robot", None))
+
+
+def _generic(lock: RobotLock) -> bool:
+    """Exported through MjSpec (no shared servo class to bake into)?"""
+    return _lock_robot(lock).export_class is None
+
+
 def _fmt_param(v: ParamValue) -> str:
     """A scalar as :func:`_fmt`; a per-joint tuple as ``[v0 v1 ... v5]``."""
     if isinstance(v, (tuple, list)):
@@ -454,20 +503,30 @@ def _fmt_param(v: ParamValue) -> str:
 
 def header_lines(lock: RobotLock) -> list[str]:
     r = lock.result
-    p = lock.params
+    p = lock.params.linearized()
+    robot = _lock_robot(lock)
+    generic = _generic(lock)
     lines = [
-        f"Antares calibrated SO-101 (antares {__version__}, lock format {EXPORT_FORMAT})",
+        f"Antares calibrated {robot.label if generic else 'SO-101'} (antares {__version__}, lock format {EXPORT_FORMAT})",
         f"lock:        {lock.name}",
         f"dataset:     {lock.dataset} ({lock.robot_type}), data sha256 {lock.data_sha256}",
         f"created_at:  {lock.created_at}",
         f"held-out tracking RMSE: {_score_text(r.baseline_eval_score)} before -> "
         f"{_score_text(r.eval_score)} after ({len(r.eval_episodes)} episodes)",
-        f"baked: kp={_fmt_param(p.kp)} kv={_fmt_param(p.kv)} damping={_fmt_param(p.damping)} "
-        f"armature={_fmt_param(p.armature)} frictionloss={_fmt_param(p.frictionloss)} "
-        f"gravity_scale={_fmt_param(float(p.per_joint('gravity_scale')[0]))} (scales option gravity)",
-        f"latency_frames: {p.latency_frames} (command delay in dataset frames; MJCF cannot "
-        f"express this, apply it in your control loop; see the .antares.json sidecar)",
     ]
+    if generic:
+        lines.append("fitted values are written on each mapped joint and actuator")
+    else:
+        lines.append(
+            f"baked: kp={_fmt_param(p.kp)} kv={_fmt_param(p.kv)} forcerange={_fmt_param(p.forcerange)} "
+            f"damping={_fmt_param(p.damping)} armature={_fmt_param(p.armature)} "
+            f"frictionloss={_fmt_param(p.frictionloss)} "
+            f"gravity_scale={_fmt_param(float(p.per_joint('gravity_scale')[0]))} (scales option gravity)"
+        )
+    lines.append(
+        f"latency_frames: {p.latency_frames} (command delay in dataset frames; MJCF cannot "
+        f"express this, apply it in your control loop; see the .antares.json sidecar)"
+    )
     if np.any(p.per_joint("deadband")):
         band = " ".join(_fmt(v) for v in p.per_joint("deadband")) if p.is_per_joint("deadband") else _fmt(p.deadband)
         lines.append(
@@ -479,18 +538,42 @@ def header_lines(lock: RobotLock) -> list[str]:
             f"scene:       table at z={lock.scene.get('table_z', float('nan')):.4f} m from "
             f"{lock.scene.get('n_grasps', '?')} grasps (see scene.xml)"
         )
+    if lock.params.uses_servo_model:
+        q = lock.params
+        lines.append(
+            f"servo: {q.servo} (servo_gain={_fmt_param(q.servo_gain)} max_velocity={_fmt_param(q.max_velocity)} "
+            f"rad/s); baked as its PD equivalent (kp, kv, stall torque as forcerange), which drops the "
+            f"firmware's rate limit and duty-cycle saturation; the full model is in the .antares.json sidecar"
+        )
     if lock.cameras:
         lines.append(
             "cameras:     "
             + ", ".join(f"{n} ({c.get('key', n)})" for n, c in sorted(lock.cameras.items()))
             + " fitted from the dataset videos; see <camera> in <worldbody>"
         )
-    lines.append("Base model: MuJoCo Menagerie robotstudio_so101 (see assets LICENSE).")
+    if generic:
+        lines.append(f"Base model: {_base_model_text(robot)} (see its LICENSE).")
+    else:
+        lines.append("Base model: MuJoCo Menagerie robotstudio_so101 (see assets LICENSE).")
     return lines
 
 
-def sidecar_dict(lock: RobotLock, model: mujoco.MjModel, model_file: str, meshdir: str) -> dict[str, Any]:
+def _base_model_text(robot) -> str:
+    m = robot.menagerie
+    if m is None:
+        return f"{robot.model_path.name} shipped with antares"
+    return f"MuJoCo Menagerie {m.directory}/{m.xml} at {m.commit[:12]}"
+
+
+def sidecar_dict(
+    lock: RobotLock, model: mujoco.MjModel, model_file: str, meshdir: str, unit_map: UnitMap | None = None
+) -> dict[str, Any]:
+    """The ``.antares.json`` next to an export. ``unit_map`` is the fitted
+    arm's map for robots exported through :func:`fitted_spec` (the SO arms
+    read theirs off ``model``)."""
     r = lock.result
+    robot = _lock_robot(lock)
+    generic = robot.export_class is None
     return {
         "format": EXPORT_FORMAT,
         "antares_version": __version__,
@@ -512,22 +595,25 @@ def sidecar_dict(lock: RobotLock, model: mujoco.MjModel, model_file: str, meshdi
             "Command delay in dataset frames (at the dataset's recording rate). "
             "Not representable in MJCF: delay each ctrl by latency_frames frames."
         ),
+        "joints": list(robot.joints) if generic else list(JOINTS),
+        "robot": getattr(lock, "robot", None),
         "deadband_note": (
             "Servo position-error deadband in radians (params.deadband, shared or per joint; "
             "0 or absent means none). Not representable in MJCF: command q + shrink(target - q) "
             "with |error| reduced by the band, as antares.sim.Arm.replay does."
         ),
-        "joints": list(JOINTS),
+        "servo_note": (
+            "params.servo names the actuator model (absent means MuJoCo's position actuator). "
+            "For 'sts3215' the MJCF carries the PD equivalent (kp, kv, stall torque as forcerange); the full model "
+            "(servo_gain, p_coefficient, vin, kt, resistance, max_velocity) is in params, "
+            "as antares.sim.Arm replays it."
+        ),
         "command_map": {
-            **CommandMap.from_dict(lock.command_map).to_dict(),
+            **CommandMap.from_dict(lock.command_map, robot.n_joints).to_dict(),
             "note": "Per-arm sensor calibration: correct each logged command as "
             "gain * u + bias (LeRobot units) before the unit map. Identity if the lock has none.",
         },
-        "unit_map": {
-            **UnitMap.from_model(model).to_dict(),
-            "note": "rad = scale * u + offset, clipped to [lo, hi]; u in LeRobot units "
-            "(body joints -100..100, gripper 0..100).",
-        },
+        "unit_map": _unit_map_entry(robot, model, unit_map),
         "scores": {
             "baseline_eval_score": _score(r.baseline_eval_score),
             "eval_score": _score(r.eval_score),
@@ -537,6 +623,23 @@ def sidecar_dict(lock: RobotLock, model: mujoco.MjModel, model_file: str, meshdi
             "eval_episodes": list(r.eval_episodes),
             "train_episodes": list(r.train_episodes),
         },
+    }
+
+
+def _unit_map_entry(robot: Any, model: mujoco.MjModel, unit_map: UnitMap | None) -> dict[str, Any]:
+    if robot.export_class is not None:
+        return {
+            **UnitMap.from_model(model).to_dict(),
+            "note": "rad = scale * u + offset, clipped to [lo, hi]; u in LeRobot units "
+            "(body joints -100..100, gripper 0..100).",
+        }
+    if unit_map is None:  # the arm the spec was fitted on is normally passed in
+        unit_map = Arm(robot=robot.name).unit_map
+    return {
+        **unit_map.to_dict(),
+        "units": list(robot.unit_kinds()),
+        "note": "rad = scale * u + offset, clipped to [lo, hi]; u in the dataset's own units, "
+        "one entry per column of 'joints'.",
     }
 
 
@@ -563,6 +666,76 @@ def _copy_assets(xml: str, dest: Path) -> list[str]:
     return files
 
 
+def fitted_spec(lock: RobotLock, arm: Arm | None = None) -> mujoco.MjSpec:
+    """The lock's robot as an :class:`mujoco.MjSpec` carrying the fitted values.
+
+    The parameters (added factors included) are applied to a compiled
+    :class:`~antares.sim.Arm` (``arm``, or one built for the lock's robot),
+    so the export holds exactly what the fit simulated; each mapped joint
+    gets its damping, armature and friction loss, each actuator its gains,
+    bias and force range, and the global options (timestep, gravity) are
+    copied.
+    """
+    if arm is None:
+        arm = Arm(robot=_lock_robot(lock).name)
+    arm.apply(lock.params)
+    m = arm.model
+    spec = mujoco.MjSpec.from_file(str(arm.model_path))
+    for j, d in zip(arm.joint_ids, arm.dof_ids):
+        el = spec.joint(mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_JOINT, int(j)))
+        damping = np.array(el.damping, dtype=np.float64).reshape(-1)  # [linear, ...] in MuJoCo >= 3.5
+        if damping.size > 1:
+            damping[0] = float(m.dof_damping[d])
+            el.damping = damping
+        else:
+            el.damping = float(m.dof_damping[d])
+        el.armature = float(m.dof_armature[d])
+        el.frictionloss = float(m.dof_frictionloss[d])
+    for a in arm.actuator_ids:
+        el = spec.actuator(mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_ACTUATOR, int(a)))
+        el.gainprm[:3] = m.actuator_gainprm[a, :3]
+        el.biasprm[:3] = m.actuator_biasprm[a, :3]
+        el.forcelimited = mujoco.mjtLimited.mjLIMITED_TRUE
+        el.forcerange = m.actuator_forcerange[a]
+    spec.option.timestep = float(m.opt.timestep)
+    spec.option.gravity = m.opt.gravity.copy()
+    return spec
+
+
+def _export_generic(lock: RobotLock, out_path: Path, bundle_assets: bool) -> Path:
+    robot = _lock_robot(lock)
+    arm = Arm(robot=robot.name)  # one compile: the spec's values and the sidecar's unit map
+    spec = fitted_spec(lock, arm)
+    src_dir = Path(spec.modelfiledir) if spec.modelfiledir else robot.model_path.parent
+    mesh_src = src_dir / (spec.meshdir or "")
+    tex_src = src_dir / (spec.texturedir or "")
+    if bundle_assets:
+        dest = out_path.parent / ASSETS_DIRNAME
+        for mesh in spec.meshes:
+            if mesh.file:
+                (dest / mesh.file).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(mesh_src / mesh.file, dest / mesh.file)
+        for tex in spec.textures:
+            if tex.file:
+                (dest / tex.file).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(tex_src / tex.file, dest / tex.file)
+        lic = src_dir / "LICENSE"
+        if lic.is_file():
+            shutil.copyfile(lic, dest / "LICENSE")
+        meshdir = texturedir = ASSETS_DIRNAME
+    else:
+        meshdir, texturedir = str(mesh_src.resolve()), str(tex_src.resolve())
+    xml = spec.to_xml()  # with the source dirs, so MuJoCo can still find the files
+    xml = _sub_one(xml, re.compile(r"<compiler\b[^>]*/>"), {"meshdir": meshdir, "texturedir": texturedir}, "<compiler>")
+    xml = insert_cameras(xml, lock.cameras)
+    xml = insert_header(xml, _comment(header_lines(lock)))
+    out_path.write_text(xml)
+    model = mujoco.MjModel.from_xml_path(str(out_path))  # validates the export
+    sidecar = sidecar_dict(lock, model, out_path.name, meshdir, unit_map=arm.unit_map)
+    sidecar_path(out_path).write_text(json.dumps(sidecar, indent=2) + "\n")
+    return out_path
+
+
 def export_mjcf(lock: RobotLock, out_path: Path, bundle_assets: bool = True) -> Path:
     """Write ``lock``'s calibrated SO-101 as MJCF at ``out_path`` (``.xml``).
 
@@ -575,9 +748,12 @@ def export_mjcf(lock: RobotLock, out_path: Path, bundle_assets: bool = True) -> 
     """
     out_path = _resolve_out(out_path, lock.name)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    if _generic(lock):
+        return _export_generic(lock, out_path, bundle_assets)
 
     xml = MODEL_PATH.read_text()
-    xml = bake_params(xml, lock.params.to_dict())
+    # A servo-model lock bakes its PD equivalent; the sidecar keeps the model.
+    xml = bake_params(xml, lock.params.linearized().to_dict())
     if bundle_assets:
         meshdir = ASSETS_DIRNAME
         _copy_assets(xml, out_path.parent / ASSETS_DIRNAME)
@@ -650,7 +826,7 @@ def export_scene(
 
         scene_fit = load_scene_fit(lock.name, lock_dir)
 
-    scene = SCENE_PATH.read_text()
+    scene = _GENERIC_SCENE if _generic(lock) else SCENE_PATH.read_text()
     scene, n = re.subn(r'<include file="[^"]+"/>', f'<include file="{arm_path.name}"/>', scene, count=1)
     if n == 0:
         raise ExportError("scene.xml has no <include>")
@@ -729,16 +905,21 @@ def load_exported_arm(xml_path: Path, contacts: bool = False) -> Arm:
     from the sidecar (identity if it is missing)."""
     xml_path = Path(xml_path)
     params: SimParams | None = None
-    cmap = None
+    cmap, robot = None, None
     sc = sidecar_path(xml_path)
     if sc.is_file():
         side = json.loads(sc.read_text())
         if isinstance(side.get("params"), dict):
             params = SimParams.from_dict(side["params"])
         cmap = CommandMap.from_dict(side.get("command_map"))
-    arm = Arm(model_path=xml_path, contacts=contacts, command_map=cmap)
+        robot = side.get("robot")
+    arm = Arm(model_path=xml_path, contacts=contacts, command_map=cmap, robot=robot)
     if params is None:
-        params = SimParams.from_model(arm.model, latency_frames=0)
+        params = (
+            arm.default_params(from_model=True)
+            if arm.robot.export_class is None
+            else SimParams.from_model(arm.model, latency_frames=0)
+        )
     arm.apply(params)
     return arm
 
@@ -757,6 +938,7 @@ __all__ = [
     "export_mjcf",
     "export_scene",
     "export_zip",
+    "fitted_spec",
     "header_lines",
     "insert_header",
     "insert_scene",

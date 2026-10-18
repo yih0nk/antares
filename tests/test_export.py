@@ -397,3 +397,44 @@ def test_scene_xml_needs_a_held_grasp():
     td = TaskDistribution.from_episodes([pick_place_episode(0, held_jaw=SHUT)], name="toy")
     with pytest.raises(ValueError):
         scene_xml(td)
+
+
+def test_bake_forcerange_scalar_and_per_joint(tmp_path):
+    # forcerange is MuJoCo's "lo hi" pair; a scalar goes on the class, six
+    # values on the named actuators, and the compiled model carries them.
+    out = bake_params(STOCK_XML, {"forcerange": 3.5})
+    assert 'forcerange="-3.5 3.5"' in servo_block(out)
+    m = load_with_meshes(tmp_path, out)
+    np.testing.assert_allclose(m.actuator_forcerange, [[-3.5, 3.5]] * 6)
+    fr = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    out = bake_params(STOCK_XML, {"forcerange": fr})
+    assert 'forcerange="-2.94 2.94"' in servo_block(out)  # the class is untouched
+    m = load_with_meshes(tmp_path, out, "pj.xml")
+    np.testing.assert_allclose(m.actuator_forcerange[:, 1], fr)
+    np.testing.assert_allclose(m.actuator_forcerange[:, 0], [-v for v in fr])
+    with pytest.raises(ExportError, match="forcerange"):
+        bake_params(STOCK_XML, {"forcerange": -1.0})
+
+
+def test_servo_lock_bakes_its_pd_equivalent_and_replays_from_the_sidecar(tmp_path):
+    params = SimParams.sts3215(servo_gain=1.2, max_velocity=4.0, latency_frames=2)
+    lock = make_lock(params=params)
+    out = export_mjcf(lock, tmp_path / "s.xml")
+    lin = params.linearized()
+    model = mujoco.MjModel.from_xml_path(str(out))
+    assert model.actuator_gainprm[0, 0] == pytest.approx(lin.kp)
+    assert -model.actuator_biasprm[0, 2] == pytest.approx(lin.kv)
+    # the effort limit is the servo's stall torque, not the stock +-2.94
+    assert lin.forcerange != pytest.approx(2.94)
+    np.testing.assert_allclose(model.actuator_forcerange, [[-lin.forcerange, lin.forcerange]] * 6)
+    assert f'forcerange="{-lin.forcerange!r} {lin.forcerange!r}"' in servo_block(out.read_text())
+    sc = read_sidecar(out)
+    assert sc["params"]["servo"] == "sts3215" and "servo_note" in sc
+    assert "forcerange" in sc["baked_params"] and sc["params"]["forcerange"] == pytest.approx(lin.forcerange)
+    assert "forcerange=" in out.read_text().split("<option", 1)[0]
+    head = out.read_text().split("<option", 1)[0]
+    assert "servo: sts3215" in head
+    arm = load_exported_arm(out)
+    assert arm.params == params
+    ep = synthetic_episode()
+    np.testing.assert_allclose(arm.replay(ep), Arm(params=params).replay(ep), rtol=0, atol=1e-9)

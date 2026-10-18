@@ -83,11 +83,11 @@ def test_inspect_rejects_without_loading(monkeypatch, capsys):
     import antares.data
     from antares import server
 
-    monkeypatch.setattr(server, "fetch_hub_info", lambda repo_id: _info(robot_type="koch", fps=60))
+    monkeypatch.setattr(server, "fetch_hub_info", lambda repo_id: _info(robot_type="ur5e", fps=60))
     monkeypatch.setattr(antares.data, "load_dataset", lambda *a, **k: pytest.fail("must not download a rejected dataset"))
     assert cli.main(["inspect", "someone/koch_arm"]) == 1
     out = capsys.readouterr().out
-    assert "verdict: REJECTED" in out and "reason:  robot_type 'koch'" in out and "fps 60" in out
+    assert "verdict: REJECTED" in out and "reason:  robot_type 'ur5e'" in out and "fps 60" in out
 
 
 def test_inspect_warns_but_loads(monkeypatch, capsys):
@@ -116,10 +116,10 @@ def test_replay_rejected_dataset_exits_two(monkeypatch, capsys):
     from antares import server
 
     monkeypatch.setattr(server, "_DATASETS", {})
-    monkeypatch.setattr(server, "fetch_hub_info", lambda repo_id: _info(robot_type="koch"))
+    monkeypatch.setattr(server, "fetch_hub_info", lambda repo_id: _info(robot_type="ur5e"))
     assert cli.main(["replay", "someone/koch", "--episode", "0"]) == 2
     err = capsys.readouterr().err
-    assert "cannot be replayed" in err and "koch" in err
+    assert "cannot be replayed" in err and "ur5e" in err
 
 
 def test_locks_empty_and_listing(monkeypatch, tmp_path, capsys):
@@ -1382,6 +1382,13 @@ def test_calibrate_fit_sensor_prints_comparison(monkeypatch, capsys):
     assert "sensor calibration" in out and "-2.500" in out and "0.9800" in out
 
 
+def test_params_table_uses_the_robots_columns():
+    from antares.cli import _params_table
+
+    out = _params_table({"kp": [1.0] * 7, "latency_frames": 2}, [f"joint{i}" for i in range(1, 7)] + ["gripper"])
+    assert "joint7" not in out and "gripper" in out and out.count("\n") == 9
+
+
 def test_task_prints_clouds_and_saves(monkeypatch, capsys, tmp_path):
     from antares import server
     from test_task import pick_place_episode
@@ -1819,3 +1826,25 @@ def test_calibrate_robot_id_registers_the_saved_lock(monkeypatch, capsys, tmp_pa
     assert cli.main(["calibrate", "fake/robot", "--name", "z"]) == 0
     assert "registered" not in capsys.readouterr().out
     assert "z" not in [l["name"] for l in json.loads((server.LOCK_DIR / "registry.json").read_text())["robots"]["arm_a"]["locks"]]
+
+
+def test_calibrate_cli_servo_flag(monkeypatch, capsys, tmp_path):
+    from antares import server
+
+    calls = []
+    params = {"kp": 998.22, "kv": 2.731, "damping": 0.06, "armature": 0.026, "frictionloss": 0.05,
+              "latency_frames": 2, "forcerange": 2.94, "servo": "sts3215", "servo_gain": 1.2,
+              "p_coefficient": 16.0, "vin": 7.4, "kt": 1.18, "resistance": 2.48, "max_velocity": 5.3}
+
+    def fake_run(ds, **kw):
+        calls.append(kw)
+        return _Result(_result_dict(params, [])), {"name": "x"}, tmp_path / "x.lock.json"
+
+    monkeypatch.setattr(server, "_DATASETS", {"fake/robot": _dataset()})
+    monkeypatch.setattr(server, "run_calibration", fake_run)
+    assert cli.main(["calibrate", "fake/robot", "--servo", "sts3215"]) == 0
+    assert calls[0]["servo"] == "sts3215"
+    out = capsys.readouterr().out
+    assert "sts3215 servo model" in out and "servo=sts3215" in out and "servo_gain=1.2" in out
+    assert cli.main(["calibrate", "fake/robot"]) == 0
+    assert calls[1]["servo"] == "position"

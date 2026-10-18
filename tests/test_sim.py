@@ -10,6 +10,7 @@ from antares.sim import (
     JOINTS,
     MESH_DIR,
     MODEL_PATH,
+    SERVO_FIELDS,
     Arm,
     SimParams,
     UnitMap,
@@ -56,9 +57,12 @@ def test_simparams_dict_roundtrip():
     d = p.to_dict()
     assert d["latency_frames"] == 3
     assert SimParams.from_dict(d) == p
-    # unknown keys ignored, missing keys default, floats coerced
-    q = SimParams.from_dict({"kp": "600", "latency_frames": 2.0, "bogus": 1})
+    # missing keys default, floats coerced; an unknown key is an error (a
+    # lock's added factor whose file is not loaded must not replay silently)
+    q = SimParams.from_dict({"kp": "600", "latency_frames": 2.0})
     assert q.kp == 600.0 and q.latency_frames == 2 and q.kv == SimParams().kv
+    with pytest.raises(ValueError, match="bogus.*--factors-file"):
+        SimParams.from_dict({"kp": "600", "bogus": 1})
 
 
 def test_simparams_negative_latency_rejected():
@@ -101,10 +105,13 @@ def test_simparams_per_joint_round_trip():
 
 
 def test_simparams_per_joint_wrong_length_rejected():
+    # SimParams does not know its robot; the length is checked against the arm.
     with pytest.raises(ValueError):
-        SimParams(kp=(1.0, 2.0))
+        SimParams(kp=(1.0, 2.0)).per_joint("kp", 6)
     with pytest.raises(ValueError):
-        SimParams.from_dict({"damping": [0.1] * 7})
+        Arm().apply(SimParams.from_dict({"damping": [0.1] * 7}))
+    with pytest.raises(ValueError):
+        SimParams(kp=())
 
 
 def test_simparams_per_joint_and_broadcast():
@@ -713,3 +720,100 @@ def test_command_map_invert():
     cm = CommandMap(gain=[1.0, 0.9, 1.1, 1.0, 1.0, 1.0], bias=[0.0, -3.0, 2.5, 0.0, 1.0, 0.0])
     u = np.linspace(-50, 50, 12).reshape(2, 6)
     np.testing.assert_allclose(cm.invert(cm.apply(u)), u)
+
+
+# -- STS3215 servo model -------------------------------------------------------
+
+
+def test_sts3215_defaults_and_linearized_stiffness():
+    p = SimParams.sts3215()
+    assert p.servo == "sts3215" and p.uses_servo_model and not SimParams().uses_servo_model
+    lin = p.linearized()
+    # BAM's motor at LeRobot's P coefficient of 16 is about as stiff as kp 9.4
+    assert lin.servo == "position"
+    assert lin.kp == pytest.approx(9.384, abs=0.01)
+    assert lin.kv == pytest.approx(p.kt**2 / p.resistance)
+    assert lin.forcerange == pytest.approx(p.kt / p.resistance * p.vin * 0.97)
+    assert lin.damping == p.damping and lin.latency_frames == p.latency_frames
+    assert SimParams.sts3215(p_coefficient=32).linearized().kp == pytest.approx(2 * lin.kp)
+    assert SimParams().linearized() is not None and SimParams().linearized() == SimParams()
+
+
+def test_sts3215_dict_round_trip_and_position_locks_unchanged():
+    assert not {"servo", "servo_gain", "kt"} & set(SimParams().to_dict())
+    p = SimParams.sts3215(servo_gain=1.3, latency_frames=2)
+    d = p.to_dict()
+    assert d["servo"] == "sts3215" and d["servo_gain"] == 1.3 and d["p_coefficient"] == 16.0
+    assert SimParams.from_dict(json.loads(json.dumps(d))) == p
+    b = p.broadcast()
+    assert b.servo == "sts3215" and b.is_per_joint("servo_gain")
+    assert SimParams.from_dict(b.to_dict()) == b
+    with pytest.raises(ValueError):
+        SimParams(servo="dynamixel")
+    with pytest.raises(ValueError):
+        SimParams.sts3215(kt=0.0)
+    with pytest.raises(ValueError):
+        p.per_joint("servo")
+
+
+def test_sts3215_kp_kv_forcerange_are_the_pd_equivalent():
+    # A servo-model SimParams carries its linearized stiffness in the
+    # position-actuator fields, so a consumer that ignores ``servo`` (an older
+    # antares reading the lock, the fleet table, sag) sees a ~9 N*m/rad servo,
+    # not the stock 998 one. Any value passed for them is replaced.
+    p = SimParams.sts3215()
+    assert p.kp == pytest.approx(9.384, abs=0.01)
+    assert p.kv == pytest.approx(p.kt**2 / p.resistance)
+    assert p.forcerange == pytest.approx(p.kt / p.resistance * p.vin * 0.97)
+    assert SimParams.sts3215(kp=998.22, kv=2.731, forcerange=2.94) == p
+    # a lock written with the stock values next to the servo model loads as the equivalent
+    stock = {**p.to_dict(), "kp": 998.22, "kv": 2.731, "forcerange": 2.94}
+    assert SimParams.from_dict(stock) == p
+    # the dict carries the equivalent, so dropping the servo keys degrades to it
+    d = p.to_dict()
+    assert d["kp"] == pytest.approx(p.kp) and d["forcerange"] == pytest.approx(p.forcerange)
+    unaware = SimParams.from_dict({k: v for k, v in d.items() if k != "servo" and k not in SERVO_FIELDS})
+    assert not unaware.uses_servo_model and unaware.kp == pytest.approx(p.kp)
+    # the gain moves kp with it, per joint when the gain is
+    doubled = p.replace(servo_gain=2 * p.servo_gain)
+    assert doubled.kp == pytest.approx(2 * p.kp) and doubled.forcerange == p.forcerange
+    pj = p.replace(servo_gain=(1.0, 1.0, 2.0, 1.0, 1.0, 1.0))
+    assert pj.is_per_joint("kp") and not pj.is_per_joint("kv") and not pj.is_per_joint("forcerange")
+    assert pj.per_joint("kp")[2] == pytest.approx(2 * pj.per_joint("kp")[0])
+    lin = p.linearized()
+    assert lin.servo == "position" and (lin.kp, lin.kv, lin.forcerange) == (p.kp, p.kv, p.forcerange)
+
+
+def test_sts3215_slow_motion_matches_its_pd_equivalent(arm):
+    # Small, slow moves stay clear of the rate limit and the duty-cycle
+    # saturation, where the servo model is exactly its linearization.
+    T = 120
+    t = np.arange(T) / FPS
+    action = np.zeros((T, 6))
+    action[:, :5] = 3.0 * np.sin(2 * np.pi * 0.3 * t)[:, None]
+    action[:, 5] = 30.0
+    ep = make_episode(action.copy(), action)
+    servo = SimParams.sts3215()
+    a = Arm(servo)
+    got = a.replay(ep)
+    ref = Arm(servo.linearized()).replay(ep)
+    assert np.max(np.abs(got - ref)) < np.radians(0.2)
+    # and switching the same Arm back to a position actuator restores it
+    a.apply(SimParams())
+    np.testing.assert_allclose(a.replay(ep), arm.replay(ep), rtol=0, atol=1e-12)
+
+
+def test_sts3215_rate_limit_slows_a_big_step():
+    # A big step: the firmware's target ramps at max_velocity, so with a
+    # stiff loop the joint arrives no sooner than distance / max_velocity.
+    # The step comes at frame 5 (the firmware target starts at the first
+    # command, as if the servo had been holding it).
+    n = 60
+    ep = constant_episode([0, 0, 0, 0, 0, 30], [0, 0, 0, 0, 0, 30], n)
+    ep.action[5:, 0] = 60.0
+    fast = Arm(SimParams.sts3215(servo_gain=3.0, max_velocity=20.0)).replay(ep)
+    slow = Arm(SimParams.sts3215(servo_gain=3.0, max_velocity=1.0)).replay(ep)
+    assert abs(fast[-1, 0] - fast[0, 0]) > 0.5
+    # 10 frames (1/3 s) after the step the slow servo has moved at most 1/3 rad
+    assert abs(slow[15, 0] - slow[5, 0]) <= 1.0 * 10 / FPS + 0.02
+    assert abs(fast[15, 0] - fast[5, 0]) > abs(slow[15, 0] - slow[5, 0]) + 0.1

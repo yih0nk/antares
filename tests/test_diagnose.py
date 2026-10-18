@@ -18,13 +18,16 @@ from antares.calibrate import CalibrationResult, SimParams
 from antares.data import Episode
 from antares.diagnose import (
     FIELDS,
+    SERVO_FIELDS,
     ParamChange,
     apply_change,
+    change_fields,
     decode_change,
     describe_change,
     diagnose,
     encode_change,
     neutral,
+    servo_change,
     split_alternating,
 )
 
@@ -97,6 +100,50 @@ def test_apply_change_keeps_per_joint_locks_per_joint():
     q = apply_change(p, {"kp": 0.5, "latency_frames": 1})
     assert q.kp == (50.0, 100.0, 150.0, 200.0, 250.0, 300.0)
     assert q.latency_frames == 3
+
+
+def test_servo_lock_change_space_scales_the_gain_not_kp():
+    # A servo lock's kp is derived from servo_gain, so the change space
+    # searches the gain; a kp factor handed in is mapped onto it and a kv
+    # factor (back-EMF, a motor constant) is dropped.
+    servo = SimParams.sts3215(latency_frames=1)
+    assert change_fields(servo) == SERVO_FIELDS and change_fields(TRUE) == FIELDS
+    assert "kp" not in SERVO_FIELDS and "kv" not in SERVO_FIELDS and "servo_gain" in SERVO_FIELDS
+    assert set(neutral(SERVO_FIELDS)) == set(SERVO_FIELDS)
+    x = encode_change(neutral(SERVO_FIELDS), SERVO_FIELDS)
+    assert x.shape == (len(SERVO_FIELDS),)
+    assert decode_change(x, SERVO_FIELDS) == pytest.approx(neutral(SERVO_FIELDS))
+    c = {"servo_gain": 0.5, "damping": 2.0, "latency_frames": 1}
+    back = decode_change(encode_change(c, SERVO_FIELDS), SERVO_FIELDS)
+    assert back["servo_gain"] == pytest.approx(0.5) and back["damping"] == pytest.approx(2.0)
+    assert back["latency_frames"] == 1
+    assert servo_change({"kp": 0.5, "kv": 2.0, "damping": 3.0}) == {"damping": 3.0, "servo_gain": 0.5}
+    halved = apply_change(servo, {"kp": 0.5})
+    assert halved.servo_gain == pytest.approx(0.5 * servo.servo_gain)
+    assert halved.kp == pytest.approx(0.5 * servo.kp)  # the derived kp follows the gain
+    assert apply_change(servo, {"kv": 2.0}) == servo  # nothing to scale
+    assert apply_change(servo, {"servo_gain": 2.0}).kp == pytest.approx(2 * servo.kp)
+
+
+def test_weaker_servo_gain_is_named_on_a_servo_lock():
+    # The toy responds to the derived kp, so halving the servo's gain slows
+    # it; the diagnosis of a servo lock must name servo_gain, never kp.
+    lock = SimParams.sts3215(latency_frames=1)
+    eps = make_episodes(lock.replace(servo_gain=lock.servo_gain * 0.5), seed=7)
+    d = diagnose(eps, lock_of(lock), simulate=toy_simulate, max_evaluations=120)
+    assert d.stale_deg > 0.1
+    names = [c.name for c in d.changes]
+    assert set(names) == set(SERVO_FIELDS) and "kp" not in names and "kv" not in names
+    assert d.explained, d.summary()
+    assert d.refit_deg < 0.1 * d.stale_deg
+    # as in the toy's position-space test the gain can split with damping; the gain leads
+    assert d.causes[0].name in ("servo_gain", "damping")
+    assert d.causes[0].recovers_deg > 0.3 * d.gap_deg
+    by = {c.name: c for c in d.changes}
+    assert by["servo_gain"].value < 1.0
+    assert d.refit_params.servo == "sts3215"
+    assert d.refit_params.kp == pytest.approx(lock.kp * d.refit_params.servo_gain / lock.servo_gain)
+    assert "servo_gain" in json.dumps(d.to_dict())
 
 
 def test_describe_change():

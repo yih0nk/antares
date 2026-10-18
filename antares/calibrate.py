@@ -27,11 +27,13 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Callable, Mapping, Sequence
+import dataclasses
 from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 
+from antares import factors
 from antares.data import Episode
 from antares.sim import JOINTS, SimParams
 
@@ -112,34 +114,44 @@ def _fallback_aggregate(reports: Sequence[Any]) -> _FallbackGapReport:
 
 #: name -> (lo, hi, scale). ``log`` dims are searched in log10, ``int`` dims
 #: are continuous during the search and rounded on decode. This is the
-#: shared space: one value of each parameter for all six joints.
-SPACE: dict[str, tuple[float, float, str]] = {
-    "kp": (10.0, 5000.0, "log"),  # SO-101 fits sat on the old 50 floor
-    "kv": (0.1, 50.0, "log"),
-    "damping": (0.01, 10.0, "log"),
-    "armature": (1e-4, 0.5, "log"),
-    "frictionloss": (1e-3, 2.0, "log"),
-    "latency_frames": (0.0, 5.0, "int"),
-}
+#: shared space: one value of each parameter for all six joints. Bounds and
+#: order come from :mod:`antares.factors`.
+SPACE: dict[str, tuple[float, float, str]] = factors.space("shared")
 
 #: Bounds for the per-joint refinement: the shared parameters plus the
-#: actuator force limit (N*m; the STS3215 stalls near 3). Each is searched
-#: once per joint, so the space has ``6 * len(PER_JOINT_SPACE)`` dims.
+#: actuator force limit. Each is searched once per joint, so the space has
+#: ``6 * len(PER_JOINT_SPACE)`` dims.
 PER_JOINT_SPACE: dict[str, tuple[float, float, str]] = {
     **SPACE,
-    "forcerange": (0.5, 30.0, "log"),
+    **factors.space("per_joint", per_joint=True),
 }
 
 #: Optional shared dimension for the arm's gravity load (see
 #: :attr:`antares.sim.SimParams.gravity_scale`), searched only when
 #: ``calibrate(fit_gravity=True)``. 0 is a weightless arm, 2 a doubled load.
-GRAVITY_SPACE: dict[str, tuple[float, float, str]] = {"gravity_scale": (0.0, 2.0, "linear")}
+GRAVITY_SPACE: dict[str, tuple[float, float, str]] = factors.space("shared", factors=("gravity_scale",))
 
 #: Optional servo deadband (rad; see :attr:`antares.sim.SimParams.deadband`),
 #: searched only when ``calibrate(fit_deadband=True)``: shared in the shared
 #: stage, per joint in the per-joint stage. 3 degrees is well past the
 #: STS3215's spec'd deadzone plus gear backlash (about 0.5 degrees).
-DEADBAND_SPACE: dict[str, tuple[float, float, str]] = {"deadband": (0.0, math.radians(3.0), "linear")}
+DEADBAND_SPACE: dict[str, tuple[float, float, str]] = factors.space("shared", factors=("deadband",))
+
+#: Shared space when the start parameters select the STS3215 servo model
+#: (:meth:`antares.sim.SimParams.sts3215`). ``kp``/``kv``/``forcerange`` mean
+#: nothing there; the motor constants stay at BAM's bench values and what
+#: varies between arms is searched instead: the firmware gain ratio, the
+#: joint's friction and inertia, the internal target's rate limit and the
+#: command latency. Bounds are a decade or so around BAM's values (gain 1.0, damping
+#: 0.06, armature 0.026, frictionloss 0.052, max_velocity 5.3 rad/s).
+SERVO_SPACE: dict[str, tuple[float, float, str]] = {
+    "servo_gain": factors.get("servo_gain").space_entry(),
+    "damping": (1e-3, 1.0, "log"),
+    "armature": (3e-3, 0.1, "log"),
+    "frictionloss": (3e-3, 0.5, "log"),
+    "max_velocity": factors.get("max_velocity").space_entry(),
+    "latency_frames": factors.get("latency_frames").space_entry(),
+}
 
 DIMS: tuple[str, ...] = tuple(SPACE)
 N_DIMS = len(DIMS)
@@ -178,6 +190,13 @@ class SearchSpace:
 
     bounds: Mapping[str, tuple[float, float, str]]
     per_joint: bool = False
+    #: Column names, one per joint (the robot's; default the SO arms' six).
+    joints: tuple[str, ...] = JOINTS
+    #: Shared fields searched as one multiplier of ``reference``'s per-joint
+    #: values (bounds :data:`RELATIVE_BOUNDS`) instead of one absolute value,
+    #: so a robot whose joints differ by x100 keeps their proportions.
+    relative: tuple[str, ...] = ()
+    reference: SimParams | None = None
 
     @property
     def name(self) -> str:
@@ -191,11 +210,11 @@ class SearchSpace:
     def dims(self) -> tuple[str, ...]:
         if not self.per_joint:
             return self.fields
-        return tuple(f"{f}.{j}" for f in self.fields for j in JOINTS)
+        return tuple(f"{f}.{j}" for f in self.fields for j in self.joints)
 
     @property
     def n_dims(self) -> int:
-        return len(self.fields) * (len(JOINTS) if self.per_joint else 1)
+        return len(self.fields) * (len(self.joints) if self.per_joint else 1)
 
     def encode(self, params: SimParams) -> np.ndarray:
         """Parameters -> search vector, clipped to the bounds.
@@ -204,11 +223,18 @@ class SearchSpace:
         when a per-joint parameter is passed; per-joint spaces broadcast
         scalars.
         """
+        missing = {f: factors.get(f).neutral for f in self.fields
+                   if f not in SimParams.field_names() and f not in dict(params.extra)}
+        if missing:  # an added factor the start doesn't set starts at its neutral value
+            params = params.replace(**missing)
         out = []
         for f in self.fields:
             b = self.bounds[f]
-            if self.per_joint:
-                out.extend(_to_unit(v, *b) for v in params.per_joint(f))
+            if f in self.relative:
+                ratio = np.asarray(params.per_joint(f, len(self.joints))) / self._ref(f)
+                out.append(_to_unit(float(np.exp(np.mean(np.log(ratio)))), *RELATIVE_BOUNDS))
+            elif self.per_joint:
+                out.extend(_to_unit(v, *b) for v in params.per_joint(f, len(self.joints)))
             elif params.is_per_joint(f):
                 out.append(float(np.mean([_to_unit(v, *b) for v in params.per_joint(f)])))
             else:
@@ -222,27 +248,128 @@ class SearchSpace:
             raise ValueError(f"expected {self.n_dims} dims, got {x.shape[0]}")
         kwargs: dict[str, Any] = {}
         if self.per_joint:
-            nj = len(JOINTS)
+            nj = len(self.joints)
             for i, f in enumerate(self.fields):
                 b = self.bounds[f]
                 kwargs[f] = tuple(_from_unit(v, *b) for v in x[i * nj : (i + 1) * nj])
         else:
             for i, f in enumerate(self.fields):
-                kwargs[f] = _from_unit(x[i], *self.bounds[f])
+                if f in self.relative:
+                    m = _from_unit(x[i], *RELATIVE_BOUNDS)
+                    lo, hi, _ = self.bounds[f]
+                    kwargs[f] = tuple(float(v) for v in np.clip(self._ref(f) * m, lo, hi))
+                else:
+                    kwargs[f] = _from_unit(x[i], *self.bounds[f])
         return (base or SimParams()).replace(**kwargs)
 
+    def _ref(self, f: str) -> np.ndarray:
+        assert self.reference is not None, "a relative field needs a reference"
+        return np.asarray(self.reference.per_joint(f, len(self.joints)), dtype=np.float64)
+
+    def relative_to(self, start: SimParams) -> SearchSpace:
+        """This shared space with every field whose ``start`` values differ
+        across joints, all inside the bounds, searched relative to ``start``."""
+        if self.per_joint:
+            return self
+        rel = []
+        for f, (lo, hi, scale) in self.bounds.items():
+            if scale == "int" or not start.is_per_joint(f):
+                continue
+            v = np.asarray(start.per_joint(f, len(self.joints)), dtype=np.float64)
+            if np.ptp(v) > 0 and v.min() >= lo and v.max() <= hi:
+                rel.append(f)
+        return dataclasses.replace(self, relative=tuple(rel), reference=start) if rel else self
+
+
+#: Multiplier range of a relative field (see :attr:`SearchSpace.relative`).
+RELATIVE_BOUNDS: tuple[float, float, str] = (0.1, 10.0, "log")
 
 SHARED = SearchSpace(SPACE, per_joint=False)
 PER_JOINT = SearchSpace(PER_JOINT_SPACE, per_joint=True)
 
 
-def spaces(fit_gravity: bool = False, fit_deadband: bool = False) -> tuple[SearchSpace, SearchSpace]:
-    """``(shared, per_joint)`` search spaces with the optional terms added."""
-    shared = {**SPACE, **(GRAVITY_SPACE if fit_gravity else {}), **(DEADBAND_SPACE if fit_deadband else {})}
-    per_joint = {**PER_JOINT_SPACE, **(DEADBAND_SPACE if fit_deadband else {})}
-    if not fit_gravity and not fit_deadband:
+def spaces_for(
+    robot: Any | None = None,
+    fit_factors: Sequence[str] | None = None,
+    per_joint_factors: Sequence[str] | None = None,
+    servo: bool = False,
+) -> tuple[SearchSpace, SearchSpace]:
+    """``(shared, per_joint)`` search spaces for a robot and a factor selection.
+
+    ``robot`` (a :class:`antares.robots.RobotModel`) supplies the joint
+    names and any bound overrides; ``fit_factors`` picks the shared stage's
+    factors (default: those :mod:`antares.factors` fits by default) and
+    ``per_joint_factors`` the per-joint stage's (default: the shared ones
+    that can take one value per joint, plus the per-joint defaults). With
+    nothing given these are :data:`SHARED` and :data:`PER_JOINT`.
+
+    ``servo=True`` (the start selects a servo model) swaps the
+    position-actuator defaults for :data:`SERVO_SPACE` in both stages (the
+    per-joint stage searches the same fields per joint; there is no force
+    limit to fit), with its bounds overriding the registry's.
+    """
+    if robot is None and fit_factors is None and per_joint_factors is None and not servo:
         return SHARED, PER_JOINT
-    return SearchSpace(shared, per_joint=False), SearchSpace(per_joint, per_joint=True)
+    joints = tuple(robot.joints) if robot is not None else JOINTS
+    overrides = {**(SERVO_SPACE if servo else {}), **(dict(robot.bounds) if robot is not None else {})}
+    if fit_factors is not None:
+        shared_names = tuple(fit_factors)
+    else:
+        shared_names = tuple(SERVO_SPACE) if servo else factors.names("shared")
+    if per_joint_factors is None:
+        if servo:
+            per_joint_factors = shared_names
+        else:
+            per_joint_factors = tuple(n for n in shared_names if factors.get(n).per_joint_ok) + tuple(
+                n for n in factors.names("per_joint") if n not in shared_names
+            )
+    shared = SearchSpace(factors.space("shared", factors=shared_names, overrides=overrides), False, joints)
+    per_joint = SearchSpace(
+        factors.space("per_joint", per_joint=True, factors=tuple(per_joint_factors), overrides=overrides), True, joints
+    )
+    return shared, per_joint
+
+
+def optional_factors(
+    fit_factors: Sequence[str] | None = None,
+    per_joint_factors: Sequence[str] | None = None,
+    fit_gravity: bool = False,
+    fit_deadband: bool = False,
+    servo: bool = False,
+) -> tuple[tuple[str, ...] | None, tuple[str, ...] | None]:
+    """Fold the ``fit_gravity`` / ``fit_deadband`` switches into a factor selection.
+
+    ``gravity_scale`` joins the shared stage only (it is one value for the
+    whole arm); ``deadband`` joins both stages. A selection left ``None``
+    stays ``None`` when neither switch is on, so the default spaces (or, with
+    ``servo``, :data:`SERVO_SPACE`) are kept.
+    """
+    add = tuple(n for n, on in (("gravity_scale", fit_gravity), ("deadband", fit_deadband)) if on)
+    if not add:
+        return (None if fit_factors is None else tuple(fit_factors),
+                None if per_joint_factors is None else tuple(per_joint_factors))
+    if fit_factors is not None:
+        shared = tuple(fit_factors)
+    else:
+        shared = tuple(SERVO_SPACE) if servo else factors.names("shared")
+    shared += tuple(n for n in add if n not in shared)
+    per_joint = None if per_joint_factors is None else tuple(per_joint_factors)
+    if per_joint is None and servo and fit_deadband:
+        per_joint = tuple(SERVO_SPACE) + ("deadband",)
+    elif per_joint is not None and fit_deadband and "deadband" not in per_joint:
+        per_joint += ("deadband",)
+    return shared, per_joint
+
+
+def spaces(
+    fit_gravity: bool = False, fit_deadband: bool = False, servo: bool = False
+) -> tuple[SearchSpace, SearchSpace]:
+    """``(shared, per_joint)`` search spaces with the optional terms added.
+
+    ``servo=True`` swaps the position-actuator dimensions for
+    :data:`SERVO_SPACE` in both stages (see :func:`spaces_for`).
+    """
+    return spaces_for(None, *optional_factors(None, None, fit_gravity, fit_deadband, servo), servo=servo)
 
 
 def encode(params: SimParams, space: SearchSpace = SHARED) -> np.ndarray:
@@ -387,6 +514,9 @@ def _stage_to_dict(s: Mapping[str, Any], score: Callable[[Any], Any]) -> dict:
     }
     if s.get("seed") is not None:
         out["seed"] = int(s["seed"])
+    for key in ("factors", "relative"):  # stages fitted since the factor registry
+        if s.get(key):
+            out[key] = [str(n) for n in s[key]]
     return out
 
 
@@ -409,13 +539,15 @@ def param_spread_of(params: Sequence[SimParams]) -> tuple[dict[str, dict[str, fl
     *pinned* when the fits agree on it: ratio at most :data:`PINNED_RATIO`,
     or latency within :data:`PINNED_LATENCY_FRAMES` frames. Other parameters
     moved between fits of equal quality and are not physical measurements.
+    Servo-model fits are compared on :data:`SERVO_SPACE`, the fields they fit.
     """
     params = list(params)
     if len(params) < 2:
         raise ValueError("spread needs at least two fits")
     spread: dict[str, dict[str, float]] = {}
     pinned: list[str] = []
-    for name, (_, _, scale) in SPACE.items():
+    space = SERVO_SPACE if params[0].uses_servo_model else SPACE
+    for name, (_, _, scale) in space.items():
         values = np.concatenate([np.asarray(p.per_joint(name), dtype=np.float64) for p in params])
         lo, hi = float(values.min()), float(values.max())
         if scale == "log":
@@ -516,16 +648,46 @@ def default_simulate(
             real_cache[id(episode)] = hit
         return hit[1], arm.replay(episode)
 
+    return describe_simulate(simulate, arm)
+
+
+def describe_simulate(simulate: Callable[..., Any], arm: Any) -> Callable[..., Any]:
+    """Tag a simulate callable with the robot it runs, so scoring knows the
+    columns and which are grippers, and a fit knows the robot's defaults."""
+    simulate.robot = arm.robot  # type: ignore[attr-defined]
+    simulate.default_params = arm.default_params()  # type: ignore[attr-defined]
     return simulate
+
+
+def robot_of(simulate: Any) -> Any | None:
+    """The :class:`antares.robots.RobotModel` behind ``simulate``: a tagged
+    simulate callable or an :class:`antares.sim.Arm` (their ``robot``), or
+    the model itself when one is passed; None when untagged."""
+    from antares.robots import RobotModel
+
+    if isinstance(simulate, RobotModel):
+        return simulate
+    return getattr(simulate, "robot", None)
+
+
+def scoring_names(simulate: Any) -> dict[str, tuple[str, ...]]:
+    """``joint_names``/``exclude`` keyword arguments for scoring what
+    ``simulate`` (see :func:`robot_of`) replays: the robot's columns and
+    grippers, or the SO arms' six with the gripper unscored when untagged."""
+    r = robot_of(simulate)
+    if r is None:
+        return {"joint_names": tuple(JOINTS), "exclude": ("gripper",)}
+    return {"joint_names": tuple(r.joints), "exclude": tuple(r.grippers)}
 
 
 def score(params: SimParams, episodes: Sequence[Episode], simulate: SimulateFn):
     """Tracking-error report for ``params`` aggregated over ``episodes``."""
     tracking_error, aggregate = _gap_functions()
+    names = scoring_names(simulate)
     reports = []
     for ep in episodes:
         real_q, sim_q = simulate(params, ep)
-        reports.append(tracking_error(real_q, sim_q))
+        reports.append(tracking_error(real_q, sim_q, **names))
     return aggregate(reports)
 
 
@@ -646,6 +808,9 @@ class _Fit:
             opts["popsize"] = int(popsize)
 
         x0 = np.clip(space.encode(start), 1e-3, 1 - 1e-3)
+        n = space.n_dims
+        if n == 1:  # CMA-ES needs two dims; the second is ignored
+            x0 = np.append(x0, 0.5)
         es = cma.CMAEvolutionStrategy(x0, sigma0, opts)
         first_eval = self.evaluations
         cancelled = False
@@ -654,7 +819,7 @@ class _Fit:
             self.generation += 1
             solutions = es.ask()
             budget = max_evaluations - (self.evaluations - first_eval)
-            candidates = [space.decode(x, base=start) for x in solutions[:budget]]
+            candidates = [space.decode(np.asarray(x)[:n], base=start) for x in solutions[:budget]]
 
             values: list[float] = []
             for i, (params, (report, value)) in enumerate(
@@ -678,6 +843,8 @@ class _Fit:
                 "train_score": self.best_score,
                 "params": self.best_params.to_dict(),
                 "seed": int(seed),
+                "factors": list(space.fields),
+                **({"relative": list(space.relative)} if space.relative else {}),
             }
         )
         return not cancelled and not self.stop()
@@ -700,6 +867,8 @@ def calibrate(
     per_joint_popsize: int | None = None,
     n_seeds: int = 1,
     seeds: Sequence[int] | None = None,
+    fit_factors: Sequence[str] | None = None,
+    per_joint_factors: Sequence[str] | None = None,
     fit_gravity: bool = False,
     fit_deadband: bool = False,
 ) -> CalibrationResult:
@@ -716,7 +885,9 @@ def calibrate(
     ``fit_gravity=True`` adds ``gravity_scale`` to the shared stage (see
     :func:`spaces`); the per-joint stage keeps the shared value.
     ``fit_deadband=True`` adds the servo ``deadband``: one value in the
-    shared stage, one per joint in the per-joint stage.
+    shared stage, one per joint in the per-joint stage. A ``start`` that
+    selects a servo model (``SimParams.sts3215()``) searches
+    :data:`SERVO_SPACE` instead of :data:`SPACE` in both stages.
 
     With ``n_seeds > 1`` (or an explicit ``seeds`` list) the shared stage
     runs once per seed (``seed``, ``seed + 100``, ``seed + 200``, ...), each
@@ -738,6 +909,13 @@ def calibrate(
     is polled between evaluations; when it returns True the fit ends early
     (skipping later seeds and any later stage) and the best parameters found
     so far are returned.
+
+    ``fit_factors`` / ``per_joint_factors`` choose which factors of
+    :mod:`antares.factors` each stage searches (the rest keep ``start``'s
+    values); by default the stages search what they always have. When
+    ``simulate`` runs a robot other than the SO arms (see
+    :func:`describe_simulate`), its columns, grippers and bounds shape the
+    spaces and the score, and ``start`` defaults to its own MJCF values.
     """
     t0 = time.perf_counter()
     train = list(train)
@@ -754,8 +932,19 @@ def calibrate(
         seed_list = [seed + 100 * i for i in range(n_seeds)]
     if simulate is None:
         simulate = default_simulate()
+    robot = robot_of(simulate)
+    so_arm = robot is None or robot.default_params == "sts3215"
     if start is None:
-        start = SimParams()
+        start = SimParams() if so_arm else simulate.default_params  # type: ignore[attr-defined]
+    servo = start.uses_servo_model
+    fit_factors, per_joint_factors = optional_factors(fit_factors, per_joint_factors, fit_gravity, fit_deadband, servo)
+    if fit_factors is not None and not fit_factors:
+        raise ValueError("fit_factors is empty: the shared stage has nothing to fit (None keeps the defaults)")
+    if per_joint_factors is not None and not per_joint_factors:
+        raise ValueError("per_joint_factors is empty: the per-joint stage has nothing to fit (None keeps the defaults)")
+    shared_space, per_joint_space = spaces_for(robot, fit_factors, per_joint_factors, servo=servo)
+    if not so_arm:
+        shared_space = shared_space.relative_to(start)
 
     # Evaluation 0: the starting point.
     start_report, start_score = _safe_score(start, train, simulate)
@@ -769,9 +958,7 @@ def calibrate(
         best_score=start_score,
         best_report=start_report,
     )
-    fit.record(start, start_report, start_score, SHARED.name)
-
-    shared, per_joint_space = spaces(fit_gravity, fit_deadband)
+    fit.record(start, start_report, start_score, shared_space.name)
 
     def held_out(params: SimParams, report: Any, value: float) -> tuple[Any, float]:
         """Held-out score; the training score stands in without eval episodes."""
@@ -788,7 +975,7 @@ def calibrate(
             fit.seed_index = i
             if i > 0:
                 fit.reset_best(start, start_report, start_score)
-            finished = fit.run_stage(shared, start, max_evaluations, sigma0, popsize, s)
+            finished = fit.run_stage(shared_space, start, max_evaluations, sigma0, popsize, s)
             candidates.append((fit.best_params, fit.best_report, fit.best_score))
             candidate_eval.append(held_out(fit.best_params, fit.best_report, fit.best_score))
             if not finished:
@@ -843,7 +1030,7 @@ def calibrate(
         elapsed_s=time.perf_counter() - t0,
         train_episodes=[ep.index for ep in train],
         eval_episodes=[ep.index for ep in eval],
-        space=PER_JOINT.name if best_params.has_per_joint else SHARED.name,
+        space=per_joint_space.name if best_params.has_per_joint else shared_space.name,
         stages=fit.stages,
         seeds=seeds_block,
     )
@@ -889,7 +1076,9 @@ __all__ = [
     "SearchSpace",
     "GRAVITY_SPACE",
     "DEADBAND_SPACE",
+    "SERVO_SPACE",
     "spaces",
+    "optional_factors",
     "SHARED",
     "PER_JOINT",
     "SimulateFn",
@@ -900,6 +1089,10 @@ __all__ = [
     "score",
     "calibrate",
     "default_simulate",
+    "describe_simulate",
+    "robot_of",
+    "scoring_names",
+    "spaces_for",
     "param_spread_of",
     "seed_summary",
     "split_episodes",

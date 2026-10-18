@@ -233,8 +233,18 @@ def put_dataset(ds: Dataset, *, source: str | None = None, warnings: list[str] |
 
 
 def dataset_robot(ds: Dataset) -> str:
-    """Registry name of the model that simulates ``ds`` (by its robot_type)."""
-    return model_for_dataset(ds.robot_type)
+    """Registry name of the model that simulates ``ds``: the catalog's (or a
+    ``--robot`` assignment's) pick for it, else its robot_type's family."""
+    from antares.catalog import robot_for_dataset
+
+    return robot_for_dataset(ds.repo_id) or model_for_dataset(ds.robot_type)
+
+
+def _scoring(robot: str | None) -> dict[str, Any]:
+    """``joint_names``/``exclude`` for scoring on ``robot``'s model."""
+    from antares.calibrate import scoring_names
+
+    return scoring_names(get_robot(check_robot(robot)))
 
 
 def dataset_summary(repo_id: str) -> dict:
@@ -248,7 +258,7 @@ def dataset_summary(repo_id: str) -> dict:
         "source": meta.get("source") or dataset_source(repo_id),
         "warnings": list(meta.get("warnings") or []),
         "robot_family": family,
-        "robot": model_for_dataset(ds.robot_type) if ds is not None else model_for_dataset(repo_id),
+        "robot": dataset_robot(ds) if ds is not None else model_for_dataset(repo_id),
     }
     if ds is not None:
         out.update(
@@ -532,10 +542,38 @@ def simulate_for(robot: str | None):
     return default_simulate(robot=name)
 
 
-def default_params():
+def default_params(robot: str | None = None):
+    """STS3215 defaults on the SO arms; other robots start from their own
+    MJCF values when their profile says ``default_params="model"``."""
     from antares.sim import SimParams
 
-    return SimParams.default()
+    if robot is None or get_robot(check_robot(robot)).default_params != "model":
+        return SimParams.default()
+    return get_arm(robot).default_params(from_model=True)
+
+
+def _gripper_column(ds: Dataset) -> int:
+    """Index of the gripper whose command marks grasps (the first gripper
+    on a two-arm rig; the last column if the robot names none)."""
+    r = get_robot(dataset_robot(ds))
+    for name in r.grippers:
+        if name in ds.joint_names:
+            return ds.joint_names.index(name)
+    # Validation holds the columns to the profile's order, so a dataset
+    # whose columns go by an alias (motor_5, ..._joint_6) is read by index.
+    if r.grippers and len(ds.joint_names) == r.n_joints:
+        return r.gripper_indices[0]
+    return -1
+
+
+def start_params(servo: str = "position", robot: str | None = None):
+    """Where a fit starts: the robot's defaults (:func:`default_params`), or
+    BAM's values for the STS3215 servo model."""
+    from antares.sim import SimParams
+
+    if servo not in ("position", "sts3215"):
+        raise HTTPException(status_code=400, detail="servo must be one of position, sts3215")
+    return SimParams.sts3215() if servo == "sts3215" else default_params(robot)
 
 
 def params_from_dict(d: dict):
@@ -585,7 +623,7 @@ def _command_map(arm, cmap, unit_map=None):
     try:
         yield
     finally:
-        arm.command_map = CommandMap.identity()
+        arm.command_map = CommandMap.identity(getattr(arm, "n_joints", None) or 6)
         if unit_map is not None:
             arm.unit_map = prev_unit_map
 
@@ -626,12 +664,11 @@ def replay_episode(
     calibration-derived map (``unit_map_from_lock``).
     """
     from antares.gap import tracking_error
-    from antares.sim import JOINTS
 
     ep = find_episode(ds, episode)
-    if params is None:
-        params = default_params()
     robot = check_robot(robot or dataset_robot(ds))
+    if params is None:
+        params = default_params(robot)
     arm = get_arm(robot)
     with arm_lock(robot), _command_map(arm, command_map, unit_map):
         arm.apply(params)
@@ -640,13 +677,13 @@ def replay_episode(
         real_poses = np.asarray(arm.fk(real_q))
         sim_poses = np.asarray(arm.fk(sim_q))
         body_names = list(arm.body_names)
-    gap = tracking_error(real_q, sim_q, joint_names=JOINTS)
+    gap = tracking_error(real_q, sim_q, **_scoring(robot))
     return {
         "dataset": ds.repo_id,
         "episode": ep.index,
         "fps": ep.fps,
         "robot": robot,
-        "joints": list(JOINTS),
+        "joints": list(get_robot(robot).joints),
         "body_names": body_names,
         "params": params.to_dict(),
         "command_map": None if command_map is None else command_map.to_dict(),
@@ -663,16 +700,16 @@ def score_episodes(params, episodes, command_map=None, robot: str | None = None)
     """Aggregate GapReport of ``params`` (and ``command_map``) over ``episodes``
     using the shared Arm of ``robot``."""
     from antares.gap import aggregate, tracking_error
-    from antares.sim import JOINTS
 
     arm = get_arm(robot)
+    names = _scoring(robot)
     reports = []
     with arm_lock(robot), _command_map(arm, command_map):
         arm.apply(params)
         for ep in episodes:
             real_q = np.asarray(arm.real_q(ep))
             sim_q = np.asarray(arm.replay(ep))
-            reports.append(tracking_error(real_q, sim_q, joint_names=JOINTS))
+            reports.append(tracking_error(real_q, sim_q, **names))
     return aggregate(reports)
 
 
@@ -714,8 +751,8 @@ def get_baseline(ds: Dataset, lock_name: str | None):
     if hit is not None:
         return hit
     lock = load_lock_dict(lock_name) if lock_name else None
-    params = params_from_dict(lock["params"]) if lock else default_params()
-    g = ds.joint_names.index("gripper") if "gripper" in ds.joint_names else -1
+    params = params_from_dict(lock["params"]) if lock else default_params(dataset_robot(ds))
+    g = _gripper_column(ds)
     thr = gripper_thresholds(np.concatenate([ep.action[:, g] for ep in ds.episodes]))
     eps = baseline_episodes(ds, lock)
     cmap = command_map_from_lock(lock) if lock else None
@@ -741,10 +778,11 @@ def _episode_residual(ds: Dataset, ep: Episode, lock_name: str | None, z: float,
         real_q = np.asarray(arm.real_q(ep))
         sim_q = np.asarray(arm.replay(ep))
     res = residuals(real_q, sim_q)
-    events = detect_events(res, bl, z=z, min_frames=min_frames, warmup=WARMUP_FRAMES)
-    g = ds.joint_names.index("gripper")
-    cmd = ep.action[:, g]
-    val = validate_episode(res, events, cmd, thr, episode=ep.index)
+    r = get_robot(robot)
+    scored = r.scored_joints
+    events = detect_events(res, bl, z=z, min_frames=min_frames, warmup=WARMUP_FRAMES, joints=scored)
+    cmd = ep.action[:, _gripper_column(ds)]
+    val = validate_episode(res, events, cmd, thr, episode=ep.index, joints=scored, joint_names=r.joints)
     return bl, thr, params, res, events, cmd, val
 
 
@@ -752,20 +790,20 @@ def residual_episode(
     ds: Dataset, episode: int, lock_name: str | None = None, z: float = 4.0, min_frames: int = 5
 ) -> dict:
     """Residual, robust z, detected events and the gripper proxy label for one episode."""
-    from antares.events import SCORED_JOINTS, gripper_transitions
-    from antares.sim import JOINTS
+    from antares.events import gripper_transitions
 
     ep = find_episode(ds, episode)
     bl, thr, params, res, events, cmd, val = _episode_residual(ds, ep, lock_name, z, min_frames)
     grasps, releases = gripper_transitions(cmd, thr)
+    r = get_robot(dataset_robot(ds))
     return {
         "dataset": ds.repo_id,
         "episode": ep.index,
         "fps": ep.fps,
         "lock": lock_name,
         "params": params.to_dict(),
-        "joints": list(JOINTS),
-        "scored_joints": list(SCORED_JOINTS),
+        "joints": list(r.joints),
+        "scored_joints": list(r.scored_joints),
         "z_threshold": float(z),
         "min_frames": int(min_frames),
         "warmup_frames": WARMUP_FRAMES,
@@ -1290,9 +1328,12 @@ def run_calibration(
     fit_sensor: bool = False,
     sensor_mode: str = "sim",
     n_seeds: int = 1,
+    factors: list[str] | None = None,
+    per_joint_factors: list[str] | None = None,
     calibration_path: str | Path | None = None,
     robot_id: str | None = None,
     robot_type: str = "so101_follower",
+    servo: str = "position",
 ) -> tuple[Any, dict, Path]:
     """Calibrate on ``ds``, save a lock, return (CalibrationResult, lock dict, path).
 
@@ -1309,8 +1350,14 @@ def run_calibration(
     (fit through the sim, alternating) or ``"kinematic"`` (pre-fit from
     still frames, then frozen).
 
+    ``factors``/``per_joint_factors`` choose which registered factors the
+    shared and per-joint stages fit (see :mod:`antares.factors`); ``None``
+    keeps the built-in lists.
     ``fit_gravity`` adds ``gravity_scale`` to the shared stage and
-    ``fit_deadband`` the servo ``deadband`` to both stages.
+    ``fit_deadband`` the servo ``deadband`` to both stages. ``servo``
+    ``"sts3215"`` starts from BAM's STS3215 servo model
+    (:meth:`antares.sim.SimParams.sts3215`) and fits its per-arm terms
+    instead of the position actuator's gains.
     ``calibration_path`` (a LeRobot calibration file) or ``robot_id`` (the
     ``--robot.id`` LeRobot saved it under, with ``robot_type``) replaces the
     model-derived unit map with the follower's own tick-to-angle map for
@@ -1336,6 +1383,7 @@ def run_calibration(
         unit_map = unit_map_from_calibration(calib_d, model)
         cal_prior = command_map_prior(calib_d, model)
         cal_record = calibration_record(calib_d, model, path=cal_path, robot_id=robot_id, robot_type=robot_type)
+    start = start_params(servo, robot)
     train, eval_ = split_episodes(ds.episodes, n_train, n_eval, seed=seed)
     extra: dict[str, Any] = {}
     if per_joint:
@@ -1348,6 +1396,13 @@ def run_calibration(
         extra["fit_deadband"] = True
     if n_seeds > 1:
         extra["n_seeds"] = int(n_seeds)
+    try:
+        if factors is not None:
+            extra["fit_factors"] = _factor_names(factors, "shared")
+        if per_joint_factors is not None:
+            extra["per_joint_factors"] = _factor_names(per_joint_factors, "per_joint")
+    except (KeyError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e).strip("'\"")) from e
     if fit_sensor:
         from antares.sensor import calibrate_with_sensor
 
@@ -1362,7 +1417,7 @@ def run_calibration(
         out = calibrate_with_sensor(
             train,
             eval_,
-            start=default_params(),
+            start=start,
             max_evaluations=max_evaluations,
             seed=seed,
             on_progress=on_progress,
@@ -1388,7 +1443,7 @@ def run_calibration(
     result = calibrate(
         train,
         eval_,
-        start=default_params(),
+        start=start,
         max_evaluations=max_evaluations,
         seed=seed,
         on_progress=on_progress,
@@ -1401,6 +1456,15 @@ def run_calibration(
     return result, lock.to_dict(), path
 
 
+def _factor_names(selection: list[str], stage: str) -> list[str] | None:
+    """Resolve a factor selection (names, or ``+x``/``-y`` edits of the
+    stage's defaults) into the list calibrate takes (``None``: defaults)."""
+    from antares import factors
+
+    if not selection:
+        raise ValueError(f"{stage} factors: an empty list leaves nothing to fit; omit it for the defaults")
+    out = factors.parse_selection(",".join(selection), stage)
+    return None if out is None else list(out)
 def resolve_calibration(
     calibration_path, robot_id: str | None, robot_type: str = "so101_follower", *, strict: bool = True
 ):
@@ -1460,8 +1524,11 @@ def _job_worker(job: Job, req: "CalibrateRequest") -> None:
             fit_sensor=req.fit_sensor,
             sensor_mode=req.sensor_mode,
             n_seeds=req.n_seeds,
+            factors=req.factors,
+            per_joint_factors=req.per_joint_factors,
             fit_gravity=req.fit_gravity,
             fit_deadband=req.fit_deadband,
+            servo=req.servo,
             calibration_path=req.calibration_path,
             robot_id=req.robot_id,
             robot_type=req.robot_type,
@@ -1752,14 +1819,13 @@ def compensate_episode_dict(
     compensated ghost are included so the viewer can overlay it.
     """
     from antares.compensate import compensate_episode, max_joint_velocity
-    from antares.sim import JOINTS
 
     _check_method(method)
     ep = find_episode(ds, episode)
-    if params is None:
-        params = default_params()
-    cmap = command_map_from_lock(load_lock_dict(lock)) if lock else None
     robot = dataset_robot(ds)
+    if params is None:
+        params = default_params(robot)
+    cmap = command_map_from_lock(load_lock_dict(lock)) if lock else None
     arm = get_arm(robot)
     with arm_lock(robot), _command_map(arm, cmap):
         vmax = max_joint_velocity(ds.episodes, arm)
@@ -1771,7 +1837,7 @@ def compensate_episode_dict(
         "episode": ep.index,
         "fps": rep.fps,
         "robot": robot,
-        "joints": list(JOINTS),
+        "joints": list(get_robot(robot).joints),
         "lock": lock,
         "method": method,
         "params": params.to_dict(),
@@ -1923,6 +1989,24 @@ def robots_list() -> list[dict]:
     return [r.to_dict() for r in REGISTRY.values()]
 
 
+@app.get("/api/factors")
+def factors_list() -> dict:
+    """Every registered factor (what it explains, bounds, data it needs,
+    whether the fleet showed it measurable) and the effects not modelled."""
+    from antares import factors
+
+    return factors.describe()
+
+
+@app.get("/api/datasets/catalog")
+def datasets_catalog() -> list[dict]:
+    """Public datasets of robots other than the SO arms, with the model each
+    replays on."""
+    from antares.catalog import entries
+
+    return entries()
+
+
 @app.get("/api/episodes")
 def episodes(dataset: str = Query(...)) -> list[dict]:
     ds = get_dataset(dataset)
@@ -1937,22 +2021,42 @@ def model(robot: str | None = Query(None, description="registry name, default so
     from antares.sim import model_geometry
 
     name = check_robot(robot)
-    out = model_geometry(getattr(get_arm(name), "model", None))
+    r = get_robot(name)
+    arm = get_arm(name)
+    if r.menagerie is None:
+        out = model_geometry(getattr(arm, "model", None))
+    else:
+        from antares.sim import mesh_files
+
+        out = model_geometry(arm.model, mesh_files(arm.model_path))
     out["robot"] = name
     return out
 
 
 _STL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.stl$", re.IGNORECASE)
+_MESH_PATH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*\.(stl|obj)$", re.IGNORECASE)
+_MESH_TYPES = {".stl": "model/stl", ".obj": "model/obj"}
 
 
-@app.get("/api/model/mesh/{file}")
+@app.get("/api/model/mesh/{file:path}")
 def model_mesh(file: str, robot: str | None = Query(None)):
-    if "/" in file or "\\" in file or ".." in file or not _STL_RE.match(file):
-        raise HTTPException(status_code=400, detail="mesh must be a plain *.stl basename")
-    path = mesh_dir(robot) / file
+    """A mesh of the robot's model: a plain ``*.stl`` name in the SO arms'
+    assets, or a path under a fetched model's directory (``*.stl``/``*.obj``)."""
+    fetched = robot is not None and get_robot(check_robot(robot)).menagerie is not None
+    if not fetched:
+        if "/" in file or "\\" in file or ".." in file or not _STL_RE.match(file):
+            raise HTTPException(status_code=400, detail="mesh must be a plain *.stl basename")
+        path = mesh_dir(robot) / file
+    else:
+        if ".." in file.split("/") or "\\" in file or not _MESH_PATH_RE.match(file):
+            raise HTTPException(status_code=400, detail="mesh must be a relative *.stl or *.obj path")
+        root = get_robot(check_robot(robot)).model_path.parent.resolve()
+        path = (root / file).resolve()
+        if not path.is_relative_to(root):
+            raise HTTPException(status_code=400, detail="mesh must stay inside the model directory")
     if not path.is_file():
         raise HTTPException(status_code=404, detail=f"no mesh {file}")
-    return FileResponse(path, media_type="model/stl", filename=file)
+    return FileResponse(path, media_type=_MESH_TYPES[path.suffix.lower()], filename=path.name)
 
 
 @app.get("/api/replay")
@@ -1978,13 +2082,19 @@ def replay(
 class ReplayRequest(BaseModel):
     dataset: str
     episode: int
-    # A value is a scalar or a per-joint list of 6, as SimParams.from_dict accepts.
-    params: dict[str, float | list[float]]
+    # A value is a scalar or a per-joint list of 6, as SimParams.from_dict
+    # accepts; ``servo`` (the actuator model's name, written by a servo-model
+    # fit's to_dict) is a string. Anything else is rejected by params_from_dict.
+    params: dict[str, float | list[float] | str]
     # Optional {"gain": [6], "bias": [6]}, as a lock stores it (extra keys such
     # as its "mode" are ignored); omitted means identity.
     command_map: dict[str, Any] | None = None
     # Sim model override (registry name); default: the dataset's family.
     robot: str | None = None
+    # Factors to fit (names, or "+x"/"-y" edits of the defaults); see
+    # GET /api/factors. None keeps the built-in lists.
+    factors: list[str] | None = None
+    per_joint_factors: list[str] | None = None
 
 
 @app.post("/api/replay")
@@ -2068,8 +2178,14 @@ class CalibrateRequest(BaseModel):
     # deadband (both stages); see run_calibration.
     fit_gravity: bool = False
     fit_deadband: bool = False
+    # Actuator model: the position actuator, or BAM's STS3215 servo model.
+    servo: Literal["position", "sts3215"] = "position"
     # Sim model override (registry name); default: the dataset's family.
     robot: str | None = None
+    # Factors to fit (names, or "+x"/"-y" edits of the defaults); see
+    # GET /api/factors. None keeps the built-in lists.
+    factors: list[str] | None = None
+    per_joint_factors: list[str] | None = None
     # The physical robot's id (LeRobot's --robot.id, e.g. "arm_a"). Two effects:
     # the follower's LeRobot calibration saved under it is used as the unit map
     # when such a file exists, and the saved lock is registered for it in
@@ -2094,6 +2210,13 @@ def calibrate_start(req: CalibrateRequest) -> dict:
         except RegistryError as e:
             raise HTTPException(status_code=400, detail=str(e))
     check_robot(req.robot)
+    try:  # a bad or empty factor selection is a usage error, not a failed job
+        if req.factors is not None:
+            _factor_names(req.factors, "shared")
+        if req.per_joint_factors is not None:
+            _factor_names(req.per_joint_factors, "per_joint")
+    except (KeyError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e).strip("'\""))
     job = start_job("calibrate", req.dataset, _job_worker, req)
     return {"job_id": job.id}
 

@@ -25,7 +25,7 @@ import numpy as np
 
 from antares import __version__
 from antares.calibrate import (
-    DIMS,
+    SERVO_SPACE,
     SPACE,
     CalibrationResult,
     ProgressEvent,
@@ -111,7 +111,9 @@ def bootstrap_fits(
     n_train = min(n_train, len(episodes))
     rng = np.random.default_rng(seed)
     if simulate is None:
-        simulate = default_simulate()
+        from antares.check import lock_robot
+
+        simulate = default_simulate(robot=lock_robot(lock_or_start))
     stop = should_stop or (lambda: False)
 
     fits: list[CalibrationResult] = []
@@ -196,8 +198,20 @@ class ParamRange:
         )
 
 
-def _range_from_values(name: str, nominal: float, values: Sequence[float], percentiles) -> ParamRange:
-    scale = SPACE[name][2]
+def space_of(params: SimParams) -> dict[str, tuple[float, float, str]]:
+    """The shared search space a refit from ``params`` explores, and so the
+    dimensions the randomization covers: :data:`~antares.calibrate.SERVO_SPACE`
+    for a servo-model lock (:func:`~antares.calibrate.calibrate` switches to
+    it when the start selects a servo), else :data:`~antares.calibrate.SPACE`."""
+    return SERVO_SPACE if params.uses_servo_model else SPACE
+
+
+def dims_of(params: SimParams) -> tuple[str, ...]:
+    """Names of the randomized parameters for ``params`` (see :func:`space_of`)."""
+    return tuple(space_of(params))
+
+
+def _range_from_values(name: str, nominal: float, values: Sequence[float], percentiles, scale: str) -> ParamRange:
     vals = np.asarray(values, dtype=np.float64)
     if scale == "int":
         lo, hi = int(vals.min()), int(vals.max())
@@ -245,17 +259,21 @@ class DRRanges(JsonFile):
 
         Log-scale parameters take the ``percentiles`` of the fitted values
         in log space; latency takes the integer min/max. Every range is
-        widened, if needed, to contain the nominal (lock) value.
+        widened, if needed, to contain the nominal (lock) value. The ranges
+        cover the dimensions the fits searched (:func:`dims_of`): the servo
+        gain, rate limit, friction, inertia and latency for a servo-model
+        lock, the position actuator's gains otherwise.
         """
         fits = list(fits)
         if not fits:
             raise ValueError("from_fits needs at least one fit")
         nominal = _as_params(nominal)
+        space = space_of(nominal)
         ranges = {
             dim: _range_from_values(
-                dim, getattr(nominal, dim), [getattr(f.params, dim) for f in fits], percentiles
+                dim, getattr(nominal, dim), [getattr(f.params, dim) for f in fits], percentiles, scale
             )
-            for dim in DIMS
+            for dim, (_, _, scale) in space.items()
         }
         n_train = max(len(f.train_episodes) for f in fits)
         return cls(
@@ -330,9 +348,8 @@ def uniform_ranges(nominal: Any, frac: float = 0.3, name: str | None = None) -> 
         raise ValueError("frac must be in [0, 1)")
     nominal = _as_params(nominal)
     ranges = {}
-    for dim in DIMS:
+    for dim, (_, _, scale) in space_of(nominal).items():
         v = float(getattr(nominal, dim))
-        scale = SPACE[dim][2]
         lo, hi = v * (1 - frac), v * (1 + frac)
         if scale == "int":
             lo, hi = max(0, int(round(lo))), int(round(hi))
@@ -353,9 +370,12 @@ def sample(ranges: DRRanges, rng: np.random.Generator | int | None, n: int) -> l
     ``sample(r, rng_copy, k)``: drawing in a loop or in a batch gives the
     same sequence for the same generator state.
 
-    Only :data:`DIMS` are drawn; every other field (``forcerange``,
-    ``gravity_scale``, ``deadband``) comes from ``ranges.nominal``, so a lock
-    fitted with them keeps them in every draw.
+    Only the parameters ``ranges`` carries are drawn (the dimensions the
+    fits searched, :func:`dims_of`); every other field (``forcerange``,
+    ``gravity_scale``, ``deadband``, the servo's motor constants) comes
+    from ``ranges.nominal``, so a lock fitted with them keeps them in every
+    draw, and a servo-model lock stays a servo-model lock whose ``kp``
+    follows the drawn gain.
     """
     rng = np.random.default_rng(rng)
     if n < 0:
@@ -363,8 +383,7 @@ def sample(ranges: DRRanges, rng: np.random.Generator | int | None, n: int) -> l
     out: list[SimParams] = []
     for _ in range(n):
         kwargs: dict[str, float | int] = {}
-        for dim in DIMS:
-            r = ranges[dim]
+        for dim, r in ranges.ranges.items():
             if r.scale == "int":
                 kwargs[dim] = int(rng.integers(int(r.lo), int(r.hi) + 1))
             else:
@@ -392,7 +411,9 @@ __all__ = [
     "ParamRange",
     "apply",
     "bootstrap_fits",
+    "dims_of",
     "randomize",
     "sample",
+    "space_of",
     "uniform_ranges",
 ]

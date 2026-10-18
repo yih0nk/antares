@@ -30,6 +30,7 @@ from typing import Any
 
 import numpy as np
 
+from antares.calibrate import scoring_names
 from antares.data import Dataset, Episode
 from antares.gap import GapReport, aggregate, tracking_error
 from antares.sim import JOINTS, Arm, SimParams
@@ -63,8 +64,8 @@ def shift_compensate(q_des: np.ndarray, latency_frames: int) -> np.ndarray:
     return q_des[src].copy()
 
 
-def _rms_deg(q_des: np.ndarray, q_sim: np.ndarray) -> float:
-    return float(tracking_error(q_des, q_sim, joint_names=JOINTS).overall_deg)
+def _rms_deg(q_des: np.ndarray, q_sim: np.ndarray, names: dict | None = None) -> float:
+    return float(tracking_error(q_des, q_sim, **(names or scoring_names(None))).overall_deg)
 
 
 def _smooth(x: np.ndarray, window: int) -> np.ndarray:
@@ -121,8 +122,10 @@ def ilc(
     """
     q_des = np.asarray(q_des, dtype=np.float64)
     q0 = np.asarray(q0, dtype=np.float64).reshape(-1)
-    if q_des.ndim != 2 or q_des.shape[1] != len(JOINTS):
-        raise ValueError(f"q_des must be (T,{len(JOINTS)}), got {q_des.shape}")
+    names = scoring_names(arm)
+    n = len(names["joint_names"])
+    if q_des.ndim != 2 or q_des.shape[1] != n:
+        raise ValueError(f"q_des must be (T,{n}), got {q_des.shape}")
     if iters < 0:
         raise ValueError("iters must be >= 0")
     if gain <= 0:
@@ -132,7 +135,7 @@ def ilc(
 
     ctrl = np.clip(shift_compensate(q_des, L), lo, hi)
     q_sim = arm.rollout(ctrl, q0, fps)
-    err = _rms_deg(q_des, q_sim)
+    err = _rms_deg(q_des, q_sim, names)
     history = [err]
     best = (ctrl, q_sim)
     accepted = 0
@@ -142,7 +145,7 @@ def ilc(
         correction = _smooth(correction, smooth)
         ctrl_new = np.clip(ctrl + gain * correction, lo, hi)
         q_new = arm.rollout(ctrl_new, q0, fps)
-        err_new = _rms_deg(q_des, q_new)
+        err_new = _rms_deg(q_des, q_new, names)
         history.append(err_new)
         if not np.isfinite(err_new) or err_new >= err * (1.0 - rel_tol):
             converged = True
@@ -187,7 +190,7 @@ def ilc_compensate(
 
 def max_joint_velocity(episodes: Sequence[Episode], arm: Arm) -> np.ndarray:
     """Fastest measured joint motion per joint, deg/s, over ``episodes``."""
-    vmax = np.zeros(len(JOINTS))
+    vmax = np.zeros(len(scoring_names(arm)["joint_names"]))
     for ep in episodes:
         if len(ep) < 2:
             continue
@@ -209,6 +212,7 @@ def feasibility(
     real_vmax_deg_s: np.ndarray,
     ctrl_range: tuple[np.ndarray, np.ndarray],
     factor: float = VELOCITY_FACTOR,
+    joint_names: Sequence[str] = JOINTS,
 ) -> dict[str, Any]:
     """Can the servo be asked to do this? All inputs in radians except ``real_vmax_deg_s``.
 
@@ -241,7 +245,8 @@ def feasibility(
     v_comp = _cmd_velocity(comp, fps)
     with np.errstate(divide="ignore", invalid="ignore"):
         ratio = np.where(real_vmax > 0, v_comp / real_vmax, np.inf * (v_comp > 0))
-    flagged = [j for j, r in zip(JOINTS, ratio) if r > factor]
+    joint_names = tuple(joint_names)
+    flagged = [j for j, r in zip(joint_names, ratio) if r > factor]
     return {
         "velocity_factor": float(factor),
         "ok": not flagged,
@@ -262,7 +267,7 @@ def feasibility(
                 "velocity_ratio": float(ratio[i]) if np.isfinite(ratio[i]) else None,
                 "flagged": j in flagged,
             }
-            for i, j in enumerate(JOINTS)
+            for i, j in enumerate(joint_names)
         },
     }
 
@@ -351,7 +356,8 @@ def compensate_episode(
     if real_vmax_deg_s is None:
         real_vmax_deg_s = max_joint_velocity([episode], arm)
     ctrl_comp = res.ctrl if method == "ilc" else ctrl_shift
-    feas = feasibility(ctrl_raw, ctrl_comp, fps, real_vmax_deg_s, (lo, hi))
+    names = scoring_names(arm)
+    feas = feasibility(ctrl_raw, ctrl_comp, fps, real_vmax_deg_s, (lo, hi), joint_names=names["joint_names"])
 
     return CompensationReport(
         episode=episode.index,
@@ -365,9 +371,9 @@ def compensate_episode(
         q_sim_raw=q_sim_raw,
         q_sim_shift=q_sim_shift,
         q_sim_ilc=res.q_sim,
-        gap_raw=tracking_error(q_des, q_sim_raw, joint_names=JOINTS),
-        gap_shift=tracking_error(q_des, q_sim_shift, joint_names=JOINTS),
-        gap_ilc=tracking_error(q_des, res.q_sim, joint_names=JOINTS),
+        gap_raw=tracking_error(q_des, q_sim_raw, **names),
+        gap_shift=tracking_error(q_des, q_sim_shift, **names),
+        gap_ilc=tracking_error(q_des, res.q_sim, **names),
         ilc_iterations=res.iterations,
         ilc_history_deg=res.history_deg,
         feasibility=feas,
@@ -423,6 +429,7 @@ def compensate_episodes(
     worst = max(reports, key=lambda r: (len(r.feasibility["flagged_joints"]), r.feasibility["clipped_frames"]))
     per_joint = {k: {j: float(v) for j, v in g.per_joint_deg.items()} for k, g in gaps.items()}
     flagged = sorted({j for r in reports for j in r.feasibility["flagged_joints"]})
+    joints = scoring_names(arm)["joint_names"]
     feas = {
         "velocity_factor": float(VELOCITY_FACTOR),
         "ok": all(r.feasibility["ok"] for r in reports),
@@ -431,12 +438,12 @@ def compensate_episodes(
         "max_range_excess_deg": max(r.feasibility["max_range_excess_deg"] for r in reports),
         "clipped_frames": sum(r.feasibility["clipped_frames"] for r in reports),
         "raw_clipped_frames": sum(r.feasibility["raw_clipped_frames"] for r in reports),
-        "real_vmax_deg_s": {j: float(v) for j, v in zip(JOINTS, real_vmax_deg_s)},
+        "real_vmax_deg_s": {j: float(v) for j, v in zip(joints, real_vmax_deg_s)},
         "comp_cmd_vmax_deg_s": {
-            j: max(r.feasibility["per_joint"][j]["comp_cmd_vmax_deg_s"] for r in reports) for j in JOINTS
+            j: max(r.feasibility["per_joint"][j]["comp_cmd_vmax_deg_s"] for r in reports) for j in joints
         },
         "raw_cmd_vmax_deg_s": {
-            j: max(r.feasibility["per_joint"][j]["raw_cmd_vmax_deg_s"] for r in reports) for j in JOINTS
+            j: max(r.feasibility["per_joint"][j]["raw_cmd_vmax_deg_s"] for r in reports) for j in joints
         },
         "worst_episode": worst.episode,
     }
