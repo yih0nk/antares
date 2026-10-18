@@ -193,3 +193,46 @@ def test_accepts_a_robot_lock_and_serializes():
 def test_needs_two_episodes():
     with pytest.raises(ValueError, match="two episodes"):
         diagnose(make_episodes(TRUE, n=1), lock_of(), simulate=toy_simulate)
+
+
+# -- real MuJoCo arm on synthetic recordings -------------------------------------
+
+
+@pytest.fixture(scope="module")
+def arm_lock():
+    """The committed SO-101 lock and a MuJoCo simulate."""
+    from pathlib import Path
+
+    from antares.calibrate import default_simulate
+    from antares.lock import RobotLock
+
+    path = Path(__file__).resolve().parent.parent / "locks" / "svla_so101_pickplace.lock.json"
+    if not path.is_file():
+        pytest.skip(f"no committed lock at {path}")
+    return RobotLock.load(path), default_simulate()
+
+
+def _recorded(lock, change, seed):
+    from antares import synth
+
+    truth = apply_change(lock.params, change)
+    return synth.synthesize(truth, n_episodes=8, n_frames=150, seed=seed).episodes
+
+
+@pytest.mark.slow
+def test_real_arm_extra_lag_is_named(arm_lock):
+    lock, simulate = arm_lock
+    d = diagnose(_recorded(lock, {"latency_frames": 1}, seed=11), lock, simulate=simulate,
+                 max_evaluations=60)
+    assert d.explained, d.summary()
+    assert d.causes and d.causes[0].name == "latency_frames", d.summary()
+    assert d.causes[0].value == 1
+
+
+@pytest.mark.slow
+def test_real_arm_unchanged_names_nothing(arm_lock):
+    lock, simulate = arm_lock
+    d = diagnose(_recorded(lock, {}, seed=12), lock, simulate=simulate, max_evaluations=40)
+    # only sensor noise is left: the refit barely improves and nothing is named
+    assert d.gap_deg < 0.05, d.summary()
+    assert d.causes == []
