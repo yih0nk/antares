@@ -32,6 +32,12 @@ excess error, the change is not one the sim's dynamics parameters can
 express (sensor calibration, contacts, a different task), and the
 diagnosis says so instead of naming a parameter.
 
+A lock fitted with several seeds also records which parameters the seeds
+agreed on (:func:`antares.lock.pinned_params`). Only those are named as
+causes: a parameter that moves across seeds at equal error cannot be read
+as wear even when a change to it recovers the gap. A lock without seed
+spread is diagnosed as before.
+
 The simulator is injected as a ``simulate(params, episode) -> (real_q,
 sim_q)`` callable like everywhere else, so this module is testable without
 MuJoCo.
@@ -212,6 +218,9 @@ class Diagnosis:
     n_evaluations: int
     elapsed_s: float
     refit_params: Any = field(repr=False, default=None)
+    #: Parameters the lock pins; only these can be named as causes. None for
+    #: a lock without seed spread, which keeps every parameter eligible.
+    pinned: list[str] | None = None
 
     @property
     def gap_deg(self) -> float:
@@ -260,15 +269,25 @@ class Diagnosis:
         )
 
     @property
-    def causes(self) -> list[ParamChange]:
-        """Changes that alone recover a real share of the gap, largest first.
-        Empty unless the drift is :attr:`explained`, so a consumer that reads
-        only the causes agrees with the summary."""
+    def candidate_causes(self) -> list[ParamChange]:
+        """Changes that alone recover a real share of the gap, largest first,
+        pinned or not. Empty unless the drift is :attr:`explained`."""
         if not self.explained:
             return []
         cut = CAUSE_FRACTION * self.gap_deg
         hits = [c for c in self.changes if math.isfinite(c.recovers_deg) and c.recovers_deg >= cut]
         return sorted(hits, key=lambda c: -c.recovers_deg)
+
+    @property
+    def causes(self) -> list[ParamChange]:
+        """:attr:`candidate_causes` the lock pins, so a consumer that reads
+        only the causes agrees with the summary."""
+        return [c for c in self.candidate_causes if self.pinned is None or c.name in self.pinned]
+
+    @property
+    def unpinned_causes(self) -> list[ParamChange]:
+        """Candidate causes withheld because the lock does not pin them."""
+        return [c for c in self.candidate_causes if self.pinned is not None and c.name not in self.pinned]
 
     def summary(self) -> str:
         recovered = (
@@ -293,12 +312,19 @@ class Diagnosis:
                 f"(look at sensor calibration, contacts, or the task itself)"
             )
         causes = self.causes
+        unpinned = self.unpinned_causes
+        note = ""
+        if unpinned:
+            names = "/".join(c.name for c in unpinned)
+            note = f"; {names} would explain it but move across seeds at equal error, so not read as wear"
         if not causes:
+            if unpinned:
+                return f"{head}; no pinned parameter explains it alone{note}"
             return f"{head}; several parameters changed together, none explains it alone"
         named = ", ".join(
             f"{c.name} {c.change} (alone recovers {c.recovers_deg:.2f} deg)" for c in causes
         )
-        return f"{head}; likely cause: {named}"
+        return f"{head}; likely cause: {named}{note}"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -313,6 +339,8 @@ class Diagnosis:
             "explained": bool(self.explained),
             "unchanged": bool(self.unchanged),
             "causes": [c.name for c in self.causes],
+            "pinned": None if self.pinned is None else [str(p) for p in self.pinned],
+            "unpinned_causes": [c.name for c in self.unpinned_causes],
             "changes": [c.to_dict() for c in self.changes],
             "per_joint_stale": {k: _json_float(v) for k, v in self.per_joint_stale.items()},
             "per_joint_refit": {k: _json_float(v) for k, v in self.per_joint_refit.items()},
@@ -369,11 +397,15 @@ def diagnose(
     import cma
 
     from antares.check import _lock_view
+    from antares.lock import pinned_params, seed_info
 
     if max_evaluations < MIN_EVALUATIONS:
         raise ValueError(f"max_evaluations must be >= {MIN_EVALUATIONS}, got {max_evaluations}")
     t0 = time.perf_counter()
     name, lock_dataset, params, reference, _ = _lock_view(lock)
+    # Only a lock with seed spread knows which parameters it pins; without
+    # it every parameter stays eligible, as before.
+    pinned = pinned_params(lock) if seed_info(lock) is not None else None
     refit_eps, held_out = split_alternating(episodes)
     if not refit_eps or not held_out:
         raise ValueError("diagnose needs at least two episodes")
@@ -505,6 +537,7 @@ def diagnose(
         n_evaluations=evaluations,
         elapsed_s=time.perf_counter() - t0,
         refit_params=refit_params,
+        pinned=pinned,
     )
 
 

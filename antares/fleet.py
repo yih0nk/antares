@@ -29,17 +29,9 @@ from typing import Any
 import numpy as np
 
 from antares import __version__
-from antares.data import Dataset, Episode, canonical_joint_name
+from antares.data import Dataset, Episode
 from antares.lock import LOCK_DIR, LOCK_SUFFIX, slug
-
-JOINTS = (
-    "shoulder_pan",
-    "shoulder_lift",
-    "elbow_flex",
-    "wrist_flex",
-    "wrist_roll",
-    "gripper",
-)
+from antares.validate import ALLOWED_FPS, JOINTS, merged_name_match, sim_name_match, validate_dataset_info
 
 FLEET_LOCK_DIR: Path = LOCK_DIR / "fleet"
 FLEET_REPORT_NAME = "fleet.json"
@@ -51,21 +43,10 @@ TAG_FILTERS: tuple[str, ...] = ("so100", "so101")
 #: Always inspected first and exempt from the one-dataset-per-owner rule.
 PINNED: tuple[str, ...] = ("lerobot/svla_so101_pickplace", "lerobot/svla_so100_pickplace")
 
+#: The fleet wants a proper held-out split, so it asks for more episodes than an upload.
 MIN_EPISODES = 15
-ALLOWED_FPS: tuple[float, ...] = (30.0, 50.0)
 MAX_DATA_BYTES = 200 * 2**20  # tabular part only; videos are never downloaded
 MAX_DATA_FILES = 200  # v2 datasets store one parquet per episode; thousands of tiny downloads are too slow
-
-# ``so100``/``so101`` in any spelling, plus LeRobot's newer unified
-# ``so_follower`` name for the same arm.
-_ROBOT_RE = re.compile(r"so[-_ ]?(?:arm)?[-_ ]?10[01]|^so[-_]?follower$")
-# Datasets recorded in a simulator are not physical robots, and merges of
-# several people's recordings are not one robot.
-_SIM_RE = re.compile(
-    r"(?:^|[^a-z])(?:synthetic|synth|pybullet|isaac(?:sim|lab)?|mujoco|genesis|maniskill|gazebo)(?:[^a-z]|$)"
-    r"|sim(?:[^a-z]|$)"
-)
-_MERGED_RE = re.compile(r"(?:^|[^a-z])(?:merged?|combined|community|aggregated|converted)(?:[^a-z]|$)")
 
 
 # --------------------------------------------------------------------------
@@ -106,20 +87,6 @@ def accepted(candidates: Iterable[Candidate]) -> list[Candidate]:
     return [c for c in candidates if c.accepted]
 
 
-def _names(feature: Any) -> list[str] | None:
-    """``features[x]["names"]`` as a flat list; v2 datasets nest it under a key."""
-    if not isinstance(feature, dict):
-        return None
-    names = feature.get("names")
-    if isinstance(names, dict):
-        if len(names) != 1:
-            return None
-        names = next(iter(names.values()))
-    if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
-        return None
-    return names
-
-
 def check_info(
     repo_id: str,
     info: dict[str, Any],
@@ -129,15 +96,20 @@ def check_info(
 ) -> Candidate:
     """Decide from ``meta/info.json`` whether a dataset can join the fleet.
 
-    ``data_bytes``/``data_files`` are the total size and count of the
-    ``data/**/*.parquet`` files when known; ``None`` skips those checks (the
-    caller fills them in afterwards).
+    The dataset checks are :func:`antares.validate.validate_dataset_info`
+    with the fleet's stricter episode minimum; on top of that the fleet
+    rejects what the validator only warns about (a name that looks like a
+    simulator or a merge, a missing codebase version), because an unattended
+    scan cannot ask. ``data_bytes``/``data_files`` are the total size and
+    count of the ``data/**/*.parquet`` files when known; ``None`` skips
+    those checks (the caller fills them in afterwards).
     """
-    robot_type = str(info.get("robot_type") or "")
-    fps = float(info.get("fps") or 0)
-    n_episodes = int(info.get("total_episodes") or 0)
-    n_frames = int(info.get("total_frames") or 0)
-    version = str(info.get("codebase_version") or "")
+    verdict = validate_dataset_info(info, repo_id, min_episodes=MIN_EPISODES, recommended_episodes=MIN_EPISODES)
+    robot_type = verdict.robot_type
+    fps = verdict.fps
+    n_episodes = verdict.n_episodes
+    n_frames = verdict.n_frames
+    version = verdict.codebase_version
 
     def reject(reason: str) -> Candidate:
         return Candidate(
@@ -154,30 +126,16 @@ def check_info(
             codebase_version=version,
         )
 
-    sim = _SIM_RE.search(repo_id.lower())
+    sim = sim_name_match(repo_id)
     if sim:
-        return reject(f"looks like a simulation dataset (name contains {sim.group(0).strip('-_ /.')!r})")
-    merged = _MERGED_RE.search(repo_id.lower())
+        return reject(f"looks like a simulation dataset (name contains {sim!r})")
+    merged = merged_name_match(repo_id)
     if merged:
-        return reject(f"looks like a merge of several datasets (name contains {merged.group(0).strip('-_ /.')!r})")
-    if not re.match(r"v[23]\.", version):
-        return reject(f"codebase_version {version or 'missing'} (need the v2/v3 parquet layout)")
-    if not _ROBOT_RE.search(robot_type.lower()):
-        return reject(f"robot_type {robot_type or 'missing'!r} is not an SO-100/101")
-    features = info.get("features") or {}
-    for key in ("action", "observation.state"):
-        names = _names(features.get(key))
-        if names is None:
-            return reject(f"{key} has no joint names")
-        if len(names) != 6:
-            return reject(f"{key} has {len(names)} joints, not 6")
-        canonical = tuple(canonical_joint_name(n) for n in names)
-        if canonical != JOINTS:
-            return reject(f"{key} joints {list(canonical)} are not the SO-101 joints")
-    if fps not in ALLOWED_FPS:
-        return reject(f"fps {fps:g} not in {sorted(int(f) for f in ALLOWED_FPS)}")
-    if n_episodes < MIN_EPISODES:
-        return reject(f"{n_episodes} episodes < {MIN_EPISODES}")
+        return reject(f"looks like a merge of several datasets (name contains {merged!r})")
+    if not version:
+        return reject("codebase_version missing (need the v2/v3 parquet layout)")
+    if not verdict.ok:
+        return reject(verdict.reasons[0])
     if data_bytes is not None:
         if data_bytes <= 0:
             return reject("no data/*.parquet files")
@@ -361,6 +319,9 @@ class RobotEntry:
     frames_per_episode: float = 0.0
     data_bytes: int = 0
     downloads: int = 0
+    #: Parameters the lock pins (``result.seeds.pinned`` of a best-of-N fit);
+    #: None for a single-seed lock, which pins only latency by default.
+    pinned: list[str] | None = None
 
     @property
     def latency_ms(self) -> float:
@@ -368,6 +329,8 @@ class RobotEntry:
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
+        if self.pinned is None:
+            del d["pinned"]  # the committed report predates seed spread
         for k in ("baseline_eval", "calibrated_eval", "improvement"):
             d[k] = _json_float(d[k])
         d["per_joint_before"] = {k: _json_float(v) for k, v in self.per_joint_before.items()}
@@ -383,6 +346,8 @@ class RobotEntry:
             kw[k] = _parse_float(kw.get(k))
         kw["per_joint_before"] = {k: _parse_float(v) for k, v in (kw.get("per_joint_before") or {}).items()}
         kw["per_joint_after"] = {k: _parse_float(v) for k, v in (kw.get("per_joint_after") or {}).items()}
+        if kw.get("pinned") is not None:
+            kw["pinned"] = [str(p) for p in kw["pinned"]]
         return cls(**kw)
 
 
@@ -548,7 +513,7 @@ def scan(
     partial cross matrix over up to ``cross_n`` robots (0 disables it).
     """
     from antares.calibrate import calibrate, split_episodes
-    from antares.lock import RobotLock
+    from antares.lock import RobotLock, pinned_params, seed_info
     from antares.sim import SimParams
 
     if load is None:
@@ -635,6 +600,7 @@ def scan(
                 frames_per_episode=float(np.mean([len(e) for e in episodes])) if episodes else 0.0,
                 data_bytes=cand.data_bytes,
                 downloads=cand.downloads,
+                pinned=pinned_params(result) if seed_info(result) is not None else None,
             )
             report.robots.append(entry)
             emit({"type": "robot", "dataset": cand.repo_id, "entry": entry.to_dict()})
@@ -713,12 +679,44 @@ def robust_z(values: np.ndarray) -> np.ndarray:
     return (x - med) / scale
 
 
-def fleet_stats(robots: Sequence[RobotEntry], params: Sequence[str] = STAT_PARAMS) -> dict[str, dict[str, Any]]:
+def pinned_across(pinned_lists: Iterable[Sequence[str] | None]) -> list[str]:
+    """Parameters pinned by every lock: the intersection of each robot's
+    ``pinned`` list, a robot without seed spread counting as
+    :data:`antares.lock.DEFAULT_PINNED` (latency only). Only these can be
+    compared across robots as measurements; the rest differ between fits of
+    one arm as much as between arms."""
+    from antares.lock import DEFAULT_PINNED
+
+    keep: set[str] | None = None
+    for pinned in pinned_lists:
+        this = set(DEFAULT_PINNED if pinned is None else pinned)
+        keep = this if keep is None else keep & this
+    if keep is None:
+        keep = set(DEFAULT_PINNED)
+    order = LOG_PARAMS + ("latency_frames",)
+    return [p for p in order if p in keep] + sorted(keep - set(order))
+
+
+def _pinned_filter(robots: Sequence[RobotEntry], params: Sequence[str]) -> list[str]:
+    """``params`` restricted to scores and parameters pinned across ``robots``."""
+    keep = set(pinned_across(r.pinned for r in robots))
+    if "latency_frames" in keep:
+        keep.add("latency_ms")
+    return [p for p in params if p in SCORE_FIELDS or p in keep]
+
+
+def fleet_stats(
+    robots: Sequence[RobotEntry], params: Sequence[str] = STAT_PARAMS, *, pinned_only: bool = False
+) -> dict[str, dict[str, Any]]:
     """Per-parameter median, quartiles, IQR and a robust z-score per robot.
 
     Log-scale parameters are analysed in log10 (so ``z`` is in decades of
-    MAD) but the quantiles are reported in natural units.
+    MAD) but the quantiles are reported in natural units. With
+    ``pinned_only`` the parameters are limited to those every lock pins
+    (:func:`pinned_across`); scores are always kept.
     """
+    if pinned_only:
+        params = _pinned_filter(robots, params)
     stats: dict[str, dict[str, Any]] = {}
     for param in params:
         pairs = _param_values(robots, param)
@@ -748,9 +746,14 @@ def find_outliers(
     stats: dict[str, dict[str, Any]],
     threshold: float = OUTLIER_Z,
     params: Sequence[str] = LOG_PARAMS + ("latency_frames",) + SCORE_FIELDS,
+    *,
+    pinned_only: bool = False,
 ) -> list[dict[str, Any]]:
     """Robots whose fitted value (or score) sits more than ``threshold``
-    robust sigmas from the fleet median, most extreme first."""
+    robust sigmas from the fleet median, most extreme first. ``pinned_only``
+    skips parameters not pinned across the fleet (see :func:`fleet_stats`)."""
+    if pinned_only:
+        params = _pinned_filter(robots, params)
     by_name = {r.dataset: r for r in robots}
     out = []
     for param in params:
@@ -957,6 +960,7 @@ __all__ = [
     "STAT_PARAMS",
     "OUTLIER_Z",
     "robust_z",
+    "pinned_across",
     "fleet_stats",
     "find_outliers",
     "pick_cross_robots",

@@ -17,10 +17,14 @@ dependencies = [
     "cma>=3.3",
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
+    "python-multipart>=0.0.9",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "httpx>=0.27"]
+# Camera fitting from the dataset videos: AV1 decoding (PyAV ships dav1d),
+# polygon rasterization and morphology (OpenCV), convex hulls (SciPy).
+video = ["av>=12", "opencv-python-headless>=4.9", "scipy>=1.11"]
 
 [project.scripts]
 antares = "antares.cli:main"

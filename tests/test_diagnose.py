@@ -264,6 +264,42 @@ def test_latency_shifts_the_lock_clamps_alike_are_scanned_once():
     assert set(scanned[:10]) == {0, 2, 4, 6, 8} or sorted(set(scanned[:10])) == [0, 1, 2, 3, 4]
 
 
+def test_causes_are_gated_on_the_lock_pinned_parameters():
+    eps = make_episodes(TRUE.replace(latency_frames=3), seed=1)
+    plain = diagnose(eps, lock_of(), simulate=toy_simulate, max_evaluations=80)
+    assert plain.pinned is None and plain.causes and plain.causes[0].name == "latency_frames"
+    assert plain.unpinned_causes == [] and plain.to_dict()["pinned"] is None
+
+    def seeded(pinned):
+        return {**lock_of(), "result": {"eval_score": 0.0, "seeds": {"n": 3, "pinned": list(pinned)}}}
+
+    # the lock pins latency: the same diagnosis names it
+    d = diagnose(eps, seeded(["latency_frames"]), simulate=toy_simulate, max_evaluations=80)
+    assert d.pinned == ["latency_frames"] and d.explained
+    assert [c.name for c in d.causes] == [c.name for c in plain.causes if c.name == "latency_frames"]
+    assert "likely cause: latency_frames +2 frames" in d.summary()
+    assert d.to_dict()["causes"] == ["latency_frames"] and d.to_dict()["pinned"] == ["latency_frames"]
+
+    # the lock pins nothing of use: the change is found but no cause is named
+    d = diagnose(eps, seeded(["kp"]), simulate=toy_simulate, max_evaluations=80)
+    assert d.explained and d.candidate_causes and d.causes == []
+    assert [c.name for c in d.unpinned_causes] == [c.name for c in d.candidate_causes]
+    assert "no pinned parameter explains it alone" in d.summary()
+    assert "latency_frames would explain it but move across seeds at equal error" in d.summary()
+    out = json.loads(json.dumps(d.to_dict()))
+    assert out["causes"] == [] and out["unpinned_causes"] == [c.name for c in d.candidate_causes]
+    assert out["pinned"] == ["kp"] and out["explained"] is True
+
+
+def test_weaker_gain_with_only_latency_pinned_names_nothing():
+    eps = make_episodes(TRUE.replace(kp=TRUE.kp * 0.5), seed=2)
+    lock = {**lock_of(), "result": {"eval_score": 0.0, "seeds": {"n": 3, "pinned": ["latency_frames"]}}}
+    d = diagnose(eps, lock, simulate=toy_simulate, max_evaluations=120)
+    assert d.explained and d.candidate_causes
+    assert all(c.name in ("kp", "kv", "damping") for c in d.candidate_causes)
+    assert d.causes == [] and "not read as wear" in d.summary()
+
+
 def test_accepts_a_robot_lock_and_serializes():
     from antares.lock import RobotLock
 
