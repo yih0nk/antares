@@ -1425,11 +1425,17 @@ class CheckRequest(BaseModel):
     ratio: float = Field(1.5, gt=0)
     last: int | None = Field(None, ge=1)
     min_episodes: int = Field(5, ge=1)
+    explain: bool = False
+    explain_evaluations: int = Field(120, ge=10, le=2000)
 
 
 @app.post("/api/check")
 def check_drift(req: CheckRequest) -> dict:
-    """Has the robot drifted from its lock? Always 200; read ``verdict``."""
+    """Has the robot drifted from its lock? Always 200; read ``verdict``.
+
+    With ``explain`` a drifted result also carries ``diagnosis``: the
+    parameter changes a refit found and which of them explain the drift.
+    """
     _lock_path(req.lock)  # validate the name before loading a dataset
     ds = get_dataset(req.dataset)
     result = run_check(
@@ -1440,7 +1446,12 @@ def check_drift(req: CheckRequest) -> dict:
         last=req.last,
         min_episodes=req.min_episodes,
     )
-    return result.to_dict()
+    out = result.to_dict()
+    if req.explain and result.verdict == "drifted":
+        out["diagnosis"] = run_diagnose(
+            ds, req.lock, last=req.last, max_evaluations=req.explain_evaluations
+        ).to_dict()
+    return out
 
 
 # Built frontend, mounted after the API routes so `antares serve` alone demos.

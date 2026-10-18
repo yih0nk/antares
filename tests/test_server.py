@@ -1122,6 +1122,24 @@ def test_check_detects_drift_and_threshold_overrides(client, fakes):
     assert tight["passed"] is False and tight["limit"] == pytest.approx(0.12)
 
 
+def test_check_explain_adds_a_diagnosis_only_on_drift(client, fakes):
+    write_lock(fakes, "unit-a", kp=50.0)
+    ok = client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a", "explain": True}).json()
+    assert ok["verdict"] == "ok" and "diagnosis" not in ok
+    r = client.post("/api/check", json={"dataset": FAKE_DS2, "lock": "unit-a", "explain": True,
+                                        "explain_evaluations": 20})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["verdict"] == "drifted"
+    d = out["diagnosis"]
+    assert d["lock"] == "unit-a" and d["dataset"] == FAKE_DS2
+    assert set(d) >= {"stale_deg", "refit_deg", "causes", "changes", "explained", "summary"}
+    assert d["refit_episodes"] and d["held_out_episodes"]
+    json.dumps(out)
+    assert client.post("/api/check", json={"dataset": FAKE_DS2, "lock": "unit-a", "explain": True,
+                                           "explain_evaluations": 1}).status_code == 422
+
+
 def test_check_last_and_insufficient_data(client, fakes):
     write_lock(fakes, "unit-a", kp=50.0)
     out = client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a", "last": 2}).json()
