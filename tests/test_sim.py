@@ -10,6 +10,7 @@ from antares.sim import (
     JOINTS,
     MESH_DIR,
     MODEL_PATH,
+    SERVO_FIELDS,
     Arm,
     SimParams,
     UnitMap,
@@ -747,6 +748,34 @@ def test_sts3215_dict_round_trip_and_position_locks_unchanged():
         SimParams.sts3215(kt=0.0)
     with pytest.raises(ValueError):
         p.per_joint("servo")
+
+
+def test_sts3215_kp_kv_forcerange_are_the_pd_equivalent():
+    # A servo-model SimParams carries its linearized stiffness in the
+    # position-actuator fields, so a consumer that ignores ``servo`` (an older
+    # antares reading the lock, the fleet table, sag) sees a ~9 N*m/rad servo,
+    # not the stock 998 one. Any value passed for them is replaced.
+    p = SimParams.sts3215()
+    assert p.kp == pytest.approx(9.384, abs=0.01)
+    assert p.kv == pytest.approx(p.kt**2 / p.resistance)
+    assert p.forcerange == pytest.approx(p.kt / p.resistance * p.vin * 0.97)
+    assert SimParams.sts3215(kp=998.22, kv=2.731, forcerange=2.94) == p
+    # a lock written with the stock values next to the servo model loads as the equivalent
+    stock = {**p.to_dict(), "kp": 998.22, "kv": 2.731, "forcerange": 2.94}
+    assert SimParams.from_dict(stock) == p
+    # the dict carries the equivalent, so dropping the servo keys degrades to it
+    d = p.to_dict()
+    assert d["kp"] == pytest.approx(p.kp) and d["forcerange"] == pytest.approx(p.forcerange)
+    unaware = SimParams.from_dict({k: v for k, v in d.items() if k != "servo" and k not in SERVO_FIELDS})
+    assert not unaware.uses_servo_model and unaware.kp == pytest.approx(p.kp)
+    # the gain moves kp with it, per joint when the gain is
+    doubled = p.replace(servo_gain=2 * p.servo_gain)
+    assert doubled.kp == pytest.approx(2 * p.kp) and doubled.forcerange == p.forcerange
+    pj = p.replace(servo_gain=(1.0, 1.0, 2.0, 1.0, 1.0, 1.0))
+    assert pj.is_per_joint("kp") and not pj.is_per_joint("kv") and not pj.is_per_joint("forcerange")
+    assert pj.per_joint("kp")[2] == pytest.approx(2 * pj.per_joint("kp")[0])
+    lin = p.linearized()
+    assert lin.servo == "position" and (lin.kp, lin.kv, lin.forcerange) == (p.kp, p.kv, p.forcerange)
 
 
 def test_sts3215_slow_motion_matches_its_pd_equivalent(arm):

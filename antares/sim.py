@@ -99,6 +99,12 @@ class SimParams:
     broadcasts either form to a ``(6,)`` array when writing into the model.
     """
 
+    #: Position-actuator gain, velocity gain and symmetric force limit (N*m).
+    #: With a servo model (:attr:`servo` not ``position``) these three are
+    #: *derived*: they always hold the model's PD equivalent (see
+    #: :meth:`linearized`), and any value passed for them is replaced, so a
+    #: consumer that does not know the servo model (an older antares, the
+    #: fleet table, :mod:`antares.sag`) still reads the right stiffness.
     kp: ParamValue = 998.22
     kv: ParamValue = 2.731
     damping: ParamValue = 0.6
@@ -127,9 +133,10 @@ class SimParams:
     #: ``clip(error * p_coefficient * STS3215_ERROR_GAIN * servo_gain, +-STS3215_MAX_PWM)``,
     #: and the motor pushes ``kt / resistance * (vin * duty - kt * qvel)``
     #: (back-EMF makes it weaker the faster it turns). ``kp``, ``kv`` and
-    #: ``forcerange`` are then unused; ``damping``, ``armature`` and
-    #: ``frictionloss`` stay the joint's viscous friction, rotor inertia and
-    #: Coulomb friction, which is BAM's M1 friction model.
+    #: ``forcerange`` are then derived from the motor constants (the PD
+    #: equivalent, :meth:`linearized`) rather than fitted; ``damping``,
+    #: ``armature`` and ``frictionloss`` stay the joint's viscous friction,
+    #: rotor inertia and Coulomb friction, which is BAM's M1 friction model.
     servo: str = "position"
     #: Multiplies the firmware's position-to-duty gain (BAM's
     #: ``error_gain_ratio``; 1.005 on BAM's bench). What the data has to pin
@@ -166,6 +173,9 @@ class SimParams:
                 raise ValueError(f"{n} must be > 0")
         if np.any(self.per_joint("servo_gain") < 0) or np.any(self.per_joint("p_coefficient") < 0):
             raise ValueError("servo_gain and p_coefficient must be >= 0")
+        if self.uses_servo_model:
+            for name, value in self._pd_equivalent().items():
+                object.__setattr__(self, name, value)
 
     @classmethod
     def default(cls) -> SimParams:
@@ -197,32 +207,44 @@ class SimParams:
     def uses_servo_model(self) -> bool:
         return self.servo != "position"
 
-    def linearized(self) -> SimParams:
-        """Position-actuator equivalent of the servo model (``self`` if there is none).
+    def _pd_equivalent(self) -> dict[str, ParamValue]:
+        """``kp``, ``kv`` and ``forcerange`` of the servo model's linear part.
 
         Away from saturation and the rate limit the STS3215 model is a PD
         servo: ``kp = kt / resistance * vin * p_coefficient * STS3215_ERROR_GAIN
         * servo_gain`` and ``kv = kt**2 / resistance`` (back-EMF), with a stall
         torque of ``kt / resistance * vin * STS3215_MAX_PWM`` as ``forcerange``.
-        This is what an MJCF can carry; the rate limit and the duty-cycle
-        (rather than torque) saturation are lost.
+        Each is per joint exactly when a servo field it depends on is.
         """
-        if not self.uses_servo_model:
-            return self
         kt, r, vin = self.per_joint("kt"), self.per_joint("resistance"), self.per_joint("vin")
         kp = kt / r * vin * self.per_joint("p_coefficient") * STS3215_ERROR_GAIN * self.per_joint("servo_gain")
         kv = kt**2 / r
         fr = kt / r * vin * STS3215_MAX_PWM
 
-        def pack(a: np.ndarray) -> ParamValue:
-            return float(a[0]) if np.all(a == a[0]) else tuple(float(v) for v in a)
+        def pack(a: np.ndarray, *deps: str) -> ParamValue:
+            if any(self.is_per_joint(d) for d in deps):
+                return tuple(float(v) for v in a)
+            return float(a[0])
 
+        return {
+            "kp": pack(kp, "kt", "resistance", "vin", "p_coefficient", "servo_gain"),
+            "kv": pack(kv, "kt", "resistance"),
+            "forcerange": pack(fr, "kt", "resistance", "vin"),
+        }
+
+    def linearized(self) -> SimParams:
+        """Position-actuator equivalent of the servo model (``self`` if there is none).
+
+        A servo-model ``SimParams`` already carries its PD equivalent in
+        ``kp``, ``kv`` and ``forcerange`` (:meth:`_pd_equivalent`); this
+        drops the servo model and its fields so the result replays as that
+        position actuator. This is what an MJCF can carry; the rate limit
+        and the duty-cycle (rather than torque) saturation are lost.
+        """
+        if not self.uses_servo_model:
+            return self
         return self.replace(
-            servo="position",
-            kp=pack(kp),
-            kv=pack(kv),
-            forcerange=pack(fr),
-            **{n: SimParams.__dataclass_fields__[n].default for n in SERVO_FIELDS},
+            servo="position", **{n: SimParams.__dataclass_fields__[n].default for n in SERVO_FIELDS}
         )
 
     @classmethod
@@ -287,7 +309,9 @@ class SimParams:
         :meth:`broadcast` round-trips through :meth:`from_dict`. ``servo`` and
         the servo-model fields (:data:`SERVO_FIELDS`) are written only when a
         servo model is selected (or, like the others, in per-joint form), so
-        position-actuator locks are unchanged.
+        position-actuator locks are unchanged. A servo-model dict also carries
+        the derived ``kp``/``kv``/``forcerange``, so a reader that drops the
+        unknown servo keys gets the PD equivalent, not the stock actuator.
         """
         out: dict[str, Any] = {}
         for n in self.field_names():

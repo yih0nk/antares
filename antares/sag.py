@@ -149,7 +149,9 @@ def sag_report(arm: Arm, episodes: Sequence[Episode]) -> SagReport:
         vel.append(np.gradient(real, 1.0 / ep.fps, axis=0) if len(real) > 1 else np.zeros_like(real))
     res_a, tau_a, vel_a = (np.concatenate(x) for x in (res, tau, vel))
     n = res_a.shape[0]
-    kp = arm.params.per_joint("kp")
+    # A servo lock's stiffness is its linearized gain (kt/R * vin * P * gain),
+    # not the position actuator's stock kp, which the servo model never uses.
+    kp = arm.params.linearized().per_joint("kp")
     scale = float(arm.params.per_joint("gravity_scale")[0])
 
     joints: dict[str, JointSag] = {}

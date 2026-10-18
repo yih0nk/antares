@@ -706,7 +706,9 @@ def test_calibrate_from_a_servo_start_fits_the_servo_terms():
     res = calibrate(eps[:1], eps[1:], simulate=sim, start=start, max_evaluations=60, popsize=6)
     assert res.params.servo == "sts3215"
     assert res.params.servo_gain == pytest.approx(1.6, rel=0.1)
-    assert res.params.kp == start.kp and res.params.forcerange == start.forcerange
+    # kp is not searched: it is the PD equivalent derived from the fitted gain
+    assert res.params.kp == pytest.approx(start.kp * res.params.servo_gain / start.servo_gain)
+    assert res.params.forcerange == start.forcerange
     d = res.to_dict()["params"]
     assert d["servo"] == "sts3215" and "servo_gain" in d
 
