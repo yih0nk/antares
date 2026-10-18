@@ -2099,3 +2099,31 @@ def test_dashboard_rows_carry_registry_fields(client, monkeypatch, tmp_path):
     r = client.get("/api/dashboard")
     assert r.status_code == 200 and all(x["robot_id"] is None for x in r.json()["robots"])
     assert client.get("/api/registry").status_code == 500
+
+
+def test_calibrate_request_forwards_servo(client, fakes, monkeypatch):
+    seen = {}
+
+    def spy(ds, **kw):
+        seen.update(kw)
+        raise HTTPException(status_code=400, detail="stop here")
+
+    monkeypatch.setattr(server, "run_calibration", spy)
+    for body, want in (({"dataset": FAKE_DS}, "position"), ({"dataset": FAKE_DS, "servo": "sts3215"}, "sts3215")):
+        seen.clear()
+        job = client.post("/api/calibrate", json=body).json()["job_id"]
+        for _ in range(100):
+            if client.get(f"/api/calibrate/{job}").json()["status"] != "running":
+                break
+            time.sleep(0.01)
+        assert seen["servo"] == want
+    assert client.post("/api/calibrate", json={"dataset": FAKE_DS, "servo": "dynamixel"}).status_code == 422
+
+
+def test_start_params_for_each_servo():
+    from antares.sim import SimParams
+
+    assert server.start_params() == SimParams()
+    assert server.start_params("sts3215") == SimParams.sts3215()
+    with pytest.raises(HTTPException):
+        server.start_params("dynamixel")
