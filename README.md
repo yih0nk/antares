@@ -522,6 +522,63 @@ as a cancellable job with progress events, on its own MuJoCo arm so the
 other endpoints keep answering. The GitHub Action takes `explain: "true"`
 and sets a `cause` output.
 
+### Alerts
+
+A gate that fails only in a CI log is easy to miss. `--notify` posts the
+verdict to a webhook, so the team hears about a drifted arm where it talks:
+
+```sh
+.venv/bin/antares check ./recordings/2026-10-17 --lock my_arm --notify "$ANTARES_WEBHOOK_URL"
+.venv/bin/antares check ./recordings/2026-10-17 --lock my_arm --notify-when failure  # URL read from $ANTARES_WEBHOOK_URL
+.venv/bin/antares notify-test --url "$ANTARES_WEBHOOK_URL"                            # posts a synthetic OK to confirm the hook
+```
+
+```
+DRIFTED my_arm on ./recordings/2026-10-17: 2.10 deg RMSE (limit 1.58)
+worst joint elbow_flex: 3.21 deg (limit 3.05)
+failed joints (2): elbow_flex 3.21/3.05, shoulder_lift 1.60/1.45
+10 episodes, 3000 frames, 2026-10-17T06:04:12+00:00
+```
+
+`--notify-when` is `drifted` (default), `failure` (drifted, too few
+episodes, or a check that could not run at all) or `always`;
+`--notify-dry-run` prints the payload instead of posting it. A webhook
+that is down only prints `warning: alert not sent: ...` on stderr; the
+exit code is the check's, never the alert's.
+
+For Slack, create an app with Incoming Webhooks switched on, add a webhook
+to the channel you want and copy its `https://hooks.slack.com/services/...`
+URL. Antares recognises that host and posts Block Kit (a header, the
+summary, one field per joint); `--notify-format slack|json` overrides the
+detection. Any other URL gets a generic JSON POST:
+
+```json
+{
+  "event": "antares.check",
+  "verdict": "drifted",
+  "text": "DRIFTED my_arm on ./recordings/2026-10-17: 2.10 deg RMSE (limit 1.58)\nworst joint ...",
+  "result": {"passed": false, "verdict": "drifted", "score": 2.1, "limit": 1.58, "per_joint": {"...": {}}, "...": "..."}
+}
+```
+
+`result` is the full `CheckResult`, as `--json` prints it. A check that
+could not run (missing lock, unreadable dataset) posts `"verdict": "error"`
+with `"result": null` and an `"error"` string, for `failure` and `always`
+only. `POST /api/check` takes the same options as `notify_url`,
+`notify_when` and `notify_format`, posts server-side after the check, and
+adds `notified` (`true`, `false`, or `null` when no URL was given) and
+`notify_error` to the response. In the Action, pass the URL from a
+repository secret so it never appears in the workflow file or the logs:
+
+```yaml
+- uses: your-org/antares@main
+  with:
+    dataset: your-org/so101_arm_a_daily
+    lock: so101_arm_a
+    webhook: ${{ secrets.ANTARES_WEBHOOK_URL }}   # Slack incoming webhook or any JSON endpoint
+    notify-when: failure                          # optional: drifted (default), failure, always
+```
+
 ## Contact detection from the residual
 
 Once the sim reproduces the arm's free-space motion (the SO-101 lock
