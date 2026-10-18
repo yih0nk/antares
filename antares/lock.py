@@ -74,6 +74,9 @@ class RobotLock:
     # Fitted fixed cameras by short name (antares.camera.CameraFit.to_dict());
     # locks saved before camera fits existed load with none.
     cameras: dict[str, Any] = field(default_factory=dict)
+    #: The follower's LeRobot motor calibration the fit used for its unit map
+    #: (antares.lerobot_calib.calibration_record()); None = the model's map.
+    calibration: dict[str, Any] | None = None
 
     @classmethod
     def create(
@@ -86,6 +89,7 @@ class RobotLock:
         command_map: dict[str, Any] | None = None,
         dynamics_only: dict[str, Any] | None = None,
         robot: str = DEFAULT_ROBOT,
+        calibration: dict[str, Any] | None = None,
     ) -> "RobotLock":
         """Build a lock for a finished calibration, stamping time and version."""
         return cls(
@@ -100,6 +104,7 @@ class RobotLock:
             command_map=command_map,
             dynamics_only=dynamics_only,
             robot=robot,
+            calibration=calibration,
         )
 
     def to_dict(self) -> dict:
@@ -120,6 +125,8 @@ class RobotLock:
             d["dynamics_only"] = self.dynamics_only
         if self.cameras:
             d["cameras"] = dict(self.cameras)
+        if self.calibration is not None:
+            d["calibration"] = self.calibration
         return d
 
     def replace(self, **changes: Any) -> "RobotLock":
@@ -145,6 +152,7 @@ class RobotLock:
             dynamics_only=d.get("dynamics_only"),
             robot=str(d.get("robot") or DEFAULT_ROBOT),
             cameras=dict(d.get("cameras") or {}),
+            calibration=d.get("calibration"),
         )
 
     def default_path(self, lock_dir: Path = LOCK_DIR) -> Path:

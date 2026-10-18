@@ -244,6 +244,8 @@ def test_committed_locks_still_load():
         d = lk.to_dict()
         assert "seeds" not in d["result"] and all("seed" not in s for s in d["result"]["stages"])
         assert RobotLock.from_dict(json.loads(json.dumps(d))) == lk
+        # fitted on the model's unit map, before LeRobot calibrations were read
+        assert lk.calibration is None and "calibration" not in d
 
 
 def test_committed_fleet_locks_still_load():
@@ -315,3 +317,32 @@ def test_pinned_params_tolerates_odd_inputs():
     assert param_spread({"result": {"seeds": {"pinned": []}}}) is None
     assert pinned_params(object()) == ["latency_frames"]
     assert DEFAULT_PINNED == ("latency_frames",)
+
+
+# ---------------------------------------------------------------------------
+# the follower's LeRobot calibration in a lock
+# ---------------------------------------------------------------------------
+
+
+def test_lock_calibration_round_trip(tmp_path):
+    from antares.sim import UnitMap
+
+    rec = {
+        "source": "/home/me/.cache/huggingface/lerobot/calibration/robots/so101_follower/arm.json",
+        "robot_id": "arm", "robot_type": "so101_follower", "sha256": "ab" * 32,
+        "norm_mode": "range_m100_100", "anchor": "homing",
+        "motors": {j: {"id": i + 1, "drive_mode": 0, "homing_offset": -5 * i, "range_min": 800 + i,
+                       "range_max": 3300 - i} for i, j in enumerate(JOINTS)},
+        "unit_map": {"scale": [0.019] * 6, "offset": [0.0] * 5 + [-0.17], "lo": [-1.9] * 6, "hi": [1.9] * 6},
+        "unit_map_disagreement_deg": {j: 0.1 * i for i, j in enumerate(JOINTS)},
+    }
+    lock = RobotLock.create("lerobot/x", "so101_follower", episodes(), fake_result(), calibration=rec)
+    assert lock.to_dict()["calibration"] == rec
+    back = RobotLock.load(lock.save(tmp_path / "x.lock.json"))
+    assert back == lock and back.calibration == rec
+    assert UnitMap.from_dict(back.calibration["unit_map"]).scale.shape == (6,)
+    # default: none, and the key is absent so older readers see nothing new
+    plain = RobotLock.create("lerobot/x", "so101_follower", episodes(), fake_result())
+    assert plain.calibration is None and "calibration" not in plain.to_dict()
+    legacy = {k: v for k, v in lock.to_dict().items() if k != "calibration"}
+    assert RobotLock.from_dict(legacy).calibration is None
