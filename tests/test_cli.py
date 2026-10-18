@@ -934,6 +934,161 @@ def test_check_explain_evaluations_has_a_floor(monkeypatch, capsys):
     assert calls == []
 
 
+# -- alerts (--notify) ----------------------------------------------------------
+
+
+class _WebhookServer:
+    """A localhost webhook that records POST bodies and answers ``status``."""
+
+    def __init__(self, status=200):
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        received = self.received = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                received.append({"content_type": self.headers.get("Content-Type"), "body": json.loads(body)})
+                self.send_response(status)
+                self.end_headers()
+                self.wfile.write(b"ok" if status < 400 else b"nope")
+
+            def log_message(self, *a):
+                pass
+
+        self._srv = HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self._srv.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self._srv.server_port}/hook"
+
+    def close(self):
+        self._srv.shutdown()
+        self._srv.server_close()
+
+
+@pytest.fixture
+def webhook():
+    srv = _WebhookServer()
+    try:
+        yield srv
+    finally:
+        srv.close()
+
+
+def _closed_port_url():
+    import socket
+
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return f"http://127.0.0.1:{port}/hook"
+
+
+def test_check_notify_failed_post_keeps_the_exit_code(monkeypatch, capsys):
+    monkeypatch.delenv("ANTARES_WEBHOOK_URL", raising=False)
+    dead = _closed_port_url()
+    _patch_check(monkeypatch, _check_result(3.0))
+    assert cli.main(["check", "fake/robot", "--lock", "unit-a", "--notify", dead]) == 1
+    out, err = capsys.readouterr()
+    assert out.rstrip().splitlines()[-1].startswith("DRIFTED:")
+    assert "warning: alert not sent: could not reach webhook" in err
+
+    _patch_check(monkeypatch, _check_result(1.2))
+    assert cli.main(["check", "fake/robot", "--lock", "unit-a", "--notify", dead, "--notify-when", "always"]) == 0
+    assert "warning: alert not sent" in capsys.readouterr().err
+
+    def boom(url, payload, timeout=10.0):
+        raise RuntimeError("kaboom")
+
+    import antares.notify
+    monkeypatch.setattr(antares.notify, "send", boom)
+    _patch_check(monkeypatch, _check_result(0.5, n=2))
+    assert cli.main(["check", "fake/robot", "--lock", "unit-a", "--notify", "https://example.com/x",
+                     "--notify-when", "failure", "--json"]) == 2
+    out, err = capsys.readouterr()
+    assert json.loads(out)["verdict"] == "insufficient_data"
+    assert "warning: alert not sent: kaboom" in err
+
+
+def test_check_notify_posts_only_the_verdicts_asked_for(monkeypatch, capsys, webhook):
+    monkeypatch.delenv("ANTARES_WEBHOOK_URL", raising=False)
+    _patch_check(monkeypatch, _check_result(1.2))
+    assert cli.main(["check", "fake/robot", "--lock", "unit-a", "--notify", webhook.url]) == 0
+    assert webhook.received == []  # ok is quiet by default
+    assert "alert" not in capsys.readouterr().err
+
+    _patch_check(monkeypatch, _check_result(3.0))
+    assert cli.main(["check", "fake/robot", "--lock", "unit-a", "--notify", webhook.url]) == 1
+    (req,) = webhook.received
+    assert req["content_type"] == "application/json"
+    body = req["body"]
+    assert body["event"] == "antares.check" and body["verdict"] == "drifted"
+    assert body["text"].startswith("DRIFTED unit-a on fake/robot: 3.00 deg RMSE (limit 1.50)")
+    assert body["result"]["lock"] == "unit-a" and body["result"]["n_episodes"] == 6
+    assert "alert sent (json webhook)" in capsys.readouterr().err
+
+    # the URL can come from the environment; slack format can be forced
+    monkeypatch.setenv("ANTARES_WEBHOOK_URL", webhook.url)
+    _patch_check(monkeypatch, _check_result(1.2))
+    assert cli.main(["check", "fake/robot", "--lock", "unit-a", "--notify-when", "always",
+                     "--notify-format", "slack"]) == 0
+    assert len(webhook.received) == 2
+    slack = webhook.received[1]["body"]
+    assert slack["blocks"][0]["type"] == "header" and slack["text"].startswith("OK unit-a")
+    assert "alert sent (slack webhook)" in capsys.readouterr().err
+
+
+def test_check_notify_dry_run_keeps_json_stdout_pure(monkeypatch, capsys, webhook):
+    _patch_check(monkeypatch, _check_result(3.0))
+    assert cli.main(["check", "fake/robot", "--lock", "unit-a", "--notify", webhook.url,
+                     "--notify-dry-run", "--json"]) == 1
+    out, err = capsys.readouterr()
+    assert json.loads(out)["verdict"] == "drifted"
+    assert webhook.received == []
+    assert '"event": "antares.check"' in err and "alert rendered" in err
+
+    assert cli.main(["check", "fake/robot", "--lock", "unit-a", "--notify", webhook.url, "--notify-dry-run"]) == 1
+    out, err = capsys.readouterr()
+    assert '"event": "antares.check"' in out and out.rstrip().splitlines()[0].startswith("fake/robot vs lock")
+
+
+def test_check_notify_reports_a_check_that_could_not_run(monkeypatch, capsys, webhook):
+    from antares import server
+
+    monkeypatch.setattr(server, "_DATASETS", {"fake/robot": _dataset()})
+    monkeypatch.setattr(server, "LOCK_DIR", __import__("pathlib").Path("/nonexistent/locks"))
+    assert cli.main(["check", "fake/robot", "--lock", "ghost", "--notify", webhook.url]) == 2
+    assert webhook.received == []  # drifted-only stays quiet with no verdict
+    assert cli.main(["check", "fake/robot", "--lock", "ghost", "--notify", webhook.url,
+                     "--notify-when", "failure"]) == 2
+    (req,) = webhook.received
+    assert req["body"]["verdict"] == "error" and req["body"]["result"] is None
+    assert req["body"]["text"].startswith("ERROR ghost on fake/robot:")
+    assert "error:" in capsys.readouterr().err
+
+
+def test_notify_test_sends_a_synthetic_ok(monkeypatch, capsys, webhook):
+    monkeypatch.delenv("ANTARES_WEBHOOK_URL", raising=False)
+    assert cli.main(["notify-test", "--url", webhook.url]) == 0
+    (req,) = webhook.received
+    assert req["body"]["verdict"] == "ok" and req["body"]["text"].startswith("Antares webhook test\nOK example on")
+    out = capsys.readouterr().out
+    assert out.startswith("sent a synthetic OK alert as json to 127.0.0.1")
+    assert "/hook" not in out  # the URL is a secret
+
+    assert cli.main(["notify-test", "--url", webhook.url, "--format", "slack", "--title", "Arm A"]) == 0
+    assert webhook.received[1]["body"]["blocks"][0]["text"]["text"] == "Arm A"
+
+    assert cli.main(["notify-test", "--url", webhook.url, "--dry-run"]) == 0
+    assert len(webhook.received) == 2 and '"event": "antares.check"' in capsys.readouterr().out
+
+    assert cli.main(["notify-test"]) == 2
+    assert "pass --url or set ANTARES_WEBHOOK_URL" in capsys.readouterr().err
+    assert cli.main(["notify-test", "--url", _closed_port_url()]) == 1
+    assert "error: alert not sent: could not reach webhook" in capsys.readouterr().err
+
+
 @pytest.mark.slow
 def test_synth_writes_a_dataset_check_reads(tmp_path, capsys):
     from antares.data import read_local
