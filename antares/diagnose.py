@@ -7,8 +7,8 @@ but instead of searching the parameters from scratch it searches one
 ``kv``, ``damping``, ``armature`` and ``frictionloss`` (x1/4 to x4,
 log-uniform) and a shift of whole frames on ``latency_frames``. A per-joint
 lock keeps its per-joint shape; every joint gets the same change. The search
-starts at "no change" (after trying each latency shift), so a parameter
-only moves when the new data asks for it.
+starts at "no change" for each of the most promising latency shifts, so a
+parameter only moves when the new data asks for it.
 
 The refit runs on half of the fresh episodes and both the lock and the
 refit are scored on the other half, so the gap it closes is real and not
@@ -53,6 +53,9 @@ FACTOR_RANGE: dict[str, float] = {
 LATENCY_SHIFT: tuple[int, int] = (-2, 3)
 FIELDS: tuple[str, ...] = (*FACTOR_RANGE, "latency_frames")
 
+#: Latency shifts (best first, by the scan with no other change) whose
+#: factors are each refitted.
+SHIFT_CANDIDATES = 3
 #: A parameter is a cause when changing it alone recovers this share of the gap.
 CAUSE_FRACTION = 0.2
 #: A refit that improves on the lock by less than this (degrees) is noise.
@@ -262,7 +265,7 @@ def diagnose(
     episodes: Sequence[Episode],
     lock: Any,
     simulate: Callable[..., Any] | None = None,
-    max_evaluations: int = 120,
+    max_evaluations: int = 240,
     sigma0: float = 0.15,
     seed: int = 0,
     dataset: str | None = None,
@@ -291,39 +294,51 @@ def diagnose(
         _, value = _safe_score(apply_change(params, change), refit_eps, simulate)
         return value
 
-    # Latency is a handful of whole frames, which CMA-ES steps over poorly
-    # once it is rounded, so every shift is tried first and the search
-    # starts from the best one.
-    best, best_value, evaluations = neutral(), math.inf, 0
+    # Latency is a handful of whole frames, which CMA-ES steps over poorly,
+    # so each shift is scored with no other change, and the factors are then
+    # refitted by CMA-ES separately for each of the most promising shifts.
+    # A slower servo and extra lag look alike until the factors move, so
+    # the best shift before the refit is not always the best one after it.
     lo, hi = LATENCY_SHIFT
+    scanned = []
     for shift in range(lo, hi + 1):
         change = {**neutral(), "latency_frames": shift}
-        v = objective(change)
-        evaluations += 1
-        if v < best_value or (v == best_value and shift == 0):
-            best, best_value = change, v
-    es = cma.CMAEvolutionStrategy(
-        encode_change(best),
-        sigma0,
-        {
-            "bounds": [0.0, 1.0],
-            "seed": int(np.random.default_rng(seed).integers(1, 2**31 - 1)),
-            "verbose": -9,
-            "verb_log": 0,
-            "maxfevals": max_evaluations,
-        },
-    )
-    while evaluations < max_evaluations and not es.stop():
-        xs = es.ask()
-        values = []
-        for x in xs:
-            change = decode_change(x)
-            v = objective(change)
-            values.append(v)
-            evaluations += 1
-            if v < best_value:
-                best, best_value = change, v
-        es.tell(xs, values)
+        scanned.append((objective(change), shift != 0, change))
+    evaluations = len(scanned)
+    scanned.sort(key=lambda t: (t[0], t[1]))
+    best_value, _, best = scanned[0]
+    candidates = [c for _, _, c in scanned[:SHIFT_CANDIDATES]]
+    factors = list(FACTOR_RANGE)
+    for i, start in enumerate(candidates):
+        budget = (max_evaluations - evaluations) // (len(candidates) - i)
+        if budget < 1:
+            continue
+        shift = start["latency_frames"]
+        es = cma.CMAEvolutionStrategy(
+            encode_change(start)[: len(factors)],
+            sigma0,
+            {
+                "bounds": [0.0, 1.0],
+                "seed": int(np.random.default_rng([seed, i]).integers(1, 2**31 - 1)),
+                "verbose": -9,
+                "verb_log": 0,
+                "maxfevals": budget,
+            },
+        )
+        spent = 0
+        while spent < budget and not es.stop():
+            xs = es.ask()
+            values = []
+            for x in xs:
+                change = decode_change(np.append(x, 0.0))
+                change["latency_frames"] = shift
+                v = objective(change)
+                values.append(v)
+                spent += 1
+                if v < best_value:
+                    best, best_value = change, v
+            es.tell(xs, values)
+        evaluations += spent
 
     stale_report, stale = _safe_score(params, held_out, simulate)
     refit_params = apply_change(params, best)
@@ -386,6 +401,7 @@ __all__ = [
     "FIELDS",
     "LATENCY_SHIFT",
     "MIN_GAP_DEG",
+    "SHIFT_CANDIDATES",
     "Diagnosis",
     "ParamChange",
     "apply_change",
