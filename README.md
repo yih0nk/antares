@@ -102,17 +102,16 @@ streamed over `/api/jobs/{id}/events`, one event per window) and
 
 What the two demo datasets show (window 10, step 5, nine windows each):
 
-* **SO-100**: the lock's error grows from 0.71° to about 0.83° over the
-  session (+16%, r² 0.65, significant). The refits do not recover it
-  (they beat the lock by under 3% on any window) and no parameter moves
-  consistently, so this is a harder tail of the session, not wear the
-  six parameters can describe. Most of the growth is in `elbow_flex`
-  (1.11° to 1.32°) and `shoulder_lift`.
-* **SO-101**: the lock's error is flat (1.04° to 1.14°, +5%). The scan
-  flags `armature` (+269%), but with r² 0.36, a 4% mean refit gain and two
-  windows where the refit found nothing better than the lock itself, that
-  is scatter in a weakly constrained parameter rather than drift. The
-  verdict says so.
+* **SO-100**: the lock's error grows by 17% over the session (r² 0.66,
+  significant) and the windowed refits' own training error grows with it
+  (+20%, r² 0.61), so refitting does not recover it and no parameter
+  moves consistently. This is a harder tail of the session, not wear the
+  six parameters can describe.
+* **SO-101**: the lock's error falls slightly (-5%, significant but under
+  the 10% bar) and no parameter drifts. `armature` moves the most (+201%
+  first to last window, r² 0.31), but its interval includes zero, so that
+  is scatter in a weakly constrained parameter. The verdict is "no drift".
+
 
 Overlapping windows are not independent, so the bootstrap interval is
 optimistic; treat a flag as "worth a look", not as a measurement of wear.
