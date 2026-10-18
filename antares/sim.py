@@ -263,6 +263,41 @@ class UnitMap:
         offset[g] = lo[g]
         return cls(scale=scale, offset=offset, lo=lo, hi=hi)
 
+    @classmethod
+    def from_kinds(
+        cls,
+        lo: np.ndarray,
+        hi: np.ndarray,
+        kinds: Sequence[str],
+        extra_scale: Sequence[float] | None = None,
+    ) -> UnitMap:
+        """One column per joint range ``[lo, hi]`` and unit kind (see
+        :data:`antares.robots.UNIT_KINDS`); ``extra_scale`` multiplies each
+        column after its unit (a sign flip, a jaw opening that drives one
+        finger)."""
+        lo = np.asarray(lo, dtype=np.float64).copy()
+        hi = np.asarray(hi, dtype=np.float64).copy()
+        scale = np.empty_like(lo)
+        offset = np.empty_like(lo)
+        for i, k in enumerate(kinds):
+            if k == "range_m100_100":
+                scale[i], offset[i] = (hi[i] - lo[i]) / 200.0, (hi[i] + lo[i]) / 2.0
+            elif k == "range_0_100":
+                scale[i], offset[i] = (hi[i] - lo[i]) / 100.0, lo[i]
+            elif k == "range_0_1":
+                scale[i], offset[i] = hi[i] - lo[i], lo[i]
+            elif k == "degrees":
+                scale[i], offset[i] = np.pi / 180.0, (hi[i] + lo[i]) / 2.0
+            elif k == "degrees_raw":
+                scale[i], offset[i] = np.pi / 180.0, 0.0
+            elif k in ("radians", "native"):
+                scale[i], offset[i] = 1.0, 0.0
+            else:
+                raise ValueError(f"unknown unit kind {k!r}")
+        if extra_scale is not None:
+            scale = scale * np.asarray(extra_scale, dtype=np.float64)
+        return cls(scale=scale, offset=offset, lo=lo, hi=hi)
+
     def to_rad(self, u: np.ndarray) -> np.ndarray:
         """Dataset units -> radians, clipped to the joint range. (6,) or (T,6)."""
         q = np.asarray(u, dtype=np.float64) * self.scale + self.offset
@@ -345,26 +380,32 @@ def load_model(path: str | Path = MODEL_PATH) -> mujoco.MjModel:
 
 
 class Arm:
-    """One SO-101 in MuJoCo with a reusable ``MjData``.
+    """One robot in MuJoCo with a reusable ``MjData``.
 
     Contacts are disabled by default (``contacts=False``). The scene holds
     only the arm, so the sole possible contacts are self-collisions between
     the MJCF's coarse collision boxes, and those fire spuriously: at the
-    real robot's folded rest pose the shoulder boxes already penetrate the
-    lower-arm and wrist boxes by 1-2 mm, which wedges the sim elbow for
-    dozens of frames while the real arm moves freely. Object contacts are
-    not logged either, so nothing physical is lost.
+    real robot's folded rest pose the SO-101's shoulder boxes already
+    penetrate the lower-arm and wrist boxes by 1-2 mm, which wedges the sim
+    elbow for dozens of frames while the real arm moves freely. Object
+    contacts are not logged either, so nothing physical is lost.
 
     Not thread-safe: ``replay`` and ``fk`` share state. Use one ``Arm`` per
     thread, or serialize calls.
 
     ``robot`` names an entry of :data:`antares.robots.REGISTRY` (default
-    ``so101``), which supplies the MJCF, the mesh directory, the MJCF's own
-    joint names (checked against the compiled model, in canonical order) and
-    the unit map. ``model_path`` loads another MJCF with the same six joints
-    (for example one written by :mod:`antares.export`). With ``params=None``
-    the values already compiled into that model are kept (see
-    :meth:`SimParams.from_model`); for the stock model that is the default
+    ``so101``), which supplies the MJCF, the mesh directory, the dataset
+    columns and the MJCF joint behind each, and the unit map. Each column
+    drives the position actuator on its joint and is read back from that
+    joint's ``qpos``; joints the MJCF couples to a column's joint with a
+    joint equality (the second finger of a parallel gripper) follow it, and
+    MJCF joints no column names are left at their reference pose. For the
+    SO arms every column is one joint and one actuator, in order.
+
+    ``model_path`` loads another MJCF with the same joints (for example one
+    written by :mod:`antares.export`). With ``params=None`` the values
+    already compiled into that model are kept (see
+    :meth:`SimParams.from_model`); for the stock SO-101 that is the default
     ``SimParams()``.
     """
 
@@ -379,78 +420,214 @@ class Arm:
     ):
         from antares.robots import get_robot
 
-        self.robot = get_robot(robot)
+        self.robot = get_robot(robot).resolve()
         self.model_path = Path(model_path) if model_path is not None else self.robot.model_path
         self.model = load_model(self.model_path)
         if not contacts:
             self.model.opt.disableflags |= int(mujoco.mjtDisableBit.mjDSBL_CONTACT)
         self.data = mujoco.MjData(self.model)
         self._fk_data = mujoco.MjData(self.model)
-        self.unit_map = unit_map if unit_map is not None else self.robot.unit_map_factory(self.model)
-        self.command_map = command_map if command_map is not None else CommandMap.identity()
         self.body_names: list[str] = [
             mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY, i) for i in range(self.model.nbody)
         ]
-        joint_names = [mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_JOINT, i) for i in range(self.model.njnt)]
-        if tuple(joint_names) != tuple(self.robot.joint_names):
-            raise RuntimeError(f"MJCF joints {joint_names} != expected {list(self.robot.joint_names)} for {self.robot.name}")
-        self._ctrl_lo = self.model.actuator_ctrlrange[:, 0].copy()
-        self._ctrl_hi = self.model.actuator_ctrlrange[:, 1].copy()
+        self._map_joints()
+        self.unit_map = unit_map if unit_map is not None else self._default_unit_map()
+        self.action_unit_map = (
+            self.unit_map
+            if unit_map is not None or self.robot.action_units is None
+            else UnitMap.from_kinds(
+                self.unit_map.lo, self.unit_map.hi, self.robot.unit_kinds(action=True), self.robot.unit_scale
+            )
+        )
+        self.command_map = command_map if command_map is not None else CommandMap.identity(self.n_joints)
+        self._ctrl_lo = np.where(self.model.actuator_ctrllimited[self.actuator_ids] > 0,
+                                 self.model.actuator_ctrlrange[self.actuator_ids, 0], -np.inf)
+        self._ctrl_hi = np.where(self.model.actuator_ctrllimited[self.actuator_ids] > 0,
+                                 self.model.actuator_ctrlrange[self.actuator_ids, 1], np.inf)
         self._base_timestep = float(self.model.opt.timestep)
+        #: Original model values that added factors scale (see antares.factors).
+        self._factor_base: dict[Any, np.ndarray] = {}
+        self._extras_applied: set[str] = set()
+        self._limit_forces()
         if params is None:
-            params = SimParams.from_model(self.model)
+            params = self.default_params(from_model=True)
         self.params = params
         self.apply(params)
 
-    @property
-    def robot_name(self) -> str:
-        """Registry name of the model this arm simulates (``so101`` by default)."""
-        return self.robot.name
+    # -- joint map ----------------------------------------------------------
+
+    def _map_joints(self) -> None:
+        """Column -> MJCF joint, qpos/dof address and the actuator driving it."""
+        m = self.model
+        joint_names = [mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_JOINT, i) for i in range(m.njnt)]
+        want = tuple(self.robot.joint_names)
+        missing = [j for j in want if j not in joint_names]
+        if missing:
+            raise RuntimeError(f"MJCF joints {joint_names} != expected {list(want)} for {self.robot.name} "
+                               f"(missing {missing})")
+        self.n_joints = len(want)
+        self.joint_ids = np.array([joint_names.index(j) for j in want], dtype=np.int64)
+        self.qpos_ids = np.asarray(m.jnt_qposadr[self.joint_ids], dtype=np.int64)
+        self.dof_ids = np.asarray(m.jnt_dofadr[self.joint_ids], dtype=np.int64)
+        acts = []
+        for j, name in zip(self.joint_ids, want):
+            hits = [a for a in range(m.nu)
+                    if m.actuator_trntype[a] == mujoco.mjtTrn.mjTRN_JOINT and m.actuator_trnid[a, 0] == j]
+            if len(hits) != 1:
+                raise RuntimeError(f"{self.robot.name}: joint {name!r} needs exactly one actuator, has {len(hits)}")
+            acts.append(hits[0])
+        self.actuator_ids = np.array(acts, dtype=np.int64)
+        # Joints the MJCF slaves to a mapped joint: qpos[follower] = c0 + c1 * qpos[driver].
+        self._followers: list[tuple[int, int, float, float]] = []
+        for e in range(m.neq):
+            if m.eq_type[e] != mujoco.mjtEq.mjEQ_JOINT:
+                continue
+            j1, j2 = int(m.eq_obj1id[e]), int(m.eq_obj2id[e])
+            if j2 in set(self.joint_ids.tolist()) and j1 not in set(self.joint_ids.tolist()):
+                c0, c1 = float(m.eq_data[e, 0]), float(m.eq_data[e, 1])
+                self._followers.append((int(m.jnt_qposadr[j1]), int(m.jnt_qposadr[j2]), c0, c1))
+        self._identity_map = (
+            self.n_joints == m.nq == m.nu
+            and np.array_equal(self.qpos_ids, np.arange(m.nq))
+            and np.array_equal(self.actuator_ids, np.arange(m.nu))
+        )
+        self._qpos0 = m.qpos0.copy()
+
+    def _default_unit_map(self) -> UnitMap:
+        if self.robot.unit_map_factory is not None:
+            return self.robot.unit_map_factory(self.model)
+        rng = self.model.jnt_range[self.joint_ids]
+        return UnitMap.from_kinds(rng[:, 0], rng[:, 1], self.robot.unit_kinds(), self.robot.unit_scale)
+
+    def _limit_forces(self) -> None:
+        """Make every mapped actuator force-limited so ``forcerange`` acts.
+
+        An actuator without a force range gets the joint's actuator force
+        range when it has one, else an effectively unlimited one; the SO
+        models already limit theirs and are left alone.
+        """
+        m = self.model
+        for a, j in zip(self.actuator_ids, self.joint_ids):
+            if m.actuator_forcelimited[a]:
+                continue
+            hi = float(m.jnt_actfrcrange[j, 1]) if m.jnt_actfrclimited[j] else 1e6
+            m.actuator_forcelimited[a] = 1
+            m.actuator_forcerange[a] = (-hi, hi)
+
+    def default_params(self, from_model: bool = False) -> SimParams:
+        """The robot's uncalibrated parameters.
+
+        SO arms (``default_params="sts3215"``) start from :class:`SimParams`
+        defaults, or with ``from_model`` the first actuator's compiled values
+        (the old ``Arm(params=None)`` behaviour). Other robots read every
+        mapped joint and actuator of their own MJCF, so the starting point is
+        the model as its authors tuned it.
+        """
+        if self.robot.default_params == "sts3215":
+            return SimParams.from_model(self.model) if from_model else SimParams()
+        m = self.model
+        a, d = self.actuator_ids, self.dof_ids
+
+        def per(x: np.ndarray) -> tuple[float, ...]:
+            return tuple(float(v) for v in x)
+
+        return SimParams(
+            kp=per(m.actuator_gainprm[a, 0]),
+            kv=per(np.maximum(-m.actuator_biasprm[a, 2], 1e-6)),
+            damping=per(np.maximum(m.dof_damping[d], 1e-6)),
+            armature=per(np.maximum(m.dof_armature[d], 1e-6)),
+            frictionloss=per(np.maximum(m.dof_frictionloss[d], 1e-6)),
+            latency_frames=0,
+            forcerange=per(m.actuator_forcerange[a, 1]),
+        )
 
     # -- parameters ---------------------------------------------------------
 
     def apply(self, params: SimParams) -> None:
         """Write ``params`` into the compiled model in place (cheap, idempotent).
 
-        Scalar fields are broadcast to all six joints; per-joint tuples are
-        written joint by joint (actuator ``i`` drives joint ``i``). Armature
-        feeds the qpos0-derived constants the compiler precomputes (``dof_M0``,
-        ``dof_invweight0``, which scale the frictionloss and limit constraints),
-        so they are recomputed with ``mj_setConst``; the result is then identical
-        to a model compiled with these values.
+        Scalar fields are broadcast to all joints; per-joint tuples are
+        written joint by joint (on the actuator and dof behind each column).
+        Values of added factors go through their own hooks (see
+        :mod:`antares.factors`). Armature feeds the qpos0-derived constants
+        the compiler precomputes (``dof_M0``, ``dof_invweight0``, which scale
+        the frictionloss and limit constraints), so they are recomputed with
+        ``mj_setConst``; the result is then identical to a model compiled
+        with these values.
         """
         m = self.model
-        n = m.nu
+        n = self.n_joints
         kp = params.per_joint("kp", n)
         fr = params.per_joint("forcerange", n)
-        m.actuator_gainprm[:, 0] = kp
-        m.actuator_biasprm[:, 1] = -kp
-        m.actuator_biasprm[:, 2] = -params.per_joint("kv", n)
-        m.actuator_forcerange[:, 0] = -fr
-        m.actuator_forcerange[:, 1] = fr
-        m.dof_damping[:] = params.per_joint("damping", n)
-        m.dof_armature[:] = params.per_joint("armature", n)
-        m.dof_frictionloss[:] = params.per_joint("frictionloss", n)
+        kv = params.per_joint("kv", n)
+        if self._identity_map:
+            m.actuator_gainprm[:, 0] = kp
+            m.actuator_biasprm[:, 1] = -kp
+            m.actuator_biasprm[:, 2] = -kv
+            m.actuator_forcerange[:, 0] = -fr
+            m.actuator_forcerange[:, 1] = fr
+            m.dof_damping[:] = params.per_joint("damping", n)
+            m.dof_armature[:] = params.per_joint("armature", n)
+            m.dof_frictionloss[:] = params.per_joint("frictionloss", n)
+        else:
+            a, d = self.actuator_ids, self.dof_ids
+            m.actuator_gainprm[a, 0] = kp
+            m.actuator_biasprm[a, 1] = -kp
+            m.actuator_biasprm[a, 2] = -kv
+            m.actuator_forcerange[a, 0] = -fr
+            m.actuator_forcerange[a, 1] = fr
+            m.dof_damping[d] = params.per_joint("damping", n)
+            m.dof_armature[d] = params.per_joint("armature", n)
+            m.dof_frictionloss[d] = params.per_joint("frictionloss", n)
+        self._apply_extras(params)
         mujoco.mj_setConst(m, self.data)  # ~20 us; uses self.data as scratch
         self.params = params
 
+    def _apply_extras(self, params: SimParams) -> None:
+        if not params.extra and not self._extras_applied:
+            return
+        from antares import factors
+
+        now = set()
+        for name, value in params.extra:
+            if not factors.is_extra(name):
+                raise ValueError(f"parameter {name!r} is not a registered factor (load its factor file first)")
+            v = params.per_joint(name, self.n_joints) if isinstance(value, tuple) else np.asarray(float(value))
+            factors.apply_hook(name)(self, v)
+            now.add(name)
+        for name in self._extras_applied - now:  # dropped since the last apply: back to neutral
+            f = factors.REGISTRY.get(name)
+            if f is not None and f.neutral is not None:
+                factors.apply_hook(name)(self, np.asarray(float(f.neutral)))
+        self._extras_applied = now
+
     # -- kinematics ---------------------------------------------------------
+
+    def _set_q(self, d: mujoco.MjData, q: np.ndarray) -> None:
+        """Column angles into ``d.qpos`` (followers too, the rest at qpos0)."""
+        if self._identity_map:
+            d.qpos[:] = q
+            return
+        d.qpos[:] = self._qpos0
+        d.qpos[self.qpos_ids] = q
+        for f, drv, c0, c1 in self._followers:
+            d.qpos[f] = c0 + c1 * d.qpos[drv]
 
     def fk(self, q: np.ndarray) -> np.ndarray:
         """Joint angles (rad) -> body poses ``[x,y,z, qw,qx,qy,qz]`` in the world frame.
 
-        ``q`` is (6,) or (T,6); the result is (nbody,7) or (T,nbody,7).
-        Pure forward kinematics, no dynamics.
+        ``q`` is (n,) or (T,n) with one value per column; the result is
+        (nbody,7) or (T,nbody,7). Pure forward kinematics, no dynamics.
         """
         q = np.asarray(q, dtype=np.float64)
         if q.ndim == 1:
             return self._fk_one(q)
-        if q.ndim != 2 or q.shape[1] != self.model.nq:
-            raise ValueError(f"q must be (6,) or (T,6), got {q.shape}")
+        if q.ndim != 2 or q.shape[1] != self.n_joints:
+            raise ValueError(f"q must be ({self.n_joints},) or (T,{self.n_joints}), got {q.shape}")
         out = np.empty((q.shape[0], self.model.nbody, 7), dtype=np.float64)
         d = self._fk_data
         for t in range(q.shape[0]):
-            d.qpos[:] = q[t]
+            self._set_q(d, q[t])
             mujoco.mj_kinematics(self.model, d)
             out[t, :, :3] = d.xpos
             out[t, :, 3:] = d.xquat
@@ -458,7 +635,7 @@ class Arm:
 
     def _fk_one(self, q: np.ndarray) -> np.ndarray:
         d = self._fk_data
-        d.qpos[:] = q
+        self._set_q(d, q)
         mujoco.mj_kinematics(self.model, d)
         out = np.empty((self.model.nbody, 7), dtype=np.float64)
         out[:, :3] = d.xpos
@@ -468,16 +645,26 @@ class Arm:
     # -- replay -------------------------------------------------------------
 
     @property
+    def robot_name(self) -> str:
+        """Registry name of the model this arm simulates (``so101`` by default)."""
+        return self.robot.name
+
+    @property
+    def joint_columns(self) -> tuple[str, ...]:
+        """Dataset column names, in the order of every per-joint array."""
+        return tuple(self.robot.joints)
+
+    @property
     def ctrl_range(self) -> tuple[np.ndarray, np.ndarray]:
-        """Actuator command limits ``(lo, hi)`` in radians, (6,) each (copies)."""
+        """Actuator command limits ``(lo, hi)`` in radians, one per column (copies)."""
         return self._ctrl_lo.copy(), self._ctrl_hi.copy()
 
     def real_q(self, episode: Episode) -> np.ndarray:
-        """Measured joint positions in radians, (T,6)."""
+        """Measured joint positions in radians, (T,n)."""
         return self.unit_map.to_rad(episode.state)
 
     def replay(self, episode: Episode, fps: float | None = None) -> np.ndarray:
-        """Drive the sim with the episode's commands; return sim joint angles (T,6) rad.
+        """Drive the sim with the episode's commands; return sim joint angles (T,n) rad.
 
         Frame 0 is the real initial state (the sim starts there, at rest).
         Commands pass through ``command_map`` first. For each later frame the
@@ -487,10 +674,10 @@ class Arm:
         state.
         """
         fps = float(fps if fps is not None else episode.fps)
-        nq = self.model.nq
-        if episode.state.shape[1] != nq or episode.action.shape[1] != nq:
-            raise ValueError("episode must have 6 joints")
-        ctrl = self.unit_map.to_rad(self.command_map.apply(episode.action))
+        n = self.n_joints
+        if episode.state.shape[1] != n or episode.action.shape[1] != n:
+            raise ValueError(f"episode must have {n} joints")
+        ctrl = self.action_unit_map.to_rad(self.command_map.apply(episode.action))
         q0 = self.unit_map.to_rad(episode.state[0])
         return self.rollout(ctrl, q0, fps)
 
@@ -501,7 +688,7 @@ class Arm:
         fps: float,
         latency_frames: int | Sequence[int] | None = None,
     ) -> np.ndarray:
-        """Drive the sim with an arbitrary command sequence; return joint angles (T,6) rad.
+        """Drive the sim with an arbitrary command sequence; return joint angles (T,n) rad.
 
         ``ctrl_rad[t]`` is the command *sent* at frame ``t`` (radians; clipped
         to the actuator ctrlrange). The servo applies the command sent
@@ -514,7 +701,7 @@ class Arm:
         if fps <= 0:
             raise ValueError("fps must be positive")
         m, d = self.model, self.data
-        nq = m.nq
+        nq = self.n_joints
         ctrl = np.asarray(ctrl_rad, dtype=np.float64)
         q0 = np.asarray(q0_rad, dtype=np.float64).reshape(-1)
         if ctrl.ndim != 2 or ctrl.shape[1] != nq:
@@ -525,7 +712,7 @@ class Arm:
         if T == 0:
             raise ValueError("ctrl_rad must have at least one frame")
         if latency_frames is None:
-            lat = self.params.per_joint("latency_frames")
+            lat = self.params.per_joint("latency_frames", nq)
         else:
             lat = np.asarray(latency_frames, dtype=np.int64).reshape(-1)
             if lat.size == 1:
@@ -550,18 +737,32 @@ class Arm:
         m.opt.timestep = frame_dt / n_sub
         try:
             mujoco.mj_resetData(m, d)
-            d.qpos[:] = q0
-            d.qvel[:] = 0.0
-            d.ctrl[:] = ctrl[0]
-            mujoco.mj_forward(m, d)
-            sim_q[0] = d.qpos
-            qpos = d.qpos
-            dctrl = d.ctrl
             step = mujoco.mj_step
-            for t in range(1, T):
-                dctrl[:] = ctrl[t]
-                step(m, d, n_sub)
-                sim_q[t] = qpos
+            if self._identity_map:
+                d.qpos[:] = q0
+                d.qvel[:] = 0.0
+                d.ctrl[:] = ctrl[0]
+                mujoco.mj_forward(m, d)
+                sim_q[0] = d.qpos
+                qpos = d.qpos
+                dctrl = d.ctrl
+                for t in range(1, T):
+                    dctrl[:] = ctrl[t]
+                    step(m, d, n_sub)
+                    sim_q[t] = qpos
+            else:
+                a, qi = self.actuator_ids, self.qpos_ids
+                self._set_q(d, q0)
+                d.qvel[:] = 0.0
+                # Actuators no column drives hold their joint where it starts.
+                d.ctrl[:] = 0.0
+                d.ctrl[a] = ctrl[0]
+                mujoco.mj_forward(m, d)
+                sim_q[0] = d.qpos[qi]
+                for t in range(1, T):
+                    d.ctrl[a] = ctrl[t]
+                    step(m, d, n_sub)
+                    sim_q[t] = d.qpos[qi]
         finally:
             m.opt.timestep = old_dt
         return sim_q
