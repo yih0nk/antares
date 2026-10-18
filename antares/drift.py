@@ -46,6 +46,7 @@ from typing import Any
 import numpy as np
 
 from antares import __version__
+from antares import factors
 from antares.data import Episode
 
 DRIFT_DIR = Path("locks")
@@ -57,13 +58,8 @@ DEFAULT_THRESHOLD = 0.10
 #: Keys of the trend table that are scores, not parameters.
 SCORE_KEYS = ("lock_score", "train_score")
 
-try:  # parameters searched on a log scale, from the calibration search space
-    from antares.calibrate import SPACE as _SPACE
-
-    LOG_PARAMS: frozenset[str] = frozenset(n for n, (_, _, s) in _SPACE.items() if s == "log")
-    del _SPACE
-except (ImportError, AttributeError):  # pragma: no cover - stubbed sibling module
-    LOG_PARAMS = frozenset({"kp", "kv", "damping", "armature", "frictionloss"})
+#: Parameters of the shared fit searched (and trended) on a log scale.
+LOG_PARAMS: frozenset[str] = frozenset(n for n, (_, _, s) in factors.space("shared").items() if s == "log")
 
 
 def _json_float(v: float) -> float | None:
