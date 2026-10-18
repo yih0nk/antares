@@ -221,7 +221,19 @@ def _two(prefix_a: str, prefix_b: str, names: tuple[str, ...]) -> tuple[str, ...
     return tuple(f"{prefix_a}{n}" for n in names) + tuple(f"{prefix_b}{n}" for n in names)
 
 
+_ALOHA_ARM = ("waist", "shoulder", "elbow", "forearm_roll", "wrist_angle", "wrist_rotate", "gripper")
+_WXAI_ARM = ("joint_0", "joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "gripper")
 
+#: STS3215-sized bounds are far too soft for these arms' servos; these
+#: cover each MJCF's own values with room either way.
+_DYNAMIXEL_BOUNDS: dict[str, tuple[float, float, str]] = {
+    "kp": (1.0, 5000.0, "log"),
+    "kv": (0.01, 500.0, "log"),
+    "damping": (0.01, 100.0, "log"),
+    "armature": (1e-4, 2.0, "log"),
+    "frictionloss": (1e-3, 10.0, "log"),
+    "forcerange": (0.5, 500.0, "log"),
+}
 
 
 REGISTRY: dict[str, RobotModel] = {
@@ -245,7 +257,107 @@ REGISTRY: dict[str, RobotModel] = {
         unit_map_factory=default_unit_map,
         label="SO-100",
     ),
+    "aloha": _menagerie_robot(
+        "aloha",
+        "aloha",
+        "aloha.xml",
+        joint_names=_two("left/", "right/", tuple(n if n != "gripper" else "left_finger" for n in _ALOHA_ARM)),
+        description="ALOHA: two ViperX 300 6-DoF arms (MuJoCo Menagerie aloha). Arm joints in radians; "
+        "grippers normalized 0..1 (follower finger position in the state, leader gripper joint in the action).",
+        joints=_two("left_", "right_", _ALOHA_ARM),
+        grippers=("left_gripper", "right_gripper"),
+        units=tuple("range_0_1" if n == "gripper" else "radians" for n in _ALOHA_ARM) * 2,
+        robot_types=(r"^aloha", r"aloha$"),
+        bounds=_DYNAMIXEL_BOUNDS,
+        default_params="model",
+        export_class=None,
+        fps=None,
+        bimanual=True,
+        license="BSD-3-Clause",
+        label="ALOHA",
+    ),
+    "trossen_ai": _menagerie_robot(
+        "trossen_ai",
+        "trossen_wxai",
+        "wxai_follower_biarm.xml",
+        joint_names=_two(
+            "left/", "right/", tuple(n if n != "gripper" else "right_carriage_joint" for n in _WXAI_ARM)
+        ),
+        description="Trossen AI stationary: two WidowX AI arms (MuJoCo Menagerie trossen_wxai biarm). "
+        "Joints in radians, gripper carriage in metres (the current Trossen LeRobot format).",
+        joints=_two("left_", "right_", _WXAI_ARM),
+        grippers=("left_gripper", "right_gripper"),
+        units=("native",) * 14,
+        aliases={
+            **{f"{s}_gripper": (f"{s}_joint_6", f"{s}_left_carriage_joint", f"{s}_right_carriage_joint") for s in ("left", "right")},
+        },
+        robot_types=(r"trossen_ai", r"widowx_?ai"),
+        bounds=_DYNAMIXEL_BOUNDS,
+        default_params="model",
+        export_class=None,
+        fps=None,
+        bimanual=True,
+        label="Trossen AI stationary",
+    ),
+    "piper": _menagerie_robot(
+        "piper",
+        "agilex_piper",
+        "piper.xml",
+        joint_names=("joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "joint7"),
+        description="AgileX Piper 6-DoF arm (MuJoCo Menagerie agilex_piper). Joints in radians; gripper as "
+        "jaw opening in metres (mapped onto the model's 0..35 mm finger slide).",
+        joints=("joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "gripper"),
+        grippers=("gripper",),
+        units=("radians",) * 6 + ("native",),
+        unit_scale=(1.0,) * 6 + (0.5,),
+        robot_types=(r"piper",),
+        bounds=_DYNAMIXEL_BOUNDS,
+        default_params="model",
+        export_class=None,
+        fps=None,
+        license="MIT",
+        label="AgileX Piper",
+    ),
+    "koch": _menagerie_robot(
+        "koch",
+        "low_cost_robot_arm",
+        "low_cost_robot_arm.xml",
+        joint_names=("base_rotation", "pitch", "elbow", "wrist_pitch", "wrist_roll", "gripper"),
+        description="Koch-style low-cost arm (MuJoCo Menagerie low_cost_robot_arm, Alexander Koch's design). "
+        "Same joints as the SO arms; current LeRobot koch_follower logs -100..100 like them.",
+        aliases={f"{j}": (f"motor_{i}",) for i, j in enumerate(JOINTS)},
+        robot_types=(r"koch",),
+        bounds=_DYNAMIXEL_BOUNDS,
+        default_params="model",
+        export_class=None,
+        fps=None,
+        license="Apache-2.0",
+        label="Koch",
+    ),
 }
+
+def variant(base: RobotModel, name: str, **changes: Any) -> RobotModel:
+    """``base`` under another name with some fields changed (e.g. its units)."""
+    from dataclasses import replace
+
+    return replace(base, name=name, robot_types=(), **changes)
+
+
+# LeRobot >= 0.5 records SO arms in DEGREES mode by default (zero at the
+# middle of the calibrated range); older recordings and the demo datasets
+# are -100..100. info.json does not say which, so the variant is chosen per
+# dataset (antares.catalog, or --robot).
+REGISTRY["so101_deg"] = variant(
+    REGISTRY["so101"], "so101_deg", unit_map_factory=None,
+    units=("degrees",) * 5 + ("range_0_100",), label="SO-101 (degrees)",
+    description="The SO-101 model for datasets recorded in LeRobot's DEGREES mode (LeRobot >= 0.5 default).",
+)
+# Koch datasets recorded with LeRobot before late 2024 log every motor in
+# degrees from the legacy calibration pose, gripper included.
+REGISTRY["koch_deg"] = variant(
+    REGISTRY["koch"], "koch_deg", units=("degrees_raw",) * 6, label="Koch (legacy degrees)",
+    description="The Koch model for datasets from LeRobot's 2024 Koch code: every motor in degrees.",
+)
 
 #: Dataset family -> model name. SO-100 datasets use the SO-101 model; see the
 #: module docstring and the README for the measurement behind that.
