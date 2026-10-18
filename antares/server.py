@@ -1121,19 +1121,19 @@ def run_drift(
     lock_name = resolve_lock_ref(lock_name)
     lock = load_lock(lock_name)
     path = _drift_path(lock_name)
-    sim = simulate_for(dataset_robot(ds))
+    # The lock's own sim (its robot, sensor and unit maps), else the dataset's robot.
+    sim = lock_simulate(lock.to_dict()) or simulate_for(dataset_robot(ds))
     try:
         scan = drift_scan(
             ds.episodes,
             lock,
-            simulate=lock_simulate(lock.to_dict()),
+            simulate=sim,
             window=window,
             step=step,
             max_evaluations=max_evaluations,
             seed=seed,
             on_progress=on_progress,
             should_stop=should_stop,
-            **({"simulate": sim} if sim is not None else {}),
         )
     except ValueError as e:  # e.g. fewer episodes than one window
         raise HTTPException(status_code=400, detail=str(e))

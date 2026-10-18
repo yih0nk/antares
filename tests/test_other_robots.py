@@ -377,3 +377,26 @@ def test_generic_export_of_a_toml_robot_compiles_one_arm(mini_robot, tmp_path, m
     ep = _episodes(arm, p, n=1, T=40)[0]
     arm.apply(p)
     np.testing.assert_allclose(exported.replay(ep), arm.replay(ep), atol=1e-6)
+
+
+def test_check_and_drift_run_on_piper(tmp_path, monkeypatch):
+    """The drift gate scores a non-SO arm on its own joints, and a drift scan
+    runs on it (it used to pass ``simulate`` twice)."""
+    from antares import server
+    from antares.data import Dataset
+    from tests.test_export import make_lock
+
+    arm = _arm("piper")
+    p = arm.default_params(from_model=True)
+    eps = _episodes(arm, p, n=6, T=40)
+    ds = Dataset(repo_id="local/piper", robot_type="piper", fps=30.0,
+                 joint_names=tuple(arm.robot.joints), episodes=tuple(eps))
+    monkeypatch.setattr(server, "LOCK_DIR", tmp_path)
+    monkeypatch.setattr(server, "dataset_robot", lambda _ds: "piper")
+    lock = dataclasses.replace(make_lock(p), robot="piper", name="piper_unit")
+    lock.save(tmp_path / "piper_unit.lock.json")
+
+    result = server.run_check(ds, lock.to_dict(), min_episodes=1)
+    assert np.isfinite(result.score) and set(result.per_joint) <= set(arm.robot.joints)
+    scan, path = server.run_drift(ds, "piper_unit", window=3, step=3, max_evaluations=4)
+    assert path.is_file() and len(scan.windows) == 2
