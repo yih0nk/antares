@@ -4,10 +4,13 @@ A :class:`~antares.lock.RobotLock` holds fitted :class:`~antares.sim.SimParams`.
 :func:`export_mjcf` bakes those values into a copy of the SO-101 MJCF so the
 model can be dropped into any MuJoCo or RL pipeline without Antares:
 
-* ``kp``/``kv`` go on the ``sts3215`` default class's ``<position>`` and
+* ``kp``/``kv``/``forcerange`` go on the ``sts3215`` default class's
+  ``<position>`` (``forcerange`` as the symmetric ``"-f f"``) and
   ``damping``/``armature``/``frictionloss`` on its ``<joint>``. Per-joint
   values (a sequence of six) are written on the named ``<joint>`` /
-  ``<position>`` elements instead.
+  ``<position>`` elements instead. A servo-model lock bakes its PD
+  equivalent (:meth:`~antares.sim.SimParams.linearized`), so the effort
+  limit is the servo's stall torque.
 * ``gravity_scale``, when the lock fitted one, scales ``<option gravity>``.
 * ``meshdir`` is rewritten: either the STL meshes are copied into an
   ``assets/`` directory next to the output, or it points (absolute) at the
@@ -59,7 +62,8 @@ EXPORT_FORMAT = "antares.export/1"
 #: Default class in the MJCF that all six servos share.
 SERVO_CLASS = "sts3215"
 JOINT_PARAMS: tuple[str, ...] = ("damping", "armature", "frictionloss")
-ACTUATOR_PARAMS: tuple[str, ...] = ("kp", "kv")
+#: ``forcerange`` is the symmetric force limit, written as ``"-f f"``.
+ACTUATOR_PARAMS: tuple[str, ...] = ("kp", "kv", "forcerange")
 #: Written on ``<option>`` (``gravity_scale`` scales the gravity vector).
 OPTION_PARAMS: tuple[str, ...] = ("gravity_scale",)
 #: Everything :func:`bake_params` writes into the MJCF.
@@ -86,6 +90,17 @@ def _fmt(v: float) -> str:
     if not math.isfinite(v):
         raise ExportError(f"cannot write non-finite value {v!r} into MJCF")
     return repr(v)
+
+
+def _fmt_attr(key: str, v: float) -> str:
+    """One parameter as its MJCF attribute text: ``forcerange`` is the
+    symmetric pair ``"-f f"`` (MuJoCo's ``forcerange="lo hi"``), the rest a number."""
+    if key == "forcerange":
+        f = float(v)
+        if f < 0:
+            raise ExportError(f"forcerange must be >= 0, got {f!r}")
+        return f"{_fmt(-f)} {_fmt(f)}"
+    return _fmt(v)
 
 
 def _set_attrs(tag: str, attrs: Mapping[str, str]) -> str:
@@ -134,12 +149,12 @@ def bake_params(xml: str, params: Mapping[str, ParamValue], joints: Sequence[str
         if key not in BAKED_PARAMS or key in OPTION_PARAMS:
             continue
         if np.ndim(value) == 0:
-            scalar[key] = _fmt(value)  # type: ignore[arg-type]
+            scalar[key] = _fmt_attr(key, value)  # type: ignore[arg-type]
         else:
             vals = [float(v) for v in np.asarray(value, dtype=np.float64).reshape(-1)]
             if len(vals) != len(joints):
                 raise ExportError(f"{key}: expected {len(joints)} per-joint values, got {len(vals)}")
-            per_joint[key] = [_fmt(v) for v in vals]
+            per_joint[key] = [_fmt_attr(key, v) for v in vals]
 
     start, end = _class_block(xml, SERVO_CLASS)
     block = xml[start:end]
@@ -462,8 +477,9 @@ def header_lines(lock: RobotLock) -> list[str]:
         f"created_at:  {lock.created_at}",
         f"held-out tracking RMSE: {_score_text(r.baseline_eval_score)} before -> "
         f"{_score_text(r.eval_score)} after ({len(r.eval_episodes)} episodes)",
-        f"baked: kp={_fmt_param(p.kp)} kv={_fmt_param(p.kv)} damping={_fmt_param(p.damping)} "
-        f"armature={_fmt_param(p.armature)} frictionloss={_fmt_param(p.frictionloss)} "
+        f"baked: kp={_fmt_param(p.kp)} kv={_fmt_param(p.kv)} forcerange={_fmt_param(p.forcerange)} "
+        f"damping={_fmt_param(p.damping)} armature={_fmt_param(p.armature)} "
+        f"frictionloss={_fmt_param(p.frictionloss)} "
         f"gravity_scale={_fmt_param(float(p.per_joint('gravity_scale')[0]))} (scales option gravity)",
         f"latency_frames: {p.latency_frames} (command delay in dataset frames; MJCF cannot "
         f"express this, apply it in your control loop; see the .antares.json sidecar)",
@@ -483,8 +499,8 @@ def header_lines(lock: RobotLock) -> list[str]:
         q = lock.params
         lines.append(
             f"servo: {q.servo} (servo_gain={_fmt_param(q.servo_gain)} max_velocity={_fmt_param(q.max_velocity)} "
-            f"rad/s); baked as its PD equivalent, which drops the firmware's rate limit and duty-cycle "
-            f"saturation; the full model is in the .antares.json sidecar"
+            f"rad/s); baked as its PD equivalent (kp, kv, stall torque as forcerange), which drops the "
+            f"firmware's rate limit and duty-cycle saturation; the full model is in the .antares.json sidecar"
         )
     if lock.cameras:
         lines.append(
@@ -526,7 +542,7 @@ def sidecar_dict(lock: RobotLock, model: mujoco.MjModel, model_file: str, meshdi
         ),
         "servo_note": (
             "params.servo names the actuator model (absent means MuJoCo's position actuator). "
-            "For 'sts3215' the MJCF carries the PD equivalent (kp, kv); the full model "
+            "For 'sts3215' the MJCF carries the PD equivalent (kp, kv, stall torque as forcerange); the full model "
             "(servo_gain, p_coefficient, vin, kt, resistance, max_velocity) is in params, "
             "as antares.sim.Arm replays it."
         ),
