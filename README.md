@@ -119,9 +119,9 @@ API and `antares inspect` all call it):
 
 | check | outcome |
 |---|---|
-| `robot_type` recognisable: `so100*`, `so101*`, `so_follower` (any spelling) | reject otherwise; bimanual rigs (`bi_so100_follower`, 12 joints) are rejected with their own reason |
-| six joints named `shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper` (after stripping `main_` / `.pos`), same names and order in `action` and `observation.state` | reject |
-| `fps` 30 or 50 | reject |
+| `robot_type` recognisable: `so100*`, `so101*`, `so_follower` (any spelling), or a registered robot's `robot_types` (ALOHA, Trossen AI, Piper, Koch); a dataset in `antares datasets` or given `--robot` uses that model | reject otherwise; bimanual SO rigs (`bi_so100_follower`, 12 joints) are rejected with their own reason |
+| the robot's columns in its order (SO: `shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper` after stripping `main_` / `.pos`; others: their profile's `joints` or `aliases`), same names and order in `action` and `observation.state` | reject |
+| `fps` 30 or 50 on the SO arms; any rate from 5 to 500 Hz on others unless the profile fixes one | reject |
 | episodes: at least 5 for uploads and Hub ids (the fleet scan wants 15) | reject below, warn below 15 |
 | `codebase_version` v2.x / v3.x | reject other versions, warn when missing |
 | name looks like a simulator (`sim`, `mujoco`, `isaac`, …) or a merge (`merged`, `community`, …) | warning (the fleet scan rejects) |
@@ -158,9 +158,9 @@ frame instead of 7 (2.4x slower replay; the live 150-evaluation
 calibration would take 90 s instead of 45 s) and would invalidate every
 committed SO-100 number in this README. So SO-100 datasets stay on the
 SO-101 model and the SO-100 meshes are there for anyone who wants them.
-The exporter (`antares export`) writes the SO-101 MJCF only.
+The exporter (`antares export`) writes SO-100 locks on the SO-101 MJCF.
 
-To add a robot: vendor its MJCF, meshes and LICENSE under
+To add an SO-style robot inside the package: vendor its MJCF, meshes and LICENSE under
 `antares/assets/<name>/`; add a `RobotModel` to `REGISTRY` with the MJCF's
 joint names in canonical order (the SO-100 file calls them
 `Rotation, Pitch, Elbow, Wrist_Pitch, Wrist_Roll, Jaw`) and a
@@ -168,7 +168,113 @@ joint names in canonical order (the SO-100 file calls them
 ranges the way `UnitMap.from_model` assumes; teach
 `validate.robot_family` its `robot_type` spellings; point the family at the
 model in `MODEL_FOR_FAMILY`. `tests/test_robots.py` loads every registry
-entry through `Arm`.
+entry through `Arm`. Other arms are described in [Other robots](#other-robots).
+
+## Other robots
+
+`antares robots` lists every arm antares can simulate:
+
+| name | robot | columns | model |
+|---|---|---|---|
+| `so101`, `so100` | SO-101 / SO-100 | 6 (5 + gripper), LeRobot ±100 / 0..100 | vendored |
+| `aloha` | ALOHA (two ViperX 300s) | 14 (2 × 6 + 2 grippers), radians, grippers 0..1 | Menagerie `aloha` |
+| `trossen_ai` | Trossen AI stationary (two WidowX AI) | 14, radians, gripper carriage in metres | Menagerie `trossen_wxai` |
+| `piper` | AgileX Piper | 7 (6 + gripper), radians, jaw opening in metres | Menagerie `agilex_piper` |
+| `koch` | Koch v1.1 (low-cost robot arm) | 6, LeRobot ±100 / 0..100 | Menagerie `low_cost_robot_arm` |
+| `so101_deg`, `koch_deg` | the same arms recorded in degrees (LeRobot ≥ 0.5 `use_degrees`, or the 2024 Koch datasets) | 6 | as above |
+
+Only the SO models ship in the package. The others are downloaded from
+MuJoCo Menagerie at a pinned commit the first time they are used (or with
+`antares fetch-model all`) into `~/.cache/antares/models`
+(`$ANTARES_MODEL_CACHE`), so a lock fitted today replays on the same
+geometry later.
+
+A robot profile (`RobotModel` in `antares/robots.py`) says what antares
+used to assume for the SO arms:
+
+- `joints`: the dataset columns, in order, and `joint_names`: the MJCF joint
+  each one drives (each must have exactly one joint actuator). Joints the
+  MJCF couples to a mapped one with an `<equality joint>` (a second finger)
+  follow it. `aliases` accepts other column spellings (`motor_0`, `..._joint_6`).
+- `grippers`: the columns left out of the score (grasp contact isn't
+  simulated). The first one marks grasps for contact detection.
+- `units` per column: `range_m100_100`, `range_0_100`, `range_0_1`,
+  `degrees` (zero at the middle of the range, LeRobot's `DEGREES` mode),
+  `degrees_raw`, `radians` or `native` (metres for a prismatic gripper),
+  with an optional `unit_scale` and separate `action_units` when commands
+  and readings differ.
+- `default_params`: `"sts3215"` (SO: the shared servo defaults) or
+  `"model"`: start from each joint's own values in the MJCF. On those robots
+  one fitted kp, damping or similar is a multiplier of each joint's own
+  value, so a wrist and a shoulder that differ 50x keep their proportions.
+- `bounds` overrides per factor, `fps`, `robot_types` patterns, `bimanual`.
+
+Add your own without editing the package: write `[[robot]]` tables in a TOML
+file (`name`, `joints`, `mjcf_joints`, and `model = "path/to/robot.xml"` or
+`menagerie = {directory, xml}`, plus any field above) and point
+`$ANTARES_ROBOTS` at it.
+
+`antares datasets` lists public LeRobot datasets of these arms to test on,
+with the model each replays on (the catalog in `antares/catalog.py`; notes
+on why each was picked are in the PR). `antares calibrate <id>` picks the
+model from the catalog; `--robot` overrides it for any dataset.
+
+Everything downstream runs on the lock's robot: `check`, `--explain`,
+`drift`, `dr`, `events`, `compensate`, `specificity`, the viewer (OBJ and
+STL meshes) and `export`. Robots without a shared servo class are exported
+through `mujoco.MjSpec`: the lock's values are written on each mapped joint
+and actuator, and the exported model replays the lock to within 1e-6 rad
+(`tests/test_other_robots.py`).
+
+## What the fit accounts for
+
+`antares factors` prints every factor the fit can account for, from one
+registry (`antares/factors.py`) that the fit, `--explain`, drift, DR,
+export and the lock all read:
+
+```
+name            what                 stages     range                  pinned by data
+kp              Servo stiffness      shared     10..5000 N*m/rad       no
+kv              Servo velocity gain  shared     0.1..50 N*m*s/rad      no
+damping         Joint damping        shared     0.01..10 N*m*s/rad     no
+armature        Rotor inertia        shared     0.0001..0.5 kg*m^2     partly
+frictionloss    Joint friction       shared     0.001..2 N*m           partly
+latency_frames  Command latency      shared     0..5 frames            yes
+forcerange      Torque limit         per_joint  0.5..30 N*m            untested
+sensor_gain     Joint reading scale  sensor     0.75..1.33 x           yes
+sensor_bias     Joint zero offset    sensor     -25..25 dataset units  yes
+```
+
+"Pinned by data" is what the robot-specificity study and the fleet showed:
+latency and the sensor map are measurements, stiffness and damping trade
+off against each other at equal error (refits of one arm span 25x), so read
+them as a fit. `-v` prints what each one explains, the data it needs and
+the evidence. The same command lists effects antares knows about but
+doesn't model yet (contact, payload, backlash, temperature, cable drag,
+encoder resolution) and what each would need.
+
+Choose what a fit accounts for:
+
+```bash
+antares calibrate <id> --factors -kp                    # all defaults but kp
+antares calibrate <id> --factors latency_frames,damping # only these two
+```
+
+Add a factor from a TOML file (`examples/factors.toml`): `target` names a
+MuJoCo `MjModel` field (`opt.gravity`, `body_mass`, `jnt_stiffness`,
+`actuator_gainprm:0`), `mode` is `scale` (starts at 1) or `set`, and
+`per_joint = true` gives one value per joint. Anything a field can't
+express takes `apply = "module:function"`, a function of `(arm, values)`.
+
+```bash
+antares calibrate <id> --factors-file examples/factors.toml --factors +gravity_scale
+```
+
+`$ANTARES_FACTORS` loads the same files for the server and every command.
+An added factor starts as "untested"; run `antares identify` on the lock
+before reading its value as a measurement. Every lock records which factors
+each stage fitted (`"factors"` in the lock JSON), and the viewer's
+calibrate panel has the same checklist.
 
 ## Drift over a session
 
@@ -1057,8 +1163,11 @@ wrist cameras are skipped; the sim is the SO-101 model for both datasets.
 |---|---|
 | `antares/data.py` | LeRobot dataset loader (tabular only) |
 | `antares/validate.py` | Dataset checks shared by upload, `inspect` and the fleet scan |
-| `antares/robots.py` | Registry of simulator models (`so101`, `so100`) |
-| `antares/sim.py` | MuJoCo model, unit mapping, replay and rollout |
+| `antares/sim.py` | MuJoCo model, column-to-joint mapping, unit mapping, replay and rollout |
+| `antares/robots.py` | Robot profiles: columns, joints, units, grippers, model file (`antares robots`) |
+| `antares/factors.py` | What the fit can account for, and what it can't yet (`antares factors`) |
+| `antares/menagerie.py` | Fetches non-vendored MuJoCo Menagerie models at a pinned commit |
+| `antares/catalog.py` | Public datasets of other arms to test on (`antares datasets`) |
 | `antares/calibrate.py` | CMA-ES parameter fit |
 | `antares/sensor.py` | Per-joint command offset/scale fit |
 | `antares/gap.py` | Tracking-error metrics |
