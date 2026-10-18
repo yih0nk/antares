@@ -1732,3 +1732,19 @@ button.link:disabled {
 .legend button.link {
   pointer-events: auto;
 }
+
+.save-lock {
+  display: flex;
+  gap: 8px;
+}
+
+.save-lock input {
+  flex: 1;
+  min-width: 0;
+}
+
+.save-lock .cta {
+  flex: none;
+  width: auto;
+  padding-inline: 14px;
+}
