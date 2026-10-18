@@ -253,8 +253,9 @@ for a lock worth keeping, try both step sizes with a 1200 budget.
 
 The per-joint locks also transfer across the two arms better than the
 shared ones (`antares cross`, held-out splits): the SO-100 per-joint lock
-scores 1.014° on SO-101 against 1.138° for the SO-100 shared lock, and the
-SO-101 per-joint lock 0.769° on SO-100 against 0.846°.
+scores 1.069° on SO-101 against 1.269° for the SO-100 shared lock, and the
+SO-101 per-joint lock 0.812° on SO-100 against 0.964°.
+
 
 Caveat: the gripper is not scored (object contacts are not logged), so its
 per-joint parameters are unconstrained and should not be read as physical.
