@@ -242,6 +242,12 @@ export type DashboardRobot = {
   // Parameters a seeded calibration held fixed, when the lock records them.
   pinned: string[] | null;
   history: { latest: HistoryEntry | null; trend: HistoryTrend | null };
+  // Registry (locks/registry.json): the physical robot this lock belongs to
+  // and its place in that robot's lineage; all null when unregistered.
+  robot_id: string | null;
+  is_active: boolean | null;
+  version: number | null;
+  n_versions: number | null;
 };
 
 export type FleetSummary = {

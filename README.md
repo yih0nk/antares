@@ -670,6 +670,116 @@ turns it off), so commit it from the job or keep it as an artifact:
   with: { name: robot-check-history, path: locks/*.history.jsonl }
 ```
 
+### One identity per robot: the registry
+
+A lock is one arm on one day. Recalibrate and you have a new lock under a
+new name, and every `check`, workflow and dashboard row that named the old
+one has to be re-pointed. `locks/registry.json` gives each physical robot
+one id instead (LeRobot's robot id, the `--robot-id` you record with), a
+versioned lineage of the locks fitted to it, and one **active** lock:
+
+```json
+{"version": 1,
+ "robots": {"arm_a": {"robot_type": "so101_follower", "active": "arm_a-20261017",
+                      "locks": [{"name": "arm_a-20261001", "created_at": "...", "dataset": "...",
+                                 "eval_score": 1.05, "baseline_eval_score": 4.1, "note": null,
+                                 "registered_at": "..."}, {"name": "arm_a-20261017", "...": "..."}],
+                      "created_at": "...", "updated_at": "..."}}}
+```
+
+The registry only references locks by name; the lock files are untouched
+and an unregistered lock keeps working everywhere exactly as before.
+
+```sh
+.venv/bin/antares calibrate ./recordings/arm_a/2026-10-17 --seeds 3 --name arm_a-20261017 --robot-id arm_a
+#   saved lock arm_a-20261017 -> locks/arm_a-20261017.lock.json
+#   registered lock arm_a-20261017 as v2 of 2 for robot arm_a; now active (held-out 1.050 deg vs 1.120 for arm_a-20261001 (within 10%))
+.venv/bin/antares robots                                  # one row per robot
+.venv/bin/antares robots show arm_a                       # the lineage and the parameter drift
+.venv/bin/antares robots register arm_a --lock some_lock [--activate] [--note "belt replaced"]
+.venv/bin/antares robots activate arm_a arm_a-20261001    # pick any version
+.venv/bin/antares robots rollback arm_a                   # back to the version before the active one
+.venv/bin/antares robots remove arm_a                     # forget the robot; its lock files stay
+```
+
+```
+robot  active lock     version  held-out (deg)  locks  last calibrated  last check
+-----  --------------  -------  --------------  -----  ---------------  ----------------
+arm_a  arm_a-20261017  v2 of 2  1.050           2      2026-10-17       ok 2026-10-17
+```
+
+**The robot reference.** Wherever a `--lock` or a `lock` is accepted,
+`@arm_a` means "the active lock of robot `arm_a`": `antares check <dataset>
+--lock @arm_a`, `antares history @arm_a`, `antares export @arm_a`, `drift`,
+`dr`, `compensate`, `events`, `replay`, `synth`, `camera-fit`, and the API
+(`GET /api/locks/@arm_a`, `POST /api/check {"lock": "@arm_a"}`,
+`GET /api/history/@arm_a`, ...). The CLI and the server resolve it in one
+place (`antares.registry.Registry.resolve`), and everything downstream, the
+check history included, uses the lock's own name, so a recalibration or a
+rollback changes what `@arm_a` points at and nothing else. `@` is not a
+legal character in a lock name, so the two can never be confused; a lock
+cannot be deleted through a reference. `antares record-check --robot-id
+arm_a` no longer needs `--lock` once the robot is registered.
+
+**Activation rule.** A robot's first lock becomes active. A later one is
+activated when its held-out `eval_score` is not worse than the active lock's
+by more than 10 % (`--max-regression`, a fraction); a lock without a score
+is never activated automatically; `--activate` forces it. Otherwise the lock
+is registered but left inactive and the command says why:
+
+```
+registered lock arm_a-20261024 as v3 of 3 for robot arm_a; not activated: held-out 1.480 deg is 41% worse than arm_a-20261017's 1.050 (limit 10%); force with --activate or `antares robots activate`; arm_a-20261017 stays active
+```
+
+`antares robots rollback arm_a` activates the version before the active
+one, for when a new calibration passed the rule but the arm checks worse
+on it. `antares history --robot arm_a` concatenates the check history of
+every lock in the lineage in time order, each entry tagged with its lock
+(`*` marks the active one), so the robot's record survives recalibration.
+
+**The lineage view and the pinned caveat.** `antares robots show arm_a`
+lists every version (created, dataset, held-out before → after, which
+parameters are pinned, last check, note) and then a parameter-drift table
+across versions. That table only includes parameters that are *pinned in
+every version* (see [best of N seeds](#repeatable-locks-best-of-n-seeds)):
+a single-seed fit pins only `latency_frames`, and `kp`, `kv`, `damping`,
+`armature` and `frictionloss` trade off against each other at the same
+tracking error, so a difference between two fits of them is not a change
+in the arm. They are listed as "not comparable across fits" rather than
+tabulated. Calibrate with `--seeds 3` and the pinned set grows to whatever
+the seeds agreed on.
+
+```
+parameter drift across versions (pinned in every version only):
+param           v1  v2  change
+--------------  --  --  --------
+latency_frames  2   3   +1 frame
+not comparable across fits (unpinned, so each value is a fit, not a measurement): kp (v1, v2), kv (v1, v2), ...
+```
+
+The same data is `GET /api/registry` (every robot), `GET
+/api/registry/{robot_id}` (`lineage` with `pinned`, `spread`, `params` and
+`is_active` per version, plus `param_drift`), `POST
+/api/registry/{robot_id}/register {"lock", "activate"?, "note"?,
+"max_regression"?}`, `POST .../activate {"lock"}`, `POST .../rollback` and
+`DELETE /api/registry/{robot_id}`. `POST /api/calibrate` takes `robot_id`
+(and `activate`) and the job's `done` event carries the `registration`.
+Every `GET /api/dashboard` row has `robot_id`, `is_active`, `version` and
+`n_versions` (all null when unregistered), and the Fleet view groups rows by
+robot: one header row per robot with the active lock's numbers and a
+"v2 of 2" badge, expandable to the lineage, with unregistered locks under
+"unassigned".
+
+In the Action, name the robot instead of a lock and the job follows
+whatever is active, so a recalibration never needs a workflow change:
+
+```yaml
+- uses: your-org/antares@main
+  with:
+    dataset: your-org/so101_arm_a_daily
+    robot: arm_a            # locks/registry.json in the workspace; same as lock: "@arm_a"
+```
+
 ### What changed? `--explain`
 
 A failed check says the arm no longer matches its sim. `--explain` also
@@ -1235,6 +1345,7 @@ wrist cameras are skipped; the sim is the SO-101 model for both datasets.
 
 | `antares/check.py` | Pre-deploy drift gate (`antares check`, `/api/check`) |
 | `antares/history.py` | Check history per lock across sessions (`locks/*.history.jsonl`, `antares history`, `/api/history`) |
+| `antares/registry.py` | One id per physical robot, its lock lineage and active lock (`locks/registry.json`, `antares robots`, `@<robot>`, `/api/registry`) |
 | `antares/diagnose.py` | Names the parameter change behind a drift (`check --explain`) |
 | `antares/synth.py` | Synthetic recordings of an arm with known wear (`antares synth`) |
 | `action.yml` | Composite GitHub Action running the gate in CI |

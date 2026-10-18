@@ -208,7 +208,7 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
         stages += f" + {args.per_joint_evaluations} per-joint evaluations"
     if args.fit_sensor:
         stages += " per round, fitting the sensor calibration"
-    if args.calibration or args.robot_id:
+    if args.calibration:
         stages += ", unit map from the arm's LeRobot calibration"
     print(f"calibrating {ds.repo_id}: {args.n_train} train / {args.n_eval} eval episodes, {stages}")
     last = {"n": 0, "stage": None, "seed": None}
@@ -292,6 +292,15 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
               + ", ".join(f"{j}={v:.2f}" for j, v in dis.items()))
     print(f"{r['n_evaluations']} evaluations in {r['elapsed_s']:.1f}s")
     print(f"saved lock {lock['name']} -> {path}")
+    if getattr(args, "robot_id", None):
+        # One identity per physical robot: the new lock joins the robot's
+        # lineage and the registry's rule decides whether it becomes active.
+        try:
+            reg = server.register_lock(args.robot_id, lock, activate=True if args.activate else None)
+        except Exception as e:  # noqa: BLE001 - the lock is saved; say why it was not registered
+            print(f"warning: lock saved but not registered: {_detail(e)}", file=sys.stderr)
+        else:
+            print(reg["summary"])
     return 0
 
 
@@ -517,15 +526,16 @@ def cmd_check(args: argparse.Namespace) -> int:
 
     from antares import server
 
-    lock: str | dict = args.lock
-    if os.path.isfile(args.lock):
-        with open(args.lock) as f:
-            lock = json.load(f)
     webhook = args.notify or os.environ.get("ANTARES_WEBHOOK_URL") or None
     if args.explain and args.explain_evaluations < MIN_EXPLAIN_EVALUATIONS:
         print(f"error: --explain-evaluations must be >= {MIN_EXPLAIN_EVALUATIONS}", file=sys.stderr)
         return EXIT_USAGE
     try:
+        args.lock = _resolve_lock(args.lock)  # @<robot> -> its active lock; names and paths pass through
+        lock: str | dict = args.lock
+        if os.path.isfile(args.lock):
+            with open(args.lock) as f:
+                lock = json.load(f)
         ds = server.get_dataset(args.dataset)
         res = server.run_check(
             ds,
@@ -627,6 +637,13 @@ def cmd_record_check(args: argparse.Namespace) -> int:
         print(f"warning: --episodes {episodes} is below --min-episodes {args.min_episodes}; "
               f"recording {args.min_episodes}", file=sys.stderr)
         episodes = args.min_episodes
+    # --lock defaults to the robot's active lock in the registry (@<robot-id>).
+    try:
+        args.lock = _resolve_lock(args.lock if args.lock else f"@{args.robot_id}")
+    except Exception as e:  # noqa: BLE001 - HTTPException from the resolver
+        hint = "" if args.lock else " (pass --lock, or register the robot with `antares robots register`)"
+        print(f"error: {_detail(e)}{hint}", file=sys.stderr)
+        return EXIT_USAGE
     opts = rc.RecordOptions(
         robot_port=args.robot_port,
         robot_id=args.robot_id,
@@ -769,6 +786,16 @@ def cmd_history(args: argparse.Namespace) -> int:
     if args.last is not None and args.last < 1:
         print("error: --last must be >= 1", file=sys.stderr)
         return EXIT_USAGE
+    if args.robot:
+        return _history_for_robot(args)
+    if not args.lock:
+        print("error: give a lock (name, .lock.json path or @<robot>) or --robot <id>", file=sys.stderr)
+        return EXIT_USAGE
+    try:
+        args.lock = _resolve_lock(args.lock)
+    except Exception as e:  # noqa: BLE001 - HTTPException from the resolver
+        print(f"error: {_detail(e)}", file=sys.stderr)
+        return EXIT_USAGE
     name, d = _history_target(args.lock, args.history_dir, server.LOCK_DIR)
     try:
         records = history.load(name, d)
@@ -794,6 +821,226 @@ def cmd_history(args: argparse.Namespace) -> int:
     print(_table(["date (utc)", "dataset", "verdict", "score (deg)", "limit", "worst joint"], rows))
     print(history.summary_line(records))
     return EXIT_PASS
+
+
+def _history_for_robot(args: argparse.Namespace) -> int:
+    """``antares history --robot <id>``: every lock in the robot's lineage, one
+    time-ordered history, each entry tagged with its lock."""
+    import json
+    from pathlib import Path
+
+    from antares import history, server
+    from antares.registry import UnknownRobot
+
+    try:
+        entry = server.load_registry().get(args.robot)
+    except UnknownRobot as e:
+        print(f"error: {e}", file=sys.stderr)
+        return EXIT_USAGE
+    except Exception as e:  # noqa: BLE001 - HTTPException on a corrupt registry
+        print(f"error: {_detail(e)}", file=sys.stderr)
+        return EXIT_USAGE
+    d = Path(args.history_dir) if args.history_dir else Path(server.LOCK_DIR)
+    # Each entry is tagged with the lineage lock whose history file holds it
+    # (a lock checked through a file path records the name inside the file).
+    tagged = [(name, r) for name in entry.names for r in history.load(name, d)]
+    tagged.sort(key=lambda t: t[1].time)
+    records = [r for _, r in tagged]
+    shown = tagged[-args.last:] if args.last else tagged
+    if args.json:
+        out = {"robot": args.robot, "locks": entry.names, "active": entry.active,
+               "entries": [{**r.to_dict(), "lock": name} for name, r in shown], "trend": history.trend(records)}
+        print(json.dumps(out, indent=2))
+        return EXIT_PASS
+    if not records:
+        print(f"no checks recorded for robot {args.robot} (locks: {', '.join(entry.names) or 'none'})")
+        return EXIT_PASS
+    rows = [
+        [r.at[:16].replace("T", " "), name + (" *" if name == entry.active else ""), r.dataset, r.verdict,
+         _fmt(r.score), _fmt(r.limit), r.worst_joint or "-"]
+        for name, r in shown
+    ]
+    print(_table(["date (utc)", "lock", "dataset", "verdict", "score (deg)", "limit", "worst joint"], rows))
+    n_locks = len({name for name, _ in tagged})
+    print(f"{history.summary_line(records)}; across {n_locks} lock{'s' if n_locks != 1 else ''} of robot {args.robot}"
+          f" (* = active)")
+    return EXIT_PASS
+
+
+# --------------------------------------------------------------------------
+# robots: the registry (antares.registry)
+# --------------------------------------------------------------------------
+
+
+def _resolve_lock(ref: str) -> str:
+    """The one place the CLI turns ``@<robot>`` into the robot's active lock
+    name; lock names and ``.lock.json`` paths pass through unchanged."""
+    from antares import server
+
+    return server.resolve_lock_ref(ref)
+
+
+def _pfmt(v) -> str:
+    """A parameter value for a table: scalars to 4 significant digits, a
+    per-joint list as its range."""
+    if v is None:
+        return "-"
+    if isinstance(v, (list, tuple)):
+        xs = [x for x in v if isinstance(x, (int, float))]
+        if not xs:
+            return "-"
+        lo, hi = min(xs), max(xs)
+        return _pfmt(lo) if lo == hi else f"{_pfmt(lo)}..{_pfmt(hi)}"
+    if isinstance(v, bool):
+        return str(v)
+    if isinstance(v, int) or (isinstance(v, float) and v.is_integer() and abs(v) < 1e6):
+        return str(int(v))
+    return f"{v:.4g}"
+
+
+def _score_pair(before, after) -> str:
+    b = "-" if before is None else f"{before:.3f}"
+    a = "-" if after is None else f"{after:.3f}"
+    return f"{b} -> {a}"
+
+
+def _last_check(name: str | None, lock_dir) -> str:
+    """``<verdict> <date>`` of the newest recorded check of ``name``, or ``never``."""
+    if not name:
+        return "-"
+    from antares import history
+
+    try:
+        records = history.load(name, lock_dir)
+    except ValueError:
+        return "-"
+    if not records:
+        return "never"
+    r = records[-1]
+    return f"{r.verdict} {r.date}"
+
+
+def cmd_robots(args: argparse.Namespace) -> int:
+    import json
+
+    from antares import server
+    from antares.registry import RegistryError, UnknownRobot, param_drift
+
+    sub = getattr(args, "robots_cmd", None) or "list"
+    try:
+        reg = server.load_registry()
+    except Exception as e:  # noqa: BLE001 - HTTPException on a corrupt file
+        print(f"error: {_detail(e)}", file=sys.stderr)
+        return EXIT_USAGE
+
+    try:
+        if sub == "list":
+            rows = [reg.summary(rid) for rid in reg.robots()]
+            if args.json:
+                print(json.dumps({"path": str(reg.path), "robots": rows}, indent=2))
+                return EXIT_PASS
+            if not rows:
+                print(f"no robots registered in {reg.path} "
+                      f"(antares robots register <id> --lock <name>, or calibrate ... --robot-id <id>)")
+                return EXIT_PASS
+            table = []
+            for s in rows:
+                ver = f"v{s['version']} of {s['n_versions']}" if s["version"] else f"- of {s['n_versions']}"
+                table.append([
+                    s["robot_id"],
+                    s["active"] or "-",
+                    ver,
+                    "-" if s["eval_score"] is None else f"{s['eval_score']:.3f}",
+                    str(s["n_versions"]),
+                    str(s["last_calibrated"] or "")[:10] or "-",
+                    _last_check(s["active"], server.LOCK_DIR),
+                ])
+            print(_table(["robot", "active lock", "version", "held-out (deg)", "locks", "last calibrated", "last check"], table))
+            return EXIT_PASS
+
+        if sub == "show":
+            s = reg.summary(args.robot_id)
+            lineage = reg.lineage(args.robot_id)
+            drift = param_drift(lineage)
+            if args.json:
+                print(json.dumps({**s, "lineage": lineage, "param_drift": drift}, indent=2))
+                return EXIT_PASS
+            typ = f" ({s['robot_type']})" if s["robot_type"] else ""
+            active = f"active {s['active']} (v{s['version']} of {s['n_versions']})" if s["active"] else "no active lock"
+            print(f"robot {s['robot_id']}{typ}: {s['n_versions']} lock{'s' if s['n_versions'] != 1 else ''}, {active}")
+            rows = []
+            for row in lineage:
+                mark = "*" if row["is_active"] else ""
+                missing = "" if row["exists"] else " (file missing)"
+                rows.append([
+                    f"v{row['version']}{mark}",
+                    f"{row['name']}{missing}",
+                    str(row["created_at"] or "")[:10] or "-",
+                    row["dataset"] or "-",
+                    _score_pair(row["baseline_eval_score"], row["eval_score"]),
+                    ", ".join(row["pinned"]) if row["pinned"] else ("-" if row["exists"] else "?"),
+                    _last_check(row["name"], server.LOCK_DIR),
+                    row["note"] or "",
+                ])
+            print(_table(["version", "lock", "created", "dataset", "held-out before -> after", "pinned", "last check", "note"], rows))
+            print("* = active; a parameter is pinned when the fit can read it as a measurement (see `--seeds`)")
+            if drift["versions"]:
+                print()
+                print("parameter drift across versions (pinned in every version only):")
+                heads = ["param"] + [f"v{v}" for v in drift["versions"]] + ["change"]
+                prow = [[k] + [_pfmt(v) for v in c["values"]] + [c["change"]] for k, c in drift["comparable"].items()]
+                if prow:
+                    print(_table(heads, prow))
+                else:
+                    print("  none: no parameter is pinned in every version")
+                if drift["not_comparable"]:
+                    print("not comparable across fits (unpinned, so each value is a fit, not a measurement): "
+                          + ", ".join(f"{k} (v{', v'.join(str(v) for v in vs)})" for k, vs in drift["not_comparable"].items()))
+            return EXIT_PASS
+
+        if sub == "register":
+            if args.max_regression is not None and args.max_regression < 0:
+                print("error: --max-regression must be >= 0", file=sys.stderr)
+                return EXIT_USAGE
+            res = server.register_lock(
+                args.robot_id, args.lock, activate=True if args.activate else None, note=args.note,
+                max_regression=args.max_regression,
+            )
+            print(res["summary"])
+            return EXIT_PASS
+
+        if sub == "activate":
+            previous = reg.activate(args.robot_id, args.lock)
+            reg.save()
+            e = reg.get(args.robot_id)
+            was = f" (was {previous})" if previous and previous != args.lock else ""
+            print(f"robot {args.robot_id}: active lock {args.lock} (v{e.version(args.lock)} of {len(e.locks)}){was}")
+            return EXIT_PASS
+
+        if sub == "rollback":
+            previous, now = reg.rollback(args.robot_id)
+            reg.save()
+            e = reg.get(args.robot_id)
+            print(f"robot {args.robot_id}: rolled back {previous} -> {now} (v{e.version(now)} of {len(e.locks)})")
+            return EXIT_PASS
+
+        if sub == "remove":
+            entry = reg.remove(args.robot_id)
+            reg.save()
+            print(f"removed robot {args.robot_id} from {reg.path}; its {len(entry.locks)} lock file(s) stay: "
+                  + (", ".join(entry.names) or "none"))
+            return EXIT_PASS
+    except UnknownRobot as e:
+        print(f"error: {e}", file=sys.stderr)
+        return EXIT_USAGE
+    except RegistryError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return EXIT_USAGE
+    except Exception as e:  # noqa: BLE001 - HTTPException from register_lock (missing lock, bad name)
+        print(f"error: {_detail(e)}", file=sys.stderr)
+        return EXIT_USAGE
+    print(f"error: unknown robots command {sub!r}", file=sys.stderr)
+    return EXIT_USAGE
 
 
 def _frac(v) -> str:
@@ -1548,7 +1795,10 @@ def build_parser() -> argparse.ArgumentParser:
         g.add_argument("--calibration", default=None, metavar="PATH",
                        help="the follower's LeRobot calibration file (<robot.id>.json)")
         g.add_argument("--robot-id", default=None, metavar="ID",
-                       help="LeRobot --robot.id: find ID.json under $HF_LEROBOT_CALIBRATION/robots/<robot-type>/")
+                       help="LeRobot --robot.id of this arm: its calibration ID.json is looked up under "
+                       "$HF_LEROBOT_CALIBRATION/robots/<robot-type>/ (inspect: required; calibrate: used "
+                       "when present), and calibrate also registers the saved lock for this robot in "
+                       "locks/registry.json")
         g.add_argument("--robot-type", default="so101_follower",
                        help="LeRobot robot type for --robot-id (default so101_follower; the so_follower "
                        "directory of LeRobot >= 0.5 is tried too)")
@@ -1612,6 +1862,8 @@ def build_parser() -> argparse.ArgumentParser:
         "(sim, default), or pre-fit it from still frames and freeze it (kinematic)",
     )
     add_calibration_args(p)
+    p.add_argument("--activate", action="store_true",
+                   help="with --robot-id: activate the new lock even if it scores worse")
     p.set_defaults(func=cmd_calibrate)
 
     p = sub.add_parser("cross", help="score locks across datasets (matrix)")
@@ -1654,7 +1906,8 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument("dataset", help="Hub dataset id or a LeRobot dataset directory on disk")
-    p.add_argument("--lock", required=True, help="lock name in the lock dir, or a .lock.json path")
+    p.add_argument("--lock", required=True,
+                   help="lock name in the lock dir, a .lock.json path, or @<robot-id> for a registered robot's active lock")
     p.add_argument("--threshold", type=float, default=None, metavar="DEG",
                    help="absolute error allowed in degrees (default: none)")
     p.add_argument("--ratio", type=float, default=1.5,
@@ -1706,7 +1959,9 @@ def build_parser() -> argparse.ArgumentParser:
             "pass --recorder when lerobot-record lives in another environment."
         ),
     )
-    p.add_argument("--lock", required=True, help="lock name in the lock dir, or a .lock.json path")
+    p.add_argument("--lock", default=None,
+                   help="lock name in the lock dir, a .lock.json path, or @<robot-id>; "
+                        "default: the active lock registered for --robot-id")
     p.add_argument("--robot-port", required=True, metavar="PORT", help="follower arm serial port, e.g. /dev/tty.usbmodem...")
     p.add_argument("--robot-id", required=True, metavar="ID", help="the LeRobot id the arm was calibrated under (names the recording and the banner)")
     p.add_argument("--robot-type", default="so101_follower", help="LeRobot robot type (default so101_follower)")
@@ -1735,7 +1990,10 @@ def build_parser() -> argparse.ArgumentParser:
             "oldest first) and the least-squares slope of their score in degrees per day."
         ),
     )
-    p.add_argument("lock", help="lock name in the lock dir, or a .lock.json path")
+    p.add_argument("lock", nargs="?", default=None,
+                   help="lock name in the lock dir, a .lock.json path, or @<robot-id> (its active lock)")
+    p.add_argument("--robot", default=None, metavar="ID",
+                   help="instead of one lock: every lock in the registered robot's lineage, in time order")
     p.add_argument("--last", type=int, default=None, metavar="N",
                    help="show only the newest N checks (the trend still uses all of them)")
     p.add_argument("--json", action="store_true",
@@ -1743,6 +2001,44 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--history-dir", default=None, metavar="DIR",
                    help="directory of the history file (default: next to the lock)")
     p.set_defaults(func=cmd_history)
+
+    p = sub.add_parser(
+        "robots",
+        help="the registry: one id per physical robot, its lock lineage and the active lock",
+        description=(
+            "locks/registry.json gives each physical robot (LeRobot's robot id) a versioned lineage "
+            "of calibrations and one active lock. `@<id>` then stands for that lock wherever a --lock "
+            "is accepted. Without a subcommand, list the robots."
+        ),
+    )
+    p.add_argument("--json", action="store_true", help="print the table as JSON")
+    p.set_defaults(func=cmd_robots, robots_cmd="list")
+    rsub = p.add_subparsers(dest="robots_cmd")
+    r = rsub.add_parser("list", help="one row per robot: active lock, version, held-out score, last check")
+    r.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    r.set_defaults(func=cmd_robots)
+    r = rsub.add_parser("show", help="a robot's lineage and how its pinned parameters moved between versions")
+    r.add_argument("robot_id")
+    r.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    r.set_defaults(func=cmd_robots)
+    r = rsub.add_parser("register", help="add a saved lock to a robot's lineage (activated by the rule)")
+    r.add_argument("robot_id")
+    r.add_argument("--lock", required=True, help="lock name in the lock dir, or a .lock.json path")
+    r.add_argument("--activate", action="store_true", help="activate even if it scores worse than the active lock")
+    r.add_argument("--note", default=None, help="free text kept with the entry (why it was recalibrated)")
+    r.add_argument("--max-regression", type=float, default=None, metavar="FRAC",
+                   help="activate when the held-out score is at most this fraction worse (default 0.10)")
+    r.set_defaults(func=cmd_robots)
+    r = rsub.add_parser("activate", help="make one lock of the lineage the active one")
+    r.add_argument("robot_id")
+    r.add_argument("lock")
+    r.set_defaults(func=cmd_robots)
+    r = rsub.add_parser("rollback", help="activate the lock before the active one")
+    r.add_argument("robot_id")
+    r.set_defaults(func=cmd_robots)
+    r = rsub.add_parser("remove", help="forget a robot (its lock files stay)")
+    r.add_argument("robot_id")
+    r.set_defaults(func=cmd_robots)
 
 
     p = sub.add_parser("events", help="detect contact events from the real-sim residual")
