@@ -196,17 +196,16 @@ streamed over `/api/jobs/{id}/events`, one event per window) and
 
 What the two demo datasets show (window 10, step 5, nine windows each):
 
-* **SO-100**: the lock's error grows from 0.71° to about 0.83° over the
-  session (+16%, r² 0.65, significant). The refits do not recover it
-  (they beat the lock by under 3% on any window) and no parameter moves
-  consistently, so this is a harder tail of the session, not wear the
-  six parameters can describe. Most of the growth is in `elbow_flex`
-  (1.11° to 1.32°) and `shoulder_lift`.
-* **SO-101**: the lock's error is flat (1.04° to 1.14°, +5%). The scan
-  flags `armature` (+269%), but with r² 0.36, a 4% mean refit gain and two
-  windows where the refit found nothing better than the lock itself, that
-  is scatter in a weakly constrained parameter rather than drift. The
-  verdict says so.
+* **SO-100**: the lock's error grows by 17% over the session (r² 0.66,
+  significant) and the windowed refits' own training error grows with it
+  (+20%, r² 0.61), so refitting does not recover it and no parameter
+  moves consistently. This is a harder tail of the session, not wear the
+  six parameters can describe.
+* **SO-101**: the lock's error falls slightly (-5%, significant but under
+  the 10% bar) and no parameter drifts. `armature` moves the most (+201%
+  first to last window, r² 0.31), but its interval includes zero, so that
+  is scatter in a weakly constrained parameter. The verdict is "no drift".
+
 
 Overlapping windows are not independent, so the bootstrap interval is
 optimistic; treat a flag as "worth a look", not as a measurement of wear.
@@ -230,11 +229,11 @@ contain the lock value; latency is the integer min/max):
 
 | param | nominal | lo | hi | spread |
 |---|---|---|---|---|
-| kp | 93.7 | 50.1 | 108.9 | -46% .. +16% |
-| kv | 1.57 | 0.62 | 5.07 | -61% .. +223% |
-| damping | 0.053 | 0.017 | 0.271 | -68% .. +414% |
-| armature | 0.0197 | 0.0018 | 0.031 | -91% .. +56% |
-| frictionloss | 0.025 | 0.0028 | 0.108 | -89% .. +328% |
+| kp | 10.54 | 10.02 | 11.14 | -5% .. +6% |
+| kv | 0.136 | 0.110 | 0.558 | -19% .. +310% |
+| damping | 0.0123 | 0.0104 | 0.0459 | -15% .. +274% |
+| armature | 0.0028 | 0.00034 | 0.0065 | -88% .. +128% |
+| frictionloss | 0.094 | 0.047 | 0.102 | -50% .. +8% |
 | latency_frames | 4 | 3 | 4 | -1 .. +0 frames |
 
 The ranges are saved as `locks/<name>.dr.json` with their provenance
@@ -244,28 +243,31 @@ training loop with `antares.dr.sample` and `apply`; see
 
 Does the derived range beat a hand-picked one? Tracking RMSE on the lock's
 10 held-out episodes, averaging over 64 parameter sets sampled from each
-range (MJCF defaults score 6.01 deg):
+range (MJCF defaults score 6.01 deg; `scripts/dr_compare.py svla_so101_pickplace`):
 
 | parameters | mean | median | min .. max |
 |---|---|---|---|
-| (a) lock nominal | 1.05 | | |
-| (b) data-derived ranges | 1.39 | 1.20 | 0.97 .. 3.29 |
-| (c) hand-picked +-30% | 1.53 | 1.69 | 1.04 .. 2.10 |
-| (c') +-30%, latency fixed at nominal | 1.07 | 1.07 | 1.04 .. 1.13 |
+| (a) lock nominal | 0.74 | | |
+| (b) data-derived ranges | 1.03 | 0.89 | 0.59 .. 1.87 |
+| (c) hand-picked +-30% | 1.32 | 1.51 | 0.73 .. 2.17 |
+| (c') +-30%, latency fixed at nominal | 0.77 | 0.76 | 0.72 .. 0.91 |
 
 The hand-picked range is wrong in both directions at once. On latency,
 +-30% around 4 frames allows 5, which the data never supports and which
 alone costs about half a degree on average (c vs c'). On the continuous parameters
 it is far too narrow: within +-30% the sim is nearly indistinguishable from
 nominal (c'), so a policy trained there sees no diversity. The
-data-derived ranges span 2-5x on `kv`, `damping` and `frictionloss`, keep
-latency where the data puts it, and still average 1.39 deg, 4.3x better
-than the uncalibrated sim. Some samples beat the lock itself (min 0.97),
-because the lock was fit on different episodes.
+data-derived ranges span 4-5x on `kv` and `damping` and almost 20x on
+`armature`, keep latency where the data puts it, and still average
+1.03 deg, 5.8x better than the uncalibrated sim. Some samples beat the
+lock itself (min 0.59), because the lock was fit on different episodes.
 
-Caveat worth knowing: most refits push `kp` to 50, the lower edge of the
-search space, so `kp.lo` is set by the bound, not the data. The replay
-cannot separate a low gain from a low velocity gain over these episodes.
+
+Caveat worth knowing: the lock and its refits sit at `kp` 10-11, right on
+the lower edge of the search space (10), so the narrow `kp` range and
+`kp.lo` are set by the bound, not the data. The replay cannot separate a
+low gain from a low velocity gain over these episodes.
+
 
 API: `POST /api/dr {dataset, lock?, n_fits?, n_train?, max_evaluations?,
 seed?, name?}` starts a job and returns `{job_id, status_url, events_url}`;
@@ -277,7 +279,7 @@ ranges, `GET /api/dr/{name}` returns one.
 
 The shared fit gives all six servos the same gain, damping, armature,
 friction and latency. That leaves the elbow as the worst joint on both demo
-arms (SO-101 held-out: 2.03° vs under 1° for the others), which makes
+arms (SO-101 held-out: 1.12° vs 0.81° or less for the others), which makes
 sense: each STS3215 carries a different load, from the shoulder lifting the
 whole arm to the wrist lifting almost nothing.
 
@@ -309,22 +311,27 @@ result records a per-stage summary.
 Held-out tracking RMSE in degrees, `split_episodes(…, 20, 10, seed=0)`,
 gripper excluded from the overall score. The per-joint locks are
 `locks/*_perjoint.lock.json`; their shared stage reproduces the shipped
-shared locks exactly.
+shared locks exactly (all four refit with the `kp` floor at 10).
 
 | | SO-101 default | SO-101 shared | SO-101 per-joint | SO-100 default | SO-100 shared | SO-100 per-joint |
 |---|---|---|---|---|---|---|
-| **overall** | 6.007 | 1.054 | **0.812** | 2.744 | 0.791 | **0.530** |
-| shoulder_pan | 8.049 | 0.349 | 0.363 | 3.224 | 0.433 | 0.320 |
-| shoulder_lift | 6.832 | 0.968 | 1.034 | 3.540 | 0.829 | 0.709 |
-| elbow_flex | 5.355 | 2.031 | **1.316** | 2.516 | 1.322 | **0.601** |
-| wrist_flex | 3.797 | 0.476 | 0.455 | 1.955 | 0.432 | 0.408 |
-| wrist_roll | 5.085 | 0.387 | 0.390 | 2.136 | 0.567 | 0.520 |
+| **overall** | 6.007 | 0.736 | **0.656** | 2.744 | 0.787 | **0.538** |
+| shoulder_pan | 8.049 | 0.522 | 0.446 | 3.224 | 0.356 | 0.336 |
+| shoulder_lift | 6.832 | 0.813 | 0.736 | 3.540 | 0.840 | 0.662 |
+| elbow_flex | 5.355 | 1.121 | **1.061** | 2.516 | 1.329 | **0.703** |
+| wrist_flex | 3.797 | 0.548 | 0.371 | 1.955 | 0.436 | 0.361 |
+| wrist_roll | 5.085 | 0.463 | 0.383 | 2.136 | 0.557 | 0.522 |
 | evaluations | – | 200 | 200 + 1200 | – | 150 | 150 + 1200 |
-| per-joint sigma0 | – | – | 0.1 | – | – | 0.05 |
+
+With the lower `kp` floor the shared fit already reaches most of what the
+per-joint stage used to add on SO-101 (0.736 shared now against 0.812
+per-joint before); the per-joint stage still pays off most on the SO-100
+elbow.
 
 The per-joint stage is sensitive to its step size and budget. Held-out
 score after refining each shared optimum, CMA-ES's default population
-of 15, seed 0:
+of 15, seed 0 (measured on the earlier shared locks, fit with the `kp`
+floor at 50, so the absolute numbers are higher than the table above):
 
 | sigma0 | SO-101, 600 evals | SO-101, 1200 | SO-100, 600 | SO-100, 1200 |
 |---|---|---|---|---|
@@ -340,8 +347,9 @@ for a lock worth keeping, try both step sizes with a 1200 budget.
 
 The per-joint locks also transfer across the two arms better than the
 shared ones (`antares cross`, held-out splits): the SO-100 per-joint lock
-scores 1.014° on SO-101 against 1.138° for the SO-100 shared lock, and the
-SO-101 per-joint lock 0.769° on SO-100 against 0.846°.
+scores 1.069° on SO-101 against 1.269° for the SO-100 shared lock, and the
+SO-101 per-joint lock 0.812° on SO-100 against 0.964°.
+
 
 Caveat: the gripper is not scored (object contacts are not logged), so its
 per-joint parameters are unconstrained and should not be read as physical.
@@ -470,12 +478,13 @@ through the locked sim, and fail if the tracking error has grown past
 ```
 joint          rmse (deg)  reference  limit  status
 -------------  ----------  ---------  -----  -----------------
-shoulder_pan   0.405       0.349      0.524  PASS  <- worst
-shoulder_lift  0.854       0.968      1.452  PASS
-elbow_flex     2.095       2.031      3.046  PASS
+shoulder_pan   0.592       0.522      0.783  PASS  <- worst
+shoulder_lift  0.841       0.813      1.220  PASS
+elbow_flex     1.122       1.121      1.682  PASS
 ...
-overall        1.067       1.054      1.582  PASS
-OK: lerobot/svla_so101_pickplace vs lock svla_so101_pickplace: 1.067 deg RMSE on 10 episodes (reference 1.054, limit 1.582)
+overall        0.752       0.736      1.103  PASS
+OK: lerobot/svla_so101_pickplace vs lock svla_so101_pickplace: 0.752 deg RMSE on 50 episodes (reference 0.736, limit 1.103); worst joint shoulder_pan 0.592 deg (limit 0.783)
+
 ```
 
 Exit codes: `0` pass, `1` drifted, `2` usage error or too few episodes
@@ -719,7 +728,7 @@ repository secret so it never appears in the workflow file or the logs:
 ## Contact detection from the residual
 
 Once the sim reproduces the arm's free-space motion (the SO-101 lock
-tracks held-out episodes to 1.05 deg RMSE), whatever is left in
+tracks held-out episodes to 0.74 deg RMSE), whatever is left in
 `real - sim` is something the sim does not model. In a pick-and-place
 log that should be the arm touching, grasping or pushing an object, so a
 sustained deviation is a contact event read off the joint encoders alone,
@@ -763,16 +772,16 @@ episodes (held-out episodes in parentheses):
 
 | | SO-101 lock | SO-100 lock |
 |---|---|---|
-| grasps / events | 68 / 92 | 89 / 213 |
-| recall (grasps with an event in +-15 frames) | 100% (100%) | 57% (59%) |
-| precision (events in a grasp window) | 61% (55%) | 33% (34%) |
-| events far from any gripper transition | 21% | 44% |
-| residual energy inside grasp windows | 23% (22%) | 11% (10%) |
+| grasps / events | 68 / 112 | 89 / 196 |
+| recall (grasps with an event in +-15 frames) | 100% (100%) | 54% (71%) |
+| precision (events in a grasp window) | 53% (61%) | 33% (41%) |
+| events far from any gripper transition | 33% | 44% |
+| residual energy inside grasp windows | 20% (19%) | 11% (10%) |
 | frames inside grasp windows (chance) | 18% (16%) | 14% (14%) |
-| lift | 1.29x (1.37x) | 0.79x (0.74x) |
+| lift | 1.12x (1.17x) | 0.78x (0.75x) |
 
 Read these with care. On the SO-101 the residual does concentrate around
-grasps, but weakly (1.3x chance), and the perfect recall comes from
+grasps, but weakly (1.1x chance), and the perfect recall comes from
 events that are long: the sim deviates by 3-5 deg on the elbow for the
 whole stretch where the arm is out over the table, from before the grasp
 until after the release, so one event covers both. On the SO-100 the
@@ -815,12 +824,18 @@ per dataset, with each dataset's own lock:
 
 | dataset | latency | raw commands | shift | ILC | ILC iterations |
 |---|---|---|---|---|---|
-| `lerobot/svla_so101_pickplace` | 4 frames | 1.054 | 0.133 | 0.048 | 4 per episode |
-| `lerobot/svla_so100_pickplace` | 3 frames | 0.791 | 0.477 | 0.119 | 3–6 per episode |
+| `lerobot/svla_so101_pickplace` | 4 frames | 0.736 | 0.923 | 0.108 | 7–10 per episode |
+| `lerobot/svla_so100_pickplace` | 3 frames | 0.787 | 0.369 | 0.120 | 3–5 per episode |
+
+On the SO-101 the pure shift makes tracking worse than the raw commands.
+Its lock's `kp` of about 10 makes the sim servo respond as a slow lag, not
+a pure 4-frame delay, so shifting the commands alone does not help; ILC
+does, with more iterations than on the stiffer SO-100.
+
 
 Feasibility (also sim-only): the compensated commands stay within the
-actuator range, exceed the original commands' range by at most 0.6°, and
-their peak velocity is 0.99× (SO-101) and 1.15× (SO-100) the fastest
+actuator range, exceed the original commands' range by at most 0.8°, and
+their peak velocity is 1.04× (SO-101) and 1.11× (SO-100) the fastest
 joint motion seen in the real data; the tool flags any joint above 1.5×.
 Frames sitting on the control limit are reported for the raw and the
 compensated commands side by side, because a desired trajectory that
@@ -854,51 +869,56 @@ searches the Hub, keeps the datasets the simulator can replay (SO-100/101
 robot type, the six canonical joints, 30 or 50 fps, at least 15 episodes, a
 tabular part under 200 MB and 200 parquet files, not a simulation or a merge
 of several people's recordings, one dataset per account), calibrates each
-one from the default parameters and writes one lock per robot plus a report:
+one from the default parameters and writes one lock per robot plus a report.
+A dataset the default parameters already track to under 0.5 deg is
+rejected after its fit and gets no lock: no physical arm in the fleet comes
+within 1.2 deg of the MJCF defaults, so such a log was most likely recorded
+in a simulator under a name that does not say so:
 
 ```sh
-.venv/bin/antares fleet scan --limit 60 --budget-s 2400   # locks/fleet/*.lock.json, fleet.json
+.venv/bin/antares fleet scan --limit 60 --budget-s 3300   # locks/fleet/*.lock.json, fleet.json
 .venv/bin/antares fleet list                              # the table below
 curl localhost:8000/api/fleet          # fleet.json
 curl localhost:8000/api/fleet/cross    # the partial cross matrix
 ```
 
-The committed scan (`locks/fleet/fleet.json`, 2026-10-17) inspected 166 Hub
-hits, accepted 60 and calibrated **40 robots** in 60 minutes, with no
-failures (20 candidates were left when the budget ran out). The 106
-rejections were mostly a second dataset from the same account (30), v1
-datasets without `meta/info.json` (24), v2 datasets stored as one parquet
-file per episode (15), simulation recordings (8), too few episodes (7) and
-bimanual or non-SO arms (14).
+The committed scan (`locks/fleet/fleet.json`, 2026-10-18, `kp` floor 10)
+inspected 166 Hub hits, accepted 60 and calibrated all of them in 51
+minutes, with no failures; **58 robots** are kept. The 108 rejections were
+mostly a second dataset from the same account (30), v1 datasets without
+`meta/info.json` (24), bimanual or non-SO arms (16), v2 datasets stored as
+one parquet file per episode (15), simulation recordings (10, two of them
+caught by the default-sim rule above), too few episodes (7) and merges (3).
 
 * **Every robot improved.** Held-out tracking RMSE went from a median of
-  3.45 deg to 1.18 deg; the median robot closed **59 %** of its gap (IQR
-  52–70 %, range 22–84 %).
+  3.45 deg to 1.09 deg; the median robot closed **63 %** of its gap (IQR
+  57–70 %, range 6–87 %).
 * **The fitted parameters are all over the place**, which is the point of
-  calibrating per robot. Latency spans 1–5 frames (33–167 ms at 30 fps),
-  median 3 frames (100 ms), IQR 2–4. Actuator gain `kp` spans 50–2954
-  (1.8 decades) with a median of 345 and IQR 93–1032; the MJCF default is
-  998. Damping, armature and friction each span more than two decades.
+  calibrating per robot. Latency spans 0–5 frames (0–167 ms at 30 fps),
+  median 3 frames (100 ms), IQR 3–4. Actuator gain `kp` spans 10–4582
+  (2.7 decades) with a median of 81 and IQR 17–571; the MJCF default is
+  998. Ten robots fit `kp` under 12, at or near the floor of 10, so the low
+  end is still set partly by the bound. Damping, armature, friction and
+  `kv` each span two to three decades. The fleet's own fit of
+  `lerobot/svla_so101_pickplace` (150 evaluations) lands at `kp` 15 and
+  0.771 deg, next to the demo lock's `kp` 10.5 and 0.736 deg at 200.
 * **Per-robot calibration beats borrowing a neighbour's.** On a 6-robot
   cross matrix (the two demo arms plus the next four), a robot scored on
-  its own lock averages 1.14 deg, on another robot's lock 1.54 deg (1.35x;
-  per-robot median 1.24x), and on the defaults 4.60 deg (4.0x). Any
+  its own lock averages 1.00 deg, on another robot's lock 1.54 deg (1.53x;
+  per-robot median 1.53x), and on the defaults 4.60 deg (4.6x). Any
   calibrated lock beats the defaults on all 30 (robot, other lock) pairs,
   and 5 of 6 robots do best on their own lock.
-* **Outliers worth a look.** `theconstruct-ai/so101_pickplace_auto_v1` and
-  `legalaspro/so101-pick-and-place-cube-lerobot-30hz` start at 0.08 and
-  0.12 deg: their commands equal the measured state, so they are not
-  teleoperation logs and the sim matches them trivially.
-  `kmg0620/so101_bomb_pick_place_v1` starts at 21.3 deg and only gets to
-  14.9; no lock in the fleet explains it, which points at a recording in
-  different units or a badly calibrated arm rather than at the servos.
-  `OkzRIKU/so101-turn-up-drone` closes only 22 % of its gap, with the gain
-  pinned at the bottom of the search range and the maximum latency;
-  `codywang/so101_pickup_test` is left at 4.4 deg, almost all of it in
-  `wrist_roll` (9.3 deg), which smells like a joint-offset problem rather
-  than servo dynamics. `SGPatil/so101_table_cleanup` fits an armature 130x
-  below the fleet median. Score outliers are kept out of the cross matrix so
-  one unexplained arm does not dominate it.
+* **Outliers worth a look.** `kmg0620/so101_bomb_pick_place_v1` starts at
+  21.3 deg and only gets to 14.8; no lock in the fleet explains it, which
+  points at a recording in different units or a badly calibrated arm
+  rather than at the servos. `aivanni/so101-algebra` is similar (12.6 to
+  8.0 deg, with `kp` at 4582 and no latency). `codywang/so101_pickup_test`
+  closes only 6 % of its gap and is left at 6.3 deg, mostly in
+  `wrist_roll` (13.7 deg), which smells like a joint-offset problem rather
+  than servo dynamics. `OkzRIKU/so101-turn-up-drone` closes 25 %.
+  `dongdong123123/so101_stack_cubes` fits an armature 58x below the fleet
+  median, at the bottom of the search range. Score outliers are kept out
+  of the cross matrix so one unexplained arm does not dominate it.
 
 
 ## Sensor calibration
@@ -1047,33 +1067,31 @@ wrist cameras are skipped; the sim is the SO-101 model for both datasets.
 | Path | What |
 |---|---|
 | `antares/data.py` | LeRobot dataset loader (tabular only) |
+| `antares/validate.py` | Dataset checks shared by upload, `inspect` and the fleet scan |
+| `antares/robots.py` | Registry of simulator models (`so101`, `so100`) |
 | `antares/sim.py` | MuJoCo model, unit mapping, replay and rollout |
 | `antares/calibrate.py` | CMA-ES parameter fit |
 | `antares/sensor.py` | Per-joint command offset/scale fit |
 | `antares/gap.py` | Tracking-error metrics |
-| `antares/lock.py` | Calibrated sim saved per robot as a lock file |
-| `antares/export.py` | Lock -> standalone MJCF, sidecar, scene, zip |
-
-| `antares/drift.py` | Sliding-window refits and trend statistics over a session |
-
 | `antares/lock.py` | Calibrated sim saved per robot (`locks/*.lock.json`) |
+| `antares/export.py` | Lock -> standalone MJCF, sidecar, scene, zip |
+| `antares/drift.py` | Sliding-window refits and trend statistics over a session |
 | `antares/dr.py` | Domain-randomization ranges derived from refits (`locks/*.dr.json`) |
-
 | `antares/check.py` | Pre-deploy drift gate (`antares check`, `/api/check`) |
 | `antares/history.py` | Check history per lock across sessions (`locks/*.history.jsonl`, `antares history`, `/api/history`) |
 | `antares/diagnose.py` | Names the parameter change behind a drift (`check --explain`) |
 | `antares/synth.py` | Synthetic recordings of an arm with known wear (`antares synth`) |
 | `action.yml` | Composite GitHub Action running the gate in CI |
-
+| `.github/workflows/` | Tests on every push (`ci.yml`) and an example weekly drift gate on the SO-101 demo lock (`robot-check.yml`) |
 | `antares/events.py` | Contact events from the real-sim residual |
-
 | `antares/compensate.py` | Lag compensation (shift, ILC), sim-validated |
 | `antares/specificity.py` | Cross-arm verdict, identifiability, swap and same-arm checks |
 | `antares/synthetic.py` | Simulated arm datasets with known parameters |
 | `results/` | Robot-specificity reports (`antares specificity`) |
+| `antares/cli.py` | The `antares` command line |
 | `antares/server.py` | FastAPI backend for the UI |
 | `examples/` | `randomize_env.py`: DR ranges in a training loop |
-
+| `scripts/` | `sensor_synthetic.py` (synthetic sensor-fit check), `dr_compare.py` (derived vs hand-picked DR ranges) |
 | `antares/fleet.py` | Hub discovery, fleet scan, fleet statistics |
 | `antares/video.py` | Dataset video frames (episode -> file/timestamp, AV1 decode, frame cache) |
 | `antares/silhouette.py` | Real arm mask: median background, colour model, static-arm region |
@@ -1084,5 +1102,16 @@ wrist cameras are skipped; the sim is the SO-101 model for both datasets.
 
 ## Status
 
-Weekend hackathon project. Data loading, replay, calibration, robot locks
-and the web viewer work end to end on the SO-101 and SO-100 demo datasets.
+Started as a weekend hackathon project. On the SO-101 and SO-100 demo
+datasets, everything above works end to end from the CLI, the API and the
+viewer: replay, shared and per-joint calibration, sensor calibration, robot
+locks and MJCF export, drift scans and the pre-deploy gate with its cause
+diagnosis, data-derived DR ranges, contact events, sim-only lag
+compensation, the robot-specificity study and the fleet scan.
+
+Not yet measured on hardware: everything is judged against logged
+trajectories, so lag compensation and DR are validated in the sim only.
+Open questions: the fits are seed-sensitive and `kp`/`kv` are not
+identifiable from pick-and-place logs (see "Is a lock specific to its
+arm?"), and the elbow error is step-shaped, which the six servo
+parameters do not model.

@@ -1,11 +1,12 @@
 {
   "antares_version": "0.0.1",
   "cancelled": false,
-  "created_at": "2026-10-17T21:31:17Z",
+  "created_at": "2026-10-18T00:38:16Z",
   "dataset": "lerobot/svla_so101_pickplace",
   "drifting": {
-    "armature": true,
+    "armature": false,
     "damping": false,
+    "forcerange": false,
     "frictionloss": false,
     "kp": false,
     "kv": false,
@@ -13,126 +14,139 @@
     "lock_score": false,
     "train_score": false
   },
-  "elapsed_s": 32.437962624942884,
+  "elapsed_s": 28.393032625026535,
   "lock": "svla_so101_pickplace",
   "lock_params": {
-    "armature": 0.019703166866811193,
-    "damping": 0.052719117670612985,
-    "frictionloss": 0.025181795953895247,
-    "kp": 93.70021916179945,
-    "kv": 1.5718591906130155,
+    "armature": 0.0028353933073637476,
+    "damping": 0.012256823895404834,
+    "forcerange": 2.94,
+    "frictionloss": 0.09430001738530909,
+    "kp": 10.537938026104497,
+    "kv": 0.1361648107759977,
     "latency_frames": 4
   },
   "max_evaluations": 60,
-  "mean_improvement": 0.04280299762897666,
+  "mean_improvement": 0.08848445697099282,
   "n_windows_planned": 9,
   "seed": 0,
   "step": 5,
   "threshold": 0.1,
   "trends": {
     "armature": {
-      "ci_hi": 0.026145440841117636,
-      "ci_lo": 0.0009368746940425888,
-      "drifting": true,
-      "intercept": -2.3970611303744698,
+      "ci_hi": 0.02136192283983884,
+      "ci_lo": -0.002960912544202552,
+      "drifting": false,
+      "intercept": -3.380024727336047,
       "log_space": true,
       "n": 9,
-      "r2": 0.3553184310075447,
-      "significant": true,
-      "slope": 0.014168812973217364,
-      "total_change": 2.6876739797497535
+      "r2": 0.306664156996326,
+      "significant": false,
+      "slope": 0.011948338889994236,
+      "total_change": 2.0056164265146443
     },
     "damping": {
-      "ci_hi": 0.008785106309808525,
-      "ci_lo": -0.017923553657870878,
+      "ci_hi": 0.0027173873816653147,
+      "ci_lo": -0.03850453092101645,
       "drifting": false,
-      "intercept": -1.1759707247159648,
+      "intercept": -1.352229562060768,
       "log_space": true,
       "n": 9,
-      "r2": 0.009217095847615209,
+      "r2": 0.13846911290365993,
       "significant": false,
-      "slope": -0.0023710019946758076,
-      "total_change": -0.19617794098896046
+      "slope": -0.011327172308571297,
+      "total_change": -0.6476996232166057
+    },
+    "forcerange": {
+      "ci_hi": 0.0,
+      "ci_lo": 0.0,
+      "drifting": false,
+      "intercept": 2.94,
+      "log_space": false,
+      "n": 9,
+      "r2": 0.0,
+      "significant": false,
+      "slope": 0.0,
+      "total_change": 0.0
     },
     "frictionloss": {
-      "ci_hi": 0.007395845906149123,
-      "ci_lo": -0.02563293852060767,
+      "ci_hi": 0.018804777497955463,
+      "ci_lo": -0.00654333159478508,
       "drifting": false,
-      "intercept": -1.638349921151939,
+      "intercept": -1.3845575203173053,
       "log_space": true,
       "n": 9,
-      "r2": 0.02273799569698154,
+      "r2": 0.1275523138627196,
       "significant": false,
-      "slope": -0.0036405202942742894,
-      "total_change": -0.2848795653577919
+      "slope": 0.008098884059218013,
+      "total_change": 1.108411432169612
     },
     "kp": {
-      "ci_hi": 0.010366658521512424,
-      "ci_lo": -0.000490291138118332,
+      "ci_hi": 0.00030332327779067396,
+      "ci_lo": -0.0011206949148213992,
       "drifting": false,
-      "intercept": 1.6272685465605794,
+      "intercept": 1.0247398564119414,
       "log_space": true,
       "n": 9,
-      "r2": 0.499722332274958,
+      "r2": 0.15383972967687642,
       "significant": false,
-      "slope": 0.005896940064238244,
-      "total_change": 0.7213833682828488
+      "slope": -0.0004317319823119736,
+      "total_change": -0.03898377342967929
     },
     "kv": {
-      "ci_hi": 0.013004951380810991,
-      "ci_lo": -0.002731766325791566,
+      "ci_hi": 0.017412206424530032,
+      "ci_lo": -0.007389082720215484,
       "drifting": false,
-      "intercept": -0.09249154501788126,
+      "intercept": -0.8176592291018853,
       "log_space": true,
       "n": 9,
-      "r2": 0.1834245354118026,
+      "r2": 0.12247472642739154,
       "significant": false,
-      "slope": 0.005924405363558402,
-      "total_change": 0.7257433738193864
+      "slope": 0.006270543768319559,
+      "total_change": 0.7816473685187519
     },
     "latency_frames": {
-      "ci_hi": 0.005138888888888879,
-      "ci_lo": -0.02580943847072879,
+      "ci_hi": 0.016488095238095236,
+      "ci_lo": -0.03835981308411215,
       "drifting": false,
-      "intercept": 3.9705555555555554,
+      "intercept": 3.882222222222222,
       "log_space": false,
       "n": 9,
-      "r2": 0.01874999999999938,
+      "r2": 0.12,
       "significant": false,
-      "slope": -0.0033333333333333335,
-      "total_change": -0.03370786516853932
+      "slope": -0.013333333333333334,
+      "total_change": -0.1395348837209302
     },
     "lock_score": {
-      "ci_hi": 0.0036533389988652513,
-      "ci_lo": 1.0006638482412694e-06,
+      "ci_hi": -0.00010273949401900656,
+      "ci_lo": -0.0013508662791129602,
       "drifting": false,
-      "intercept": 1.0512628302120322,
+      "intercept": 0.7755302173538415,
       "log_space": false,
       "n": 9,
-      "r2": 0.2686011017322262,
+      "r2": 0.4763558597455001,
       "significant": true,
-      "slope": 0.001345431683533566,
-      "total_change": 0.050899828014194175
+      "slope": -0.0008935295627461137,
+      "total_change": -0.04632631248885373
     },
     "train_score": {
-      "ci_hi": 0.004054413383185733,
-      "ci_lo": 0.001370251257782083,
+      "ci_hi": 0.0009391124856506009,
+      "ci_lo": -0.004960173260075815,
       "drifting": false,
-      "intercept": 0.9802608751284073,
+      "intercept": 0.7477255510710613,
       "log_space": false,
       "n": 9,
-      "r2": 0.6196101832463767,
-      "significant": true,
-      "slope": 0.0023406750686608617,
-      "total_change": 0.09449694989431341
+      "r2": 0.3116565398326907,
+      "significant": false,
+      "slope": -0.0024570281603458217,
+      "total_change": -0.1334128849002519
     }
   },
-  "verdict": "drift: armature +269% over the session (r\u00b2=0.36); caution: refits beat the lock by only 4% on average, so parameter trends are weakly identified",
+  "verdict": "no parameter or score drifts across the session (no trend both significant and larger than 10%)",
   "window": 10,
   "windows": [
     {
       "center": 4.5,
-      "elapsed_s": 3.1512200830038637,
+      "elapsed_s": 2.965144957997836,
       "episodes": [
         0,
         1,
@@ -146,39 +160,40 @@
         9
       ],
       "first": 0,
-      "improvement": 0.05042224737932688,
+      "improvement": 0.04994111463788797,
       "last": 9,
-      "lock_score": 1.0641773473224234,
+      "lock_score": 0.7730187601525296,
       "n_evaluations": 60,
       "params": {
-        "armature": 0.006347051992302491,
-        "damping": 0.05784249385343283,
-        "frictionloss": 0.01751035292425827,
-        "kp": 53.03722161238791,
-        "kv": 0.8759271199590342,
+        "armature": 0.00022749087990915553,
+        "damping": 0.018903149211632414,
+        "forcerange": 2.94,
+        "frictionloss": 0.029290398098737687,
+        "kp": 10.839816859003612,
+        "kv": 0.16074984368007442,
         "latency_frames": 4
       },
       "per_joint_fit": {
-        "elbow_flex": 1.8684490592412957,
-        "gripper": 3.022652072289833,
-        "shoulder_lift": 1.023785008568081,
-        "shoulder_pan": 0.38504974072947584,
-        "wrist_flex": 0.49873207605389613,
-        "wrist_roll": 0.41171589988622065
+        "elbow_flex": 1.1509692445826063,
+        "gripper": 3.017219887787955,
+        "shoulder_lift": 0.8690292311740788,
+        "shoulder_pan": 0.441305720065949,
+        "wrist_flex": 0.50362225564388,
+        "wrist_roll": 0.4104712661089036
       },
       "per_joint_lock": {
-        "elbow_flex": 1.9654220342826618,
-        "gripper": 3.031646493845414,
-        "shoulder_lift": 1.10409613710183,
-        "shoulder_pan": 0.3825408641058823,
-        "wrist_flex": 0.5140078241065549,
-        "wrist_roll": 0.41220568168129035
+        "elbow_flex": 1.111715645802476,
+        "gripper": 3.079678765095211,
+        "shoulder_lift": 0.9355635130343831,
+        "shoulder_pan": 0.5837847073191482,
+        "wrist_flex": 0.5623362994695921,
+        "wrist_roll": 0.46858569706581893
       },
-      "train_score": 1.0105191338602564
+      "train_score": 0.7344133416345141
     },
     {
       "center": 9.5,
-      "elapsed_s": 2.7104714578017592,
+      "elapsed_s": 2.917159000004176,
       "episodes": [
         5,
         6,
@@ -192,39 +207,40 @@
         14
       ],
       "first": 5,
-      "improvement": 0.042992643403462094,
+      "improvement": 0.03930278602801829,
       "last": 14,
-      "lock_score": 1.0643011798935573,
+      "lock_score": 0.7800992083908201,
       "n_evaluations": 60,
       "params": {
-        "armature": 0.005120339988158688,
-        "damping": 0.05552344229679926,
-        "frictionloss": 0.01479947455823816,
-        "kp": 51.33077575441966,
-        "kv": 1.1145518178201899,
+        "armature": 0.0013660720773770575,
+        "damping": 0.0295039271614625,
+        "forcerange": 2.94,
+        "frictionloss": 0.03833345267885009,
+        "kp": 10.061350337818354,
+        "kv": 0.1477428287724389,
         "latency_frames": 4
       },
       "per_joint_fit": {
-        "elbow_flex": 1.872147020046905,
-        "gripper": 3.040257443088415,
-        "shoulder_lift": 0.9635645092795484,
-        "shoulder_pan": 0.4966141490508334,
-        "wrist_flex": 0.5715937542981645,
-        "wrist_roll": 0.4247633897875374
+        "elbow_flex": 1.118230033734393,
+        "gripper": 3.065556958603125,
+        "shoulder_lift": 0.9270305303739789,
+        "shoulder_pan": 0.49604188455354525,
+        "wrist_flex": 0.5467984766222351,
+        "wrist_roll": 0.3916949781444764
       },
       "per_joint_lock": {
-        "elbow_flex": 1.9861548789521566,
-        "gripper": 3.0601781912268495,
-        "shoulder_lift": 1.063638416881785,
-        "shoulder_pan": 0.3976559272771767,
-        "wrist_flex": 0.540906890802584,
-        "wrist_roll": 0.3699143435248982
+        "elbow_flex": 1.1264585174440997,
+        "gripper": 3.0984420695097126,
+        "shoulder_lift": 0.9537410278934643,
+        "shoulder_pan": 0.5842857178113006,
+        "wrist_flex": 0.5824635339057828,
+        "wrist_roll": 0.42847353066671595
       },
-      "train_score": 1.0185440587925096
+      "train_score": 0.7494391361228093
     },
     {
       "center": 14.5,
-      "elapsed_s": 4.132994374958798,
+      "elapsed_s": 2.85384650004562,
       "episodes": [
         10,
         11,
@@ -238,39 +254,40 @@
         19
       ],
       "first": 10,
-      "improvement": 0.057195642217166,
+      "improvement": 0.032176484625352386,
       "last": 19,
-      "lock_score": 1.0360982567241883,
+      "lock_score": 0.760381520385899,
       "n_evaluations": 60,
       "params": {
-        "armature": 0.0035279255765352214,
-        "damping": 0.060828041564622175,
-        "frictionloss": 0.09373451738675935,
-        "kp": 50.160813980696624,
-        "kv": 0.8827628756921139,
+        "armature": 0.0004906012656607776,
+        "damping": 0.02198480005210631,
+        "forcerange": 2.94,
+        "frictionloss": 0.08877197705505731,
+        "kp": 10.067140902874787,
+        "kv": 0.12369244699041715,
         "latency_frames": 4
       },
       "per_joint_fit": {
-        "elbow_flex": 1.8374831184497715,
-        "gripper": 3.062544614847717,
-        "shoulder_lift": 0.9102453206435085,
-        "shoulder_pan": 0.43709041058254555,
-        "wrist_flex": 0.494113481933982,
-        "wrist_roll": 0.36190468822693633
+        "elbow_flex": 1.1054513482334463,
+        "gripper": 3.084126044257208,
+        "shoulder_lift": 0.8859502991873534,
+        "shoulder_pan": 0.5301550113200462,
+        "wrist_flex": 0.5222198035421766,
+        "wrist_roll": 0.38359720441785017
       },
       "per_joint_lock": {
-        "elbow_flex": 1.959941101674587,
-        "gripper": 3.0782516702225937,
-        "shoulder_lift": 0.9970045339285704,
-        "shoulder_pan": 0.4050464938146927,
-        "wrist_flex": 0.49647232818295955,
-        "wrist_roll": 0.348659418952085
+        "elbow_flex": 1.1094591730542083,
+        "gripper": 3.0926168031706984,
+        "shoulder_lift": 0.9246119809405734,
+        "shoulder_pan": 0.588198139686249,
+        "wrist_flex": 0.5400186952513066,
+        "wrist_roll": 0.4092628348599342
       },
-      "train_score": 0.9768379515307622
+      "train_score": 0.7359151160858001
     },
     {
       "center": 19.5,
-      "elapsed_s": 3.1228944999165833,
+      "elapsed_s": 2.923392833035905,
       "episodes": [
         15,
         16,
@@ -284,39 +301,40 @@
         24
       ],
       "first": 15,
-      "improvement": 0.048852969086784825,
+      "improvement": 0.09871615641837372,
       "last": 24,
-      "lock_score": 1.0518169150450463,
+      "lock_score": 0.7403807550360189,
       "n_evaluations": 60,
       "params": {
-        "armature": 0.008135935628996333,
-        "damping": 0.1762140747710663,
-        "frictionloss": 0.02180770623137327,
-        "kp": 51.982213338289206,
-        "kv": 0.842949777540247,
-        "latency_frames": 4
+        "armature": 0.0016084275483265972,
+        "damping": 0.041723710269224286,
+        "forcerange": 2.94,
+        "frictionloss": 0.1402850401987847,
+        "kp": 10.887061641643434,
+        "kv": 0.36777174806611823,
+        "latency_frames": 3
       },
       "per_joint_fit": {
-        "elbow_flex": 1.8766874052131648,
-        "gripper": 2.8379742167989446,
-        "shoulder_lift": 0.9916708113804292,
-        "shoulder_pan": 0.41674167749088503,
-        "wrist_flex": 0.44308506216515814,
-        "wrist_roll": 0.3591123507046303
+        "elbow_flex": 1.077239225512905,
+        "gripper": 2.76400059898729,
+        "shoulder_lift": 0.7193930320383114,
+        "shoulder_pan": 0.5683058390789921,
+        "wrist_flex": 0.3546470946218834,
+        "wrist_roll": 0.3157283421093968
       },
       "per_joint_lock": {
-        "elbow_flex": 1.979735415416199,
-        "gripper": 2.8478535115924557,
-        "shoulder_lift": 1.0751328318995628,
-        "shoulder_pan": 0.38584899864448724,
-        "wrist_flex": 0.4345628069280203,
-        "wrist_roll": 0.34439353895326463
+        "elbow_flex": 1.1359825805846702,
+        "gripper": 2.8674133186077255,
+        "shoulder_lift": 0.843028733697435,
+        "shoulder_pan": 0.5695222183073225,
+        "wrist_flex": 0.5057180459062622,
+        "wrist_roll": 0.3994472979083451
       },
-      "train_score": 1.0004325358093933
+      "train_score": 0.6672932126127296
     },
     {
       "center": 24.5,
-      "elapsed_s": 3.38647195789963,
+      "elapsed_s": 3.021450541971717,
       "episodes": [
         20,
         21,
@@ -330,39 +348,40 @@
         29
       ],
       "first": 20,
-      "improvement": 0.039709959031910325,
+      "improvement": 0.14941863445639336,
       "last": 29,
-      "lock_score": 1.1032497211707777,
+      "lock_score": 0.7351563283315773,
       "n_evaluations": 60,
       "params": {
-        "armature": 0.010492489178340373,
-        "damping": 0.05355227677505313,
-        "frictionloss": 0.012963032360819166,
-        "kp": 55.56773560022368,
-        "kv": 0.8604719911508297,
-        "latency_frames": 4
+        "armature": 0.00045677175850098193,
+        "damping": 0.2148307747506081,
+        "forcerange": 2.94,
+        "frictionloss": 0.022431155959151045,
+        "kp": 10.25386909631647,
+        "kv": 0.2600990538846347,
+        "latency_frames": 3
       },
       "per_joint_fit": {
-        "elbow_flex": 1.9728873311666473,
-        "gripper": 2.605912489840637,
-        "shoulder_lift": 1.1213490112856728,
-        "shoulder_pan": 0.3745181534016462,
-        "wrist_flex": 0.45475926570954994,
-        "wrist_roll": 0.3395360619717894
+        "elbow_flex": 1.0979311052947303,
+        "gripper": 2.5063502996079956,
+        "shoulder_lift": 0.7160325679314218,
+        "shoulder_pan": 0.276962723512573,
+        "wrist_flex": 0.3308612292202434,
+        "wrist_roll": 0.2252372928085153
       },
       "per_joint_lock": {
-        "elbow_flex": 2.052764780296071,
-        "gripper": 2.603353217794788,
-        "shoulder_lift": 1.1817818017040287,
-        "shoulder_pan": 0.3778833880901436,
-        "wrist_flex": 0.46283675598043056,
-        "wrist_roll": 0.34399789036158845
+        "elbow_flex": 1.1208570423318984,
+        "gripper": 2.6446491418234155,
+        "shoulder_lift": 0.8261088187954417,
+        "shoulder_pan": 0.5613662169057613,
+        "wrist_flex": 0.5375743770834931,
+        "wrist_roll": 0.39922375331814364
       },
-      "train_score": 1.0594397199411196
+      "train_score": 0.625310273640297
     },
     {
       "center": 29.5,
-      "elapsed_s": 3.31467358302325,
+      "elapsed_s": 3.133974084048532,
       "episodes": [
         25,
         26,
@@ -376,39 +395,40 @@
         34
       ],
       "first": 25,
-      "improvement": 0.0947736052142536,
+      "improvement": 0.15820326353062164,
       "last": 34,
-      "lock_score": 1.1412104323727326,
+      "lock_score": 0.7628568501752359,
       "n_evaluations": 60,
       "params": {
-        "armature": 0.025664146641317827,
-        "damping": 0.01086833721482998,
-        "frictionloss": 0.005751828320335666,
-        "kp": 50.05903518205791,
-        "kv": 2.748971776259285,
+        "armature": 0.0006775061895246095,
+        "damping": 0.01658199460605318,
+        "forcerange": 2.94,
+        "frictionloss": 0.18712252594316406,
+        "kp": 10.69484855255482,
+        "kv": 0.43225222032648253,
         "latency_frames": 3
       },
       "per_joint_fit": {
-        "elbow_flex": 2.017360458773882,
-        "gripper": 2.822793604996367,
-        "shoulder_lift": 0.9427861956522992,
-        "shoulder_pan": 0.41194569896255,
-        "wrist_flex": 0.353248045089379,
-        "wrist_roll": 0.28797283300644255
+        "elbow_flex": 0.9712143757438544,
+        "gripper": 2.855173462072586,
+        "shoulder_lift": 0.5452208649335651,
+        "shoulder_pan": 0.6550331519595821,
+        "wrist_flex": 0.4675206899754123,
+        "wrist_roll": 0.41682967309390495
       },
       "per_joint_lock": {
-        "elbow_flex": 2.18601688077655,
-        "gripper": 2.930751806232278,
-        "shoulder_lift": 1.0673853020456008,
-        "shoulder_pan": 0.47867541424753546,
-        "wrist_flex": 0.4758600247775393,
-        "wrist_roll": 0.37182274450664143
+        "elbow_flex": 1.1361251237549992,
+        "gripper": 2.9563800490477172,
+        "shoulder_lift": 0.8191424855719626,
+        "shoulder_pan": 0.6726774789961653,
+        "wrist_flex": 0.551337164477241,
+        "wrist_roll": 0.43761912791564017
       },
-      "train_score": 1.0330538053886515
+      "train_score": 0.642170406870823
     },
     {
       "center": 34.5,
-      "elapsed_s": 4.103011125000194,
+      "elapsed_s": 3.4294434580369852,
       "episodes": [
         30,
         31,
@@ -422,39 +442,40 @@
         39
       ],
       "first": 30,
-      "improvement": 0.0512799123278862,
+      "improvement": 0.033905050169878215,
       "last": 39,
-      "lock_score": 1.122072552661775,
+      "lock_score": 0.7611940447696829,
       "n_evaluations": 60,
       "params": {
-        "armature": 0.0036441637597224995,
-        "damping": 0.14051167361027328,
-        "frictionloss": 0.011307831590625235,
-        "kp": 50.90118344984903,
-        "kv": 0.7013893740949408,
+        "armature": 0.0010719746388865485,
+        "damping": 0.010726903819434318,
+        "forcerange": 2.94,
+        "frictionloss": 0.051030101353276354,
+        "kp": 10.082834930632911,
+        "kv": 0.15293667230865604,
         "latency_frames": 4
       },
       "per_joint_fit": {
-        "elbow_flex": 2.077915317651019,
-        "gripper": 3.112888930980105,
-        "shoulder_lift": 0.8761347984274763,
-        "shoulder_pan": 0.47546781894524554,
-        "wrist_flex": 0.4608857539243804,
-        "wrist_roll": 0.3772539202650336
+        "elbow_flex": 1.1425931453368832,
+        "gripper": 3.1247148244386147,
+        "shoulder_lift": 0.7898968530898332,
+        "shoulder_pan": 0.5659095705120603,
+        "wrist_flex": 0.529897448986139,
+        "wrist_roll": 0.41648495951202824
       },
       "per_joint_lock": {
-        "elbow_flex": 2.1933308585799196,
-        "gripper": 3.12378309489222,
-        "shoulder_lift": 0.9481868534198434,
-        "shoulder_pan": 0.46440265562831534,
-        "wrist_flex": 0.47186053291974794,
-        "wrist_roll": 0.3836056750172856
+        "elbow_flex": 1.1653923060672577,
+        "gripper": 3.14240398126331,
+        "shoulder_lift": 0.7791060473482199,
+        "shoulder_pan": 0.6423882653658292,
+        "wrist_flex": 0.5615162244660563,
+        "wrist_roll": 0.4516339835425242
       },
-      "train_score": 1.0645327705357517
+      "train_score": 0.7353857224927542
     },
     {
       "center": 39.5,
-      "elapsed_s": 4.0084305421914905,
+      "elapsed_s": 3.4395950000034645,
       "episodes": [
         35,
         36,
@@ -468,39 +489,40 @@
         44
       ],
       "first": 35,
-      "improvement": 0.0,
+      "improvement": 0.030014920749561913,
       "last": 44,
-      "lock_score": 1.1085266869201864,
+      "lock_score": 0.7384322283772093,
       "n_evaluations": 60,
       "params": {
-        "armature": 0.019703166866811193,
-        "damping": 0.052719117670612985,
-        "frictionloss": 0.025181795953895247,
-        "kp": 93.70021916179945,
-        "kv": 1.5718591906130155,
+        "armature": 0.001261044826018614,
+        "damping": 0.010543738008247623,
+        "forcerange": 2.94,
+        "frictionloss": 0.09783228066616433,
+        "kp": 10.008448516766501,
+        "kv": 0.11461300865953955,
         "latency_frames": 4
       },
       "per_joint_fit": {
-        "elbow_flex": 2.1748931544445873,
-        "gripper": 3.0976899920424787,
-        "shoulder_lift": 0.9370619183272019,
-        "shoulder_pan": 0.38717272610107073,
-        "wrist_flex": 0.4692098070419628,
-        "wrist_roll": 0.4072483802071529
+        "elbow_flex": 1.1008696260684379,
+        "gripper": 3.1103710183800826,
+        "shoulder_lift": 0.7511707418417739,
+        "shoulder_pan": 0.5323651221173942,
+        "wrist_flex": 0.5313721716802903,
+        "wrist_roll": 0.47250455934895536
       },
       "per_joint_lock": {
-        "elbow_flex": 2.1748931544445873,
-        "gripper": 3.0976899920424787,
-        "shoulder_lift": 0.9370619183272019,
-        "shoulder_pan": 0.38717272610107073,
-        "wrist_flex": 0.4692098070419628,
-        "wrist_roll": 0.4072483802071529
+        "elbow_flex": 1.1481341389597253,
+        "gripper": 3.115627992258137,
+        "shoulder_lift": 0.7563375232573294,
+        "shoulder_pan": 0.5523950443120589,
+        "wrist_flex": 0.5472686549542535,
+        "wrist_roll": 0.4811538877769506
       },
-      "train_score": 1.1085266869201864
+      "train_score": 0.716268243563545
     },
     {
       "center": 44.5,
-      "elapsed_s": 4.3906608750112355,
+      "elapsed_s": 3.646846582996659,
       "episodes": [
         40,
         41,
@@ -514,35 +536,36 @@
         49
       ],
       "first": 40,
-      "improvement": 0.0,
+      "improvement": 0.20468170212284786,
       "last": 49,
-      "lock_score": 1.0665800660167541,
+      "lock_score": 0.731228991980083,
       "n_evaluations": 60,
       "params": {
-        "armature": 0.019703166866811193,
-        "damping": 0.052719117670612985,
-        "frictionloss": 0.025181795953895247,
-        "kp": 93.70021916179945,
-        "kv": 1.5718591906130155,
-        "latency_frames": 4
+        "armature": 0.0015969483142462618,
+        "damping": 0.010427273377442035,
+        "forcerange": 2.94,
+        "frictionloss": 0.07209571475808643,
+        "kp": 10.138061833658947,
+        "kv": 0.4960457919649844,
+        "latency_frames": 3
       },
       "per_joint_fit": {
-        "elbow_flex": 2.095056855397812,
-        "gripper": 3.069999397267299,
-        "shoulder_lift": 0.8535169783041585,
-        "shoulder_pan": 0.4054353874052506,
-        "wrist_flex": 0.46455724251273606,
-        "wrist_roll": 0.43591219481359417
+        "elbow_flex": 0.9375592295857704,
+        "gripper": 2.974139807352515,
+        "shoulder_lift": 0.5886908430997105,
+        "shoulder_pan": 0.3907961262368172,
+        "wrist_flex": 0.41236581034990044,
+        "wrist_roll": 0.37777982660203646
       },
       "per_joint_lock": {
-        "elbow_flex": 2.095056855397812,
-        "gripper": 3.069999397267299,
-        "shoulder_lift": 0.8535169783041585,
-        "shoulder_pan": 0.4054353874052506,
-        "wrist_flex": 0.46455724251273606,
-        "wrist_roll": 0.43591219481359417
+        "elbow_flex": 1.100064971402298,
+        "gripper": 3.0843377567772388,
+        "shoulder_lift": 0.752071165442961,
+        "shoulder_pan": 0.5787824773326312,
+        "wrist_flex": 0.5508265060193073,
+        "wrist_roll": 0.5092408257035501
       },
-      "train_score": 1.0665800660167541
+      "train_score": 0.5815597972600253
     }
   ]
 }
