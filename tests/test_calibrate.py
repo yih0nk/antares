@@ -36,6 +36,7 @@ from antares.calibrate import (
     split_episodes,
 )
 from antares.data import Episode
+from antares.sim import SERVO_FIELDS
 
 JOINTS = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper")
 TRUE = SimParams(kp=400.0, kv=4.0, damping=2.0, armature=0.1, frictionloss=0.05, latency_frames=2)
@@ -151,7 +152,9 @@ def test_search_spaces():
     assert SHARED.name == "shared" and SHARED.dims == DIMS and SHARED.n_dims == 6
     assert PER_JOINT.name == "per_joint"
     # every per-joint field, incl. forcerange; gravity_scale and deadband are opt-in
-    assert set(PER_JOINT_SPACE) == set(SimParams.field_names()) - {"gravity_scale", "deadband"}
+    assert set(PER_JOINT_SPACE) == set(SimParams.field_names()) - {"gravity_scale", "deadband", "servo"} - set(
+        SERVO_FIELDS
+    )
     assert PER_JOINT.n_dims == 7 * 6 == len(PER_JOINT.dims)
     assert PER_JOINT.dims[:2] == ("kp.shoulder_pan", "kp.shoulder_lift")
     assert PER_JOINT.dims[-1] == "forcerange.gripper"
@@ -665,7 +668,7 @@ def test_calibrate_fit_deadband_per_joint_stage():
 @pytest.mark.skipif(not _sim_available(), reason="antares.sim not available yet")
 def test_default_simulate_holds_a_command_map():
     from antares.calibrate import default_simulate
-    from antares.sim import CommandMap
+    from antares.sim import SERVO_FIELDS, CommandMap
 
     T = 30
     action = np.zeros((T, 6))
@@ -675,3 +678,34 @@ def test_default_simulate_holds_a_command_map():
     _, plain = default_simulate()(SimParams(), ep)
     _, mapped = default_simulate(shifted)(SimParams(), ep)
     assert mapped[-1, 1] > plain[-1, 1]
+
+
+def test_spaces_servo_swaps_the_actuator_dims():
+    from antares.calibrate import SERVO_SPACE, spaces
+
+    shared, pj = spaces(servo=True)
+    assert shared.fields == tuple(SERVO_SPACE) and pj.fields == tuple(SERVO_SPACE) and pj.per_joint
+    assert not {"kp", "kv", "forcerange"} & set(shared.fields)
+    shared, pj = spaces(fit_gravity=True, fit_deadband=True, servo=True)
+    assert shared.fields == tuple(SERVO_SPACE) + ("gravity_scale", "deadband")
+    # every searched servo field exists on SimParams, and BAM's start sits inside the bounds
+    start = SimParams.sts3215()
+    for name, (lo, hi, _) in SERVO_SPACE.items():
+        assert lo <= getattr(start, name) <= hi, name
+
+
+def test_calibrate_from_a_servo_start_fits_the_servo_terms():
+    # The toy residual depends only on servo_gain, so the fit must move it
+    # (and only fields of the servo space) while keeping the servo model.
+    eps = make_episodes(2)
+
+    def sim(params, ep):
+        return ep.state, ep.state + (np.log(params.per_joint("servo_gain")) - np.log(1.6))
+
+    start = SimParams.sts3215()
+    res = calibrate(eps[:1], eps[1:], simulate=sim, start=start, max_evaluations=60, popsize=6)
+    assert res.params.servo == "sts3215"
+    assert res.params.servo_gain == pytest.approx(1.6, rel=0.1)
+    assert res.params.kp == start.kp and res.params.forcerange == start.forcerange
+    d = res.to_dict()["params"]
+    assert d["servo"] == "sts3215" and "servo_gain" in d

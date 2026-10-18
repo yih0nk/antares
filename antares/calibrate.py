@@ -141,6 +141,22 @@ GRAVITY_SPACE: dict[str, tuple[float, float, str]] = {"gravity_scale": (0.0, 2.0
 #: STS3215's spec'd deadzone plus gear backlash (about 0.5 degrees).
 DEADBAND_SPACE: dict[str, tuple[float, float, str]] = {"deadband": (0.0, math.radians(3.0), "linear")}
 
+#: Shared space when the start parameters select the STS3215 servo model
+#: (:meth:`antares.sim.SimParams.sts3215`). ``kp``/``kv``/``forcerange`` mean
+#: nothing there; the motor constants stay at BAM's bench values and what
+#: varies between arms is searched instead: the firmware gain ratio, the
+#: joint's friction and inertia, the internal target's rate limit and the
+#: command latency. Bounds are a decade or so around BAM's values (gain 1.0, damping
+#: 0.06, armature 0.026, frictionloss 0.052, max_velocity 5.3 rad/s).
+SERVO_SPACE: dict[str, tuple[float, float, str]] = {
+    "servo_gain": (0.3, 3.0, "log"),
+    "damping": (1e-3, 1.0, "log"),
+    "armature": (3e-3, 0.1, "log"),
+    "frictionloss": (3e-3, 0.5, "log"),
+    "max_velocity": (1.0, 20.0, "log"),
+    "latency_frames": (0.0, 5.0, "int"),
+}
+
 DIMS: tuple[str, ...] = tuple(SPACE)
 N_DIMS = len(DIMS)
 
@@ -236,11 +252,19 @@ SHARED = SearchSpace(SPACE, per_joint=False)
 PER_JOINT = SearchSpace(PER_JOINT_SPACE, per_joint=True)
 
 
-def spaces(fit_gravity: bool = False, fit_deadband: bool = False) -> tuple[SearchSpace, SearchSpace]:
-    """``(shared, per_joint)`` search spaces with the optional terms added."""
-    shared = {**SPACE, **(GRAVITY_SPACE if fit_gravity else {}), **(DEADBAND_SPACE if fit_deadband else {})}
-    per_joint = {**PER_JOINT_SPACE, **(DEADBAND_SPACE if fit_deadband else {})}
-    if not fit_gravity and not fit_deadband:
+def spaces(
+    fit_gravity: bool = False, fit_deadband: bool = False, servo: bool = False
+) -> tuple[SearchSpace, SearchSpace]:
+    """``(shared, per_joint)`` search spaces with the optional terms added.
+
+    ``servo=True`` swaps the position-actuator dimensions for
+    :data:`SERVO_SPACE` in both stages (the per-joint stage searches the
+    same fields per joint; there is no force limit to fit).
+    """
+    base, base_pj = (SERVO_SPACE, SERVO_SPACE) if servo else (SPACE, PER_JOINT_SPACE)
+    shared = {**base, **(GRAVITY_SPACE if fit_gravity else {}), **(DEADBAND_SPACE if fit_deadband else {})}
+    per_joint = {**base_pj, **(DEADBAND_SPACE if fit_deadband else {})}
+    if not fit_gravity and not fit_deadband and not servo:
         return SHARED, PER_JOINT
     return SearchSpace(shared, per_joint=False), SearchSpace(per_joint, per_joint=True)
 
@@ -716,7 +740,9 @@ def calibrate(
     ``fit_gravity=True`` adds ``gravity_scale`` to the shared stage (see
     :func:`spaces`); the per-joint stage keeps the shared value.
     ``fit_deadband=True`` adds the servo ``deadband``: one value in the
-    shared stage, one per joint in the per-joint stage.
+    shared stage, one per joint in the per-joint stage. A ``start`` that
+    selects a servo model (``SimParams.sts3215()``) searches
+    :data:`SERVO_SPACE` instead of :data:`SPACE` in both stages.
 
     With ``n_seeds > 1`` (or an explicit ``seeds`` list) the shared stage
     runs once per seed (``seed``, ``seed + 100``, ``seed + 200``, ...), each
@@ -771,7 +797,7 @@ def calibrate(
     )
     fit.record(start, start_report, start_score, SHARED.name)
 
-    shared, per_joint_space = spaces(fit_gravity, fit_deadband)
+    shared, per_joint_space = spaces(fit_gravity, fit_deadband, servo=start.uses_servo_model)
 
     def held_out(params: SimParams, report: Any, value: float) -> tuple[Any, float]:
         """Held-out score; the training score stands in without eval episodes."""
@@ -889,6 +915,7 @@ __all__ = [
     "SearchSpace",
     "GRAVITY_SPACE",
     "DEADBAND_SPACE",
+    "SERVO_SPACE",
     "spaces",
     "SHARED",
     "PER_JOINT",
