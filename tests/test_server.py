@@ -325,7 +325,7 @@ def fakes(monkeypatch, tmp_path):
     gap = _module("antares.gap", GapReport=FakeGap, tracking_error=fake_tracking_error,
                   aggregate=fake_aggregate)
     cal = _module("antares.calibrate", calibrate=fake_calibrate, split_episodes=fake_split,
-                  default_simulate=lambda: (lambda params, ep: (ep.state, ep.action)))
+                  default_simulate=lambda command_map=None: (lambda params, ep: (ep.state, ep.action)))
     lock = _module("antares.lock", RobotLock=FakeLock, dataset_digest=lambda eps: "deadbeef",
                    slug=lambda r: r.replace("/", "__"), LOCK_DIR=tmp_path / "locks",
                    LOCK_SUFFIX=LOCK_SUFFIX)
@@ -1151,6 +1151,55 @@ def test_check_detects_drift_and_threshold_overrides(client, fakes):
     assert loose["passed"] is True and loose["limit"] == 10.0
     tight = client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a", "ratio": 0.1}).json()
     assert tight["passed"] is False and tight["limit"] == pytest.approx(0.12)
+
+
+def test_check_explain_adds_a_diagnosis_only_on_drift(client, fakes):
+    write_lock(fakes, "unit-a", kp=50.0)
+    ok = client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a", "explain": True}).json()
+    assert ok["verdict"] == "ok" and "diagnosis" not in ok
+    r = client.post("/api/check", json={"dataset": FAKE_DS2, "lock": "unit-a", "explain": True,
+                                        "explain_evaluations": 20})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["verdict"] == "drifted"
+    d = out["diagnosis"]
+    assert d["lock"] == "unit-a" and d["dataset"] == FAKE_DS2
+    assert set(d) >= {"stale_deg", "refit_deg", "causes", "changes", "explained", "summary"}
+    assert d["refit_episodes"] and d["held_out_episodes"]
+    json.dumps(out)
+    assert client.post("/api/check", json={"dataset": FAKE_DS2, "lock": "unit-a", "explain": True,
+                                           "explain_evaluations": 1}).status_code == 422
+
+
+def test_check_explain_keeps_the_verdict_when_the_diagnosis_cannot_run(client, fakes):
+    write_lock(fakes, "unit-a", kp=50.0)
+    # one scored episode is enough for a verdict but not for a refit/held-out split
+    r = client.post("/api/check", json={"dataset": FAKE_DS2, "lock": "unit-a", "explain": True,
+                                        "last": 1, "min_episodes": 1})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["verdict"] == "drifted" and out["diagnosis"] is None
+    assert "two episodes" in out["diagnosis_error"]
+
+
+def test_diagnose_job_streams_and_finishes(client, fakes):
+    write_lock(fakes, "unit-a", kp=50.0)
+    assert client.post("/api/diagnose", json={"dataset": FAKE_DS2, "lock": "ghost"}).status_code == 404
+    assert client.post("/api/diagnose", json={"dataset": FAKE_DS2, "lock": "unit-a",
+                                              "max_evaluations": 2}).status_code == 422
+    job_id = client.post("/api/diagnose", json={"dataset": FAKE_DS2, "lock": "unit-a",
+                                                "max_evaluations": 12}).json()["job_id"]
+    for _ in range(200):
+        st = client.get(f"/api/jobs/{job_id}").json()
+        if st["status"] != "running":
+            break
+        time.sleep(0.02)
+    assert st["status"] == "done" and st["kind"] == "diagnose", st
+    assert st["result"]["lock"] == "unit-a" and st["result"]["n_evaluations"] == 12
+    events = [json.loads(line[6:]) for line in client.get(f"/api/jobs/{job_id}/events").text.splitlines()
+              if line.startswith("data: ")]
+    assert [e["type"] for e in events][-1] == "done"
+    assert [e["evaluation"] for e in events if e["type"] == "fit"] == list(range(1, 13))
 
 
 def test_check_last_and_insufficient_data(client, fakes):

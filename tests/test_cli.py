@@ -26,7 +26,7 @@ def test_help_exits_zero(capsys):
         cli.main(["--help"])
     assert e.value.code == 0
     out = capsys.readouterr().out
-    for cmd in ("serve", "inspect", "replay", "calibrate", "cross", "drift", "dr", "locks", "export", "check", "events", "compensate", "fleet"):
+    for cmd in ("serve", "inspect", "replay", "calibrate", "cross", "drift", "dr", "locks", "export", "check", "events", "compensate", "fleet", "synth"):
         assert cmd in out
 
 
@@ -255,6 +255,59 @@ def test_check_json_output(monkeypatch, capsys):
     assert out["verdict"] == "ok" and out["passed"] is True
     assert out["score"] == pytest.approx(1.2) and out["limit"] == pytest.approx(1.5)
     assert set(out["per_joint"]) == set(JOINTS)
+
+
+def _diagnosis():
+    from antares.diagnose import FIELDS, Diagnosis, ParamChange
+
+    values = {"latency_frames": 1}
+    alone = {"latency_frames": 0.4}
+    changes = [ParamChange(f, values.get(f, 0 if f == "latency_frames" else 1.0),
+                           alone_deg=alone.get(f, 3.0), stale_deg=3.0) for f in FIELDS]
+    return Diagnosis(lock="unit-a", dataset="fake/robot", reference_deg=1.0, stale_deg=3.0,
+                     refit_deg=0.4, per_joint_stale={}, per_joint_refit={}, changes=changes,
+                     refit_episodes=[0, 2, 4], held_out_episodes=[1, 3, 5],
+                     n_evaluations=10, elapsed_s=0.1)
+
+
+def _patch_diagnose(monkeypatch, calls):
+    from antares import server
+
+    def run_diagnose(ds, lock, **kw):
+        calls.append((lock, kw))
+        return _diagnosis()
+
+    monkeypatch.setattr(server, "run_diagnose", run_diagnose)
+
+
+def test_check_explain_names_the_cause_on_drift(monkeypatch, capsys):
+    calls = []
+    _patch_check(monkeypatch, _check_result(3.0))
+    _patch_diagnose(monkeypatch, calls)
+    code = cli.main(["check", "fake/robot", "--lock", "unit-a", "--explain", "--last", "6",
+                     "--explain-evaluations", "50"])
+    assert code == 1  # explaining never changes the verdict
+    out = capsys.readouterr().out
+    assert "what changed" in out and "latency_frames  +1 frame" in out and "<- cause" in out
+    assert out.rstrip().splitlines()[-1].endswith("likely cause: latency_frames +1 frame (alone recovers 2.60 deg)")
+    assert calls == [("unit-a", {"last": 6, "max_evaluations": 50})]
+
+
+def test_check_explain_skips_a_passing_robot(monkeypatch, capsys):
+    calls = []
+    _patch_check(monkeypatch, _check_result(1.2))
+    _patch_diagnose(monkeypatch, calls)
+    assert cli.main(["check", "fake/robot", "--lock", "unit-a", "--explain"]) == 0
+    assert calls == [] and "what changed" not in capsys.readouterr().out
+
+
+def test_check_explain_json(monkeypatch, capsys):
+    _patch_check(monkeypatch, _check_result(3.0))
+    _patch_diagnose(monkeypatch, [])
+    assert cli.main(["check", "fake/robot", "--lock", "unit-a", "--explain", "--json"]) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["verdict"] == "drifted"
+    assert out["diagnosis"]["causes"] == ["latency_frames"]
 
 
 def test_check_missing_lock_or_dataset_exits_two(monkeypatch, capsys):
@@ -779,6 +832,64 @@ def test_fleet_scan_wires_discover_and_scan(monkeypatch, capsys, tmp_path):
     assert "4.000 -> 1.500 deg (62% closed), latency 3 frames, kp 1200" in out
     assert "FAILED bob/x: boom" in out and "skipped carol/y" in out and "saved" in out
     assert "2 robots calibrated" in out  # final tables
+
+
+def test_synth_rejects_bad_wear(capsys):
+    assert cli.main(["synth", "/nonexistent/out", "--wear", "stiffness=2"]) == 2
+    assert "unknown parameter 'stiffness'" in capsys.readouterr().err
+
+
+def test_synth_lock_takes_a_name_or_a_path_and_fails_cleanly(monkeypatch, tmp_path, capsys):
+    from antares import server, synth
+
+    seen = {}
+
+    def fake_synthesize(params, **kw):
+        seen["kp"] = params.kp
+        raise SystemExit(99)  # stop before MuJoCo; the params are what matters
+
+    monkeypatch.setattr(synth, "synthesize", fake_synthesize)
+    monkeypatch.setattr(server, "LOCK_DIR", tmp_path)
+    monkeypatch.setattr(server, "LOCK_SUFFIX", ".lock.json")
+    path = tmp_path / "unit-a.lock.json"
+    path.write_text(json.dumps({"name": "unit-a", "params": {"kp": 123.0}, "result": {}}))
+    with pytest.raises(SystemExit, match="99"):
+        cli.main(["synth", str(tmp_path / "out"), "--lock", str(path)])
+    assert seen["kp"] == 123.0
+    with pytest.raises(SystemExit, match="99"):
+        cli.main(["synth", str(tmp_path / "out"), "--lock", "unit-a"])
+    # a lock without a top-level "params" still works (older locks carry them in result)
+    path.write_text(json.dumps({"name": "unit-a", "result": {"params": {"kp": 77.0}}}))
+    with pytest.raises(SystemExit, match="99"):
+        cli.main(["synth", str(tmp_path / "out"), "--lock", "unit-a"])
+    assert seen["kp"] == 77.0
+    assert cli.main(["synth", str(tmp_path / "out"), "--lock", "ghost"]) == 2
+    assert "no lock named 'ghost'" in capsys.readouterr().err
+    assert cli.main(["synth", str(tmp_path / "out"), "--lock", "locks/with/slash.json"]) == 2
+    assert "invalid lock name" in capsys.readouterr().err
+
+
+def test_check_explain_evaluations_has_a_floor(monkeypatch, capsys):
+    calls = []
+    _patch_check(monkeypatch, _check_result(3.0))
+    _patch_diagnose(monkeypatch, calls)
+    assert cli.main(["check", "fake/robot", "--lock", "unit-a", "--explain", "--explain-evaluations", "0"]) == 2
+    assert "--explain-evaluations must be >= 10" in capsys.readouterr().err
+    assert calls == []
+
+
+@pytest.mark.slow
+def test_synth_writes_a_dataset_check_reads(tmp_path, capsys):
+    from antares.data import read_local
+
+    out = tmp_path / "worn"
+    assert cli.main(["synth", str(out), "--wear", "kp=0.5,latency_frames=2",
+                     "--episodes", "2", "--frames", "30"]) == 0
+    printed = capsys.readouterr().out
+    assert f"wrote 2 episodes x 30 frames -> {out}" in printed
+    assert "'latency_frames': 2" in printed and "'kp': 499.11" in printed
+    ds = read_local(out)
+    assert len(ds.episodes) == 2 and ds.episodes[0].state.shape == (30, 6)
 
 
 def test_replay_with_lock_passes_command_map(monkeypatch, tmp_path, capsys):

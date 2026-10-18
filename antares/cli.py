@@ -314,10 +314,32 @@ def cmd_dr(args: argparse.Namespace) -> int:
 EXIT_PASS = 0
 EXIT_DRIFT = 1
 EXIT_USAGE = 2  # bad arguments, missing lock/dataset, or too few episodes
+MIN_EXPLAIN_EVALUATIONS = 10  # as POST /api/check validates explain_evaluations
 
 
 def _fmt(v, nd: int = 3) -> str:
     return "-" if v is None else f"{v:.{nd}f}"
+
+
+def _diagnosis_table(d) -> str:
+    """What each change found by the refit recovers when applied alone."""
+    causes = {c.name for c in d.causes}
+    rows = [
+        [c.name, c.change, _fmt(c.alone_deg), f"{c.recovers_deg:+.3f}", "<- cause" if c.name in causes else ""]
+        for c in d.changes
+    ]
+    rows.append(["all together", "", _fmt(d.refit_deg), f"{d.gap_deg:+.3f}", ""])
+    head = (
+        f"what changed (refit on episodes {_episode_list(d.refit_episodes)}, "
+        f"scored on {_episode_list(d.held_out_episodes)}; lock alone {d.stale_deg:.3f} deg):"
+    )
+    return head + "\n" + _table(["param", "change", "alone (deg)", "recovers", ""], rows)
+
+
+def _episode_list(indices: list[int]) -> str:
+    if len(indices) <= 6:
+        return ",".join(str(i) for i in indices)
+    return f"{indices[0]}..{indices[-1]} ({len(indices)})"
 
 
 def cmd_check(args: argparse.Namespace) -> int:
@@ -330,6 +352,9 @@ def cmd_check(args: argparse.Namespace) -> int:
     if os.path.isfile(args.lock):
         with open(args.lock) as f:
             lock = json.load(f)
+    if args.explain and args.explain_evaluations < MIN_EXPLAIN_EVALUATIONS:
+        print(f"error: --explain-evaluations must be >= {MIN_EXPLAIN_EVALUATIONS}", file=sys.stderr)
+        return EXIT_USAGE
     try:
         ds = server.get_dataset(args.dataset)
         res = server.run_check(
@@ -345,8 +370,23 @@ def cmd_check(args: argparse.Namespace) -> int:
         print(f"error: {detail}", file=sys.stderr)
         return EXIT_USAGE
 
+    diagnosis = None
+    if args.explain and res.verdict == "drifted":
+        if not args.json:
+            print("drifted; refitting to find what changed...", file=sys.stderr, flush=True)
+        try:
+            diagnosis = server.run_diagnose(
+                ds, lock, last=args.last, max_evaluations=args.explain_evaluations
+            )
+        except Exception as e:  # noqa: BLE001 - the verdict still stands
+            detail = getattr(e, "detail", None) or f"{type(e).__name__}: {e}"
+            print(f"could not explain the drift: {detail}", file=sys.stderr)
+
     if args.json:
-        print(json.dumps(res.to_dict(), indent=2))
+        out = res.to_dict()
+        if diagnosis is not None:
+            out["diagnosis"] = diagnosis.to_dict()
+        print(json.dumps(out, indent=2))
     else:
         print(f"{res.dataset} vs lock {res.lock}: {res.n_episodes} episodes, {res.n_frames} frames")
         if res.per_joint:
@@ -365,6 +405,10 @@ def cmd_check(args: argparse.Namespace) -> int:
             )
             print(_table(["joint", "rmse (deg)", "reference", "limit", "status"], rows))
         print(res.summary())
+        if diagnosis is not None:
+            print()
+            print(_diagnosis_table(diagnosis))
+            print(diagnosis.summary())
 
     if res.verdict == "ok":
         return EXIT_PASS
@@ -534,6 +578,55 @@ def cmd_compensate(args: argparse.Namespace) -> int:
         np.save(args.out, cmds)
         print(f"saved {args.method} commands ({cmds.shape[0]}x{cmds.shape[1]}, dataset units) -> {args.out}")
     return 0
+
+
+def _load_lock_arg(lock: str) -> dict:
+    """A lock given on the command line: a file path or a saved lock's name."""
+    import json
+    import os
+
+    from antares import server
+
+    if os.path.isfile(lock):
+        with open(lock) as f:
+            return json.load(f)
+    return server.load_lock_dict(lock)
+
+
+def cmd_synth(args: argparse.Namespace) -> int:
+    from antares import server, synth
+
+    if args.lock:
+        from antares.check import _lock_view
+
+        try:
+            params = _lock_view(_load_lock_arg(args.lock))[2]
+        except Exception as e:  # noqa: BLE001 - HTTPException, bad JSON or a lock without params
+            detail = getattr(e, "detail", None) or f"{type(e).__name__}: {e}"
+            print(f"--lock: {detail}", file=sys.stderr)
+            return EXIT_USAGE
+    else:
+        params = server.default_params()
+    try:
+        params = synth.worn(params, synth.parse_changes(args.wear))
+    except ValueError as e:
+        print(f"--wear: {e}", file=sys.stderr)
+        return EXIT_USAGE
+    ds = synth.synthesize(
+        params,
+        n_episodes=args.episodes,
+        n_frames=args.frames,
+        fps=args.fps,
+        seed=args.seed,
+        noise_units=args.noise,
+        repo_id=args.out,
+    )
+    synth.write_local(ds, args.out)
+    print(f"wrote {len(ds.episodes)} episodes x {args.frames} frames -> {args.out}")
+    print("true params:", params.to_dict())
+    return 0
+
+
 
 
 def _print_specificity(m: dict, lock_datasets: dict[str, str]) -> dict:
@@ -1061,6 +1154,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--min-episodes", type=int, default=5,
                    help="fewer episodes than this is insufficient data, exit 2 (default 5)")
     p.add_argument("--json", action="store_true", help="print the CheckResult as JSON")
+    p.add_argument("--explain", action="store_true",
+                   help="on drift, refit and name the parameter change that explains it")
+    p.add_argument("--explain-evaluations", type=int, default=240, metavar="N",
+                   help="refit budget for --explain (default 240, at least 10)")
     p.set_defaults(func=cmd_check)
 
 
@@ -1115,6 +1212,26 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("locks", help="list saved locks")
     p.set_defaults(func=cmd_locks)
+
+    p = sub.add_parser(
+        "synth",
+        help="write a synthetic recording of an arm with known, optionally worn, params",
+        description=(
+            "Simulate what an arm would have recorded and save it as a LeRobot dataset "
+            "directory, e.g. to try `antares check --explain` without a physical arm."
+        ),
+    )
+    p.add_argument("out", help="output directory (LeRobot layout)")
+    p.add_argument("--lock", default=None,
+                   help="start from a lock's params, by name or file path (default: MJCF defaults)")
+    p.add_argument("--wear", default="", metavar="CHANGES",
+                   help='factors, and a frame shift for latency: "kp=0.7,frictionloss=2,latency_frames=1"')
+    p.add_argument("--episodes", type=int, default=20)
+    p.add_argument("--frames", type=int, default=300)
+    p.add_argument("--fps", type=float, default=30.0)
+    p.add_argument("--noise", type=float, default=0.2, help="sensor noise, dataset units (default 0.2)")
+    p.add_argument("--seed", type=int, default=0)
+    p.set_defaults(func=cmd_synth)
 
     p = sub.add_parser("export", help="write a lock as a standalone MJCF (+ scene, sidecar, meshes)")
     p.add_argument("name", help="lock name (see `antares locks`)")
