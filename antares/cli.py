@@ -165,6 +165,10 @@ def cmd_cross(args: argparse.Namespace) -> int:
     ]
     print("eval tracking RMSE (deg), rows = datasets, cols = locks")
     print(_table(["dataset"] + m["cols"], rows))
+    lock_datasets = {n: server.load_lock_dict(n).get("dataset", "") for n in locks}
+    summary = _print_specificity(m, lock_datasets)
+    if args.json:
+        _write_json(args.json, {"matrix": m, "specificity": summary})
     return 0
 
 
@@ -352,8 +356,6 @@ def cmd_check(args: argparse.Namespace) -> int:
     return EXIT_USAGE
 
 
-
-
 def _frac(v) -> str:
     return "-" if v is None else f"{100 * v:.0f}%"
 
@@ -512,6 +514,217 @@ def cmd_compensate(args: argparse.Namespace) -> int:
         np.save(args.out, cmds)
         print(f"saved {args.method} commands ({cmds.shape[0]}x{cmds.shape[1]}, dataset units) -> {args.out}")
     return 0
+
+
+def _print_specificity(m: dict, lock_datasets: dict[str, str]) -> dict:
+    """Print whether each dataset's own lock beats every other arm's lock."""
+    from antares.specificity import summarize_cross
+
+    s = summarize_cross(m, lock_datasets)
+    if not any(r["specific"] is not None for r in s["rows"]):
+        return s
+
+    def f(v):
+        return "-" if v is None else f"{v:.3f}"
+
+    rows = [
+        [
+            r["dataset"],
+            f"{r['own_lock'] or '-'} {f(r['own_score'])}",
+            f"{r['best_other_lock'] or '-'} {f(r['best_other_score'])}",
+            "-" if r["margin"] is None else f"{r['margin']:.2f}x",
+            {True: "yes", False: "NO", None: "-"}[r["specific"]],
+        ]
+        for r in s["rows"]
+    ]
+    print()
+    print("robot specificity (own lock vs best lock fitted on another dataset)")
+    print(_table(["dataset", "own lock", "best other lock", "margin", "own wins"], rows))
+    return s
+
+
+def _json_safe(obj):
+    """NaN/inf are not JSON; write them as null like the lock files do."""
+    import math
+
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, float) and not math.isfinite(obj):
+        return None
+    return obj
+
+
+def _write_json(path: str, obj: dict) -> None:
+    import json
+    from pathlib import Path
+
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_text(json.dumps(_json_safe(obj), indent=2, allow_nan=False) + "\n")
+    print(f"wrote {path}")
+
+
+def cmd_identify(args: argparse.Namespace) -> int:
+    from antares import server
+    from antares.calibrate import default_simulate, split_episodes
+    from antares.specificity import identifiability, latency_profile
+
+    ds = server.get_dataset(args.repo_id)
+    params = server.params_from_dict(server.load_lock_dict(args.lock)["params"])
+    train, eval_ = split_episodes(ds.episodes, args.n_train, args.n_eval, seed=args.seed)
+    episodes = train if args.split == "train" else eval_
+    if not episodes:
+        raise SystemExit(
+            f"{ds.repo_id} has {len(ds.episodes)} episodes; --n-train {args.n_train} --n-eval {args.n_eval} "
+            f"leaves no {args.split} split"
+        )
+    simulate = default_simulate()
+    rep = identifiability(params, episodes, simulate, delta_deg=args.delta)
+    lat = latency_profile(params, episodes, simulate)
+    print(f"lock {args.lock} on {ds.repo_id} ({args.split} split, {len(episodes)} episodes)")
+    print(_identifiability_text(rep, lat))
+    if args.json:
+        _write_json(args.json, {"identifiability": rep.to_dict(), "latency_profile": lat})
+    return 0
+
+
+def _identifiability_text(rep, lat: dict[int, float]) -> str:
+    """Tolerance table, least-constrained direction and latency profile."""
+    import math
+
+    def x(v: float) -> str:
+        return "unbounded" if v == float("inf") or v > 1e6 else f"x{v:.3g}"
+
+    rows = [
+        [n, x(rep.factor_fixed[n]), x(rep.factor_free[n]),
+         f"{rep.tradeoff[n]:.3g}" if math.isfinite(rep.tradeoff[n]) else "-"]
+        for n in rep.names
+    ]
+    lines = [
+        f"overall {rep.rms_deg:.3f} deg; change each parameter can take before it rises "
+        f"by {rep.delta_deg:g} deg:",
+        _table(["param", "alone", "others refit", "trade-off"], rows),
+        "",
+        f"condition number {rep.condition_number:.3g}; least constrained direction: "
+        + ", ".join(f"{v:+.2f} {k}" for k, v in sorted(rep.sloppiest.items(), key=lambda kv: -abs(kv[1]))
+                    if abs(v) >= 0.1),
+        "",
+        "latency (frames): " + "  ".join(f"{f}: {s:.3f}" for f, s in lat.items()),
+    ]
+    return "\n".join(lines)
+
+
+def cmd_specificity(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from antares import server
+    from antares.calibrate import default_simulate
+    from antares.specificity import render_markdown, study
+
+    datasets = [d.strip() for d in args.datasets.split(",") if d.strip()]
+    lock_names = [l.strip() for l in (args.locks or "").split(",") if l.strip()]
+    if lock_names:
+        lock_dicts = [server.load_lock_dict(n) for n in lock_names]
+    else:
+        lock_dicts = _default_locks(server, datasets)
+    for d in lock_dicts:
+        if _lock_space(d) != "shared":
+            raise SystemExit(f"lock {d['name']} is a {_lock_space(d)} lock; the specificity checks need "
+                             "a shared one (calibrate without --per-joint or pass --locks)")
+    simulate = default_simulate()
+    truth = None
+    splits = None
+    if args.synthetic:
+        episodes, locks, truth, splits = _synthetic_arms(datasets, lock_dicts, args, simulate)
+    else:
+        episodes = {d: server.get_dataset(d).episodes for d in datasets}
+        locks = {}
+        splits = {}
+        for d in lock_dicts:
+            locks[d["name"]] = (d["dataset"], server.params_from_dict(d["params"]))
+            r = d.get("result") or {}
+            if d["dataset"] not in splits and r.get("train_episodes") and r.get("eval_episodes"):
+                splits[d["dataset"]] = (list(r["train_episodes"]), list(r["eval_episodes"]))
+
+    results = study(
+        episodes,
+        locks,
+        simulate,
+        n_train=args.n_train,
+        n_eval=args.n_eval,
+        split_seed=args.seed,
+        restart_seeds=[int(s) for s in args.restart_seeds.split(",") if s.strip()],
+        max_evaluations=args.max_evaluations,
+        truth=truth,
+        splits=splits,
+        log=lambda msg: print(f"  {msg}", flush=True),
+    )
+    title = "Robot specificity (synthetic arms)" if args.synthetic else "Robot specificity"
+    md = render_markdown(results, title=title)
+    print()
+    print(md)
+    out = Path(args.out)
+    _write_json(str(out / "robot_specificity.json"), results)
+    (out / "robot_specificity.md").write_text(md)
+    print(f"wrote {out / 'robot_specificity.md'}")
+    return 0
+
+
+def _lock_space(lock: dict) -> str:
+    """``shared`` or ``per_joint``: from ``result.space``, or from a list-valued
+    parameter for locks saved before that field existed."""
+    space = (lock.get("result") or {}).get("space")
+    if space:
+        return str(space)
+    per_joint = any(isinstance(v, (list, tuple)) for v in (lock.get("params") or {}).values())
+    return "per_joint" if per_joint else "shared"
+
+
+def _default_locks(server, datasets: list[str]) -> list[dict]:
+    """The newest saved *shared* lock for each dataset, as lock dicts."""
+    by_ds: dict[str, dict] = {}
+    for l in server.list_lock_dicts():
+        ds = l.get("dataset")
+        if ds not in datasets or _lock_space(l) != "shared":
+            continue
+        if str(l.get("created_at", "")) >= str(by_ds.get(ds, {}).get("created_at", "")):
+            by_ds[ds] = l
+    missing = [d for d in datasets if d not in by_ds]
+    if missing:
+        raise SystemExit(f"no saved shared lock for {', '.join(missing)}; run antares calibrate first")
+    return [by_ds[d] for d in datasets]
+
+
+def _synthetic_arms(datasets: list[str], lock_dicts: list[dict], args, simulate):
+    """Stand-in arms whose true parameters are the given locks' parameters.
+
+    Each lock becomes a synthetic dataset driven by random commands, and a
+    fresh lock is fitted to it exactly like ``antares calibrate`` would.
+    Returns the episodes, locks, truth and splits for :func:`study`.
+    """
+    from antares import server
+    from antares.calibrate import calibrate, split_episodes
+    from antares.synthetic import make_dataset
+
+    if len(lock_dicts) != len(datasets):
+        raise SystemExit(f"--synthetic needs one lock per dataset: got {len(datasets)} datasets "
+                         f"and {len(lock_dicts)} locks")
+    episodes, locks, truth, splits = {}, {}, {}, {}
+    for i, lock in enumerate(lock_dicts):
+        n = lock["name"]
+        p = server.params_from_dict(lock["params"])
+        sid = f"synthetic/{n}"
+        print(f"  {sid}: simulating an arm with {n}'s parameters", flush=True)
+        ds = make_dataset(sid, p, n_episodes=args.n_train + args.n_eval + args.n_train, seed=i + 1)
+        train, eval_ = split_episodes(ds.episodes, args.n_train, args.n_eval, seed=args.seed)
+        print(f"  {sid}: calibrating", flush=True)
+        res = calibrate(train, eval_, simulate=simulate, max_evaluations=args.max_evaluations, seed=args.seed)
+        episodes[sid] = ds.episodes
+        locks[f"{sid.split('/')[1]}-fit"] = (sid, res.params)
+        truth[sid] = p
+        splits[sid] = ([ep.index for ep in train], [ep.index for ep in eval_])
+    return episodes, locks, truth, splits
 
 
 def cmd_locks(args: argparse.Namespace) -> int:
@@ -772,6 +985,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--n-train", type=int, default=20)
     p.add_argument("--n-eval", type=int, default=10)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--json", default=None, help="also write the matrix and summary here")
     p.set_defaults(func=cmd_cross)
 
     p = sub.add_parser("drift", help="refit a lock on sliding episode windows to spot drift")
@@ -841,6 +1055,31 @@ def build_parser() -> argparse.ArgumentParser:
         "--heldout", action="store_true", help="instead of one episode, aggregate over the lock's held-out split"
     )
     p.set_defaults(func=cmd_compensate)
+
+    p = sub.add_parser("identify", help="check which of a lock's parameters the data pins down")
+    p.add_argument("repo_id")
+    p.add_argument("--lock", required=True, help="saved lock to analyse")
+    p.add_argument("--split", choices=("train", "eval"), default="train")
+    p.add_argument("--delta", type=float, default=0.1, help="error rise (deg) defining tolerance")
+    p.add_argument("--n-train", type=int, default=20)
+    p.add_argument("--n-eval", type=int, default=10)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--json", default=None, help="also write the report here")
+    p.set_defaults(func=cmd_identify)
+
+    p = sub.add_parser("specificity", help="test whether each arm's lock is specific to that arm")
+    p.add_argument("--datasets", default="lerobot/svla_so101_pickplace,lerobot/svla_so100_pickplace",
+                   help="comma-separated dataset ids (default: the two demo arms)")
+    p.add_argument("--locks", default="", help="comma-separated lock names (default: newest per dataset)")
+    p.add_argument("--synthetic", action="store_true",
+                   help="replace each dataset with a simulated arm that has its lock's parameters")
+    p.add_argument("--n-train", type=int, default=20)
+    p.add_argument("--n-eval", type=int, default=10)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--restart-seeds", default="1,2", help="extra CMA-ES seeds to refit with")
+    p.add_argument("--max-evaluations", type=int, default=150)
+    p.add_argument("--out", default="results", help="directory for the .md and .json report")
+    p.set_defaults(func=cmd_specificity)
 
     p = sub.add_parser("locks", help="list saved locks")
     p.set_defaults(func=cmd_locks)
