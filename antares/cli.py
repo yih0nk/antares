@@ -1259,6 +1259,62 @@ def cmd_synth(args: argparse.Namespace) -> int:
 
 
 
+def cmd_transfer_run(args: argparse.Namespace) -> int:
+    from antares import transfer
+
+    lock_paths = dict(transfer.DEFAULT_ARM_LOCKS)
+    if args.arm:
+        lock_paths = {}
+        for item in args.arm:
+            name, sep, path = item.partition("=")
+            if not sep or not name or not path:
+                print(f"--arm: expected NAME=LOCK_PATH, got {item!r}", file=sys.stderr)
+                return EXIT_USAGE
+            lock_paths[name] = path
+    try:
+        arms = transfer.arms_from_locks(lock_paths)
+    except (OSError, KeyError, ValueError) as e:
+        print(f"could not read a hidden arm's lock: {e}", file=sys.stderr)
+        return EXIT_USAGE
+    overrides = {}
+    if args.seeds is not None:
+        overrides["seeds"] = tuple(range(args.seeds))
+    if args.generations is not None:
+        overrides["generations"] = args.generations
+    if args.workers is not None:
+        overrides["workers"] = args.workers
+    if args.quick:
+        cfg = transfer.TransferConfig.quick_config(arms, **overrides)
+    else:
+        cfg = transfer.TransferConfig(arms=arms, **overrides)
+    report = transfer.run_experiment(cfg, log=lambda line: print(line, flush=True))
+    out = args.out
+    json_path = out if out.endswith(".json") else out + ".json"
+    path = report.save(json_path)
+    print(report.to_markdown())
+    print(f"wrote {path} and {path.with_suffix('.md')} ({report.elapsed_s / 60:.1f} min)")
+    return 0
+
+
+def cmd_transfer_report(args: argparse.Namespace) -> int:
+    from antares.transfer import TransferReport
+
+    try:
+        report = TransferReport.load(args.json)
+    except (OSError, KeyError, ValueError) as e:
+        print(f"could not read {args.json}: {e}", file=sys.stderr)
+        return EXIT_USAGE
+    md = report.to_markdown()
+    if args.md:
+        from pathlib import Path
+
+        Path(args.md).write_text(md)
+        print(f"wrote {args.md}")
+    else:
+        print(md)
+    return 0
+
+
 def _print_specificity(m: dict, lock_datasets: dict[str, str]) -> dict:
     """Print whether each dataset's own lock beats every other arm's lock."""
     from antares.specificity import summarize_cross
@@ -2112,6 +2168,25 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--noise", type=float, default=0.2, help="sensor noise, dataset units (default 0.2)")
     p.add_argument("--seed", type=int, default=0)
     p.set_defaults(func=cmd_synth)
+
+    p = sub.add_parser("transfer", help="does calibration help a policy transfer? (sim-to-sim experiment)")
+    tsub = p.add_subparsers(dest="transfer_cmd", required=True)
+    t = tsub.add_parser(
+        "run",
+        help="fit locks to hidden synthetic arms, train reaching policies in each sim, score them on the hidden arms",
+    )
+    t.add_argument("--quick", action="store_true", help="tiny budgets (under a minute); what the tests run")
+    t.add_argument("--seeds", type=int, default=None, help="training seeds per variant (default 3; 1 with --quick)")
+    t.add_argument("--generations", type=int, default=None, help="CMA-ES generations per policy (default 150)")
+    t.add_argument("--workers", type=int, default=None, help="training processes (default: all cores)")
+    t.add_argument("--arm", action="append", default=None, metavar="NAME=LOCK_PATH",
+                   help="hidden arm whose truth is this lock's params (repeatable; default: the two demo locks)")
+    t.add_argument("--out", default="results/policy_transfer", help="output path prefix for .json and .md")
+    t.set_defaults(func=cmd_transfer_run)
+    t = tsub.add_parser("report", help="render a saved transfer report as markdown")
+    t.add_argument("json", help="report written by `antares transfer run`")
+    t.add_argument("--md", default=None, help="write the markdown here instead of printing it")
+    t.set_defaults(func=cmd_transfer_report)
 
     p = sub.add_parser("export", help="write a lock as a standalone MJCF (+ scene, sidecar, meshes)")
     p.add_argument("name", help="lock name (see `antares locks`)")

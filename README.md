@@ -358,6 +358,106 @@ the job streams `progress`, `fit` and `done` events at
 `/api/jobs/{id}/events` like calibration does. `GET /api/dr` lists saved
 ranges, `GET /api/dr/{name}` returns one.
 
+## Does calibration help a policy transfer?
+
+The replay numbers above are a proxy. What a user wants to know is whether
+a policy trained in the calibrated sim works better on the real arm than
+one trained in the default sim, and nothing with a physical arm can run in
+CI, so `antares transfer` tests it sim-to-sim: a MuJoCo arm with *hidden*
+true parameters stands in for the real robot (arm `so101` has the SO-101
+lock's parameters as its truth, `so100` the SO-100 lock's, as the synthetic
+specificity study did), and from each hidden arm Antares synthesizes 50
+teleop-style episodes, fits a lock to 20 of them with `calibrate(n_seeds=3,
+max_evaluations=150)` and derives DR ranges with `antares.dr` (8 refits x
+12 episodes x 60 evaluations), never seeing the truth. The task is
+joint-space reaching at 30 fps: from a random start pose reach a random
+target pose, both uniform inside +-70 units on the five body joints, within
+60 frames; success means every body joint within 2 deg of the target over
+the last 5 frames (2 deg is two to three times the calibrated sim's own
+held-out residual and a third of the default sim's gap, and 167 ms of
+holding rules out passing through the window while still moving). The
+policy observes joint positions, velocities and the target and emits a
+position command, `u = t + kp (t - q) - kd v + 0.1 MLP(q, t)` with
+per-joint gains and a 6-unit tanh hidden layer (111 parameters), trained
+with separable CMA-ES (150 generations of 18, 24 fixed training tasks per
+seed) to minimize mean plus final tracking error minus a success bonus, so
+it has to learn how far past the target to command and how much to lead a
+soft, laggy servo. Per hidden arm five sims are trained in: the default
+`SimParams()`, the fitted lock, the fitted lock with a parameter set drawn
+from its data-derived DR ranges per task and generation, the true
+parameters (oracle), and the default sim with hand-picked +-30% DR; every
+policy is scored on 64 held-out start/target pairs in the sim it was
+trained in and on the hidden arm, over three training seeds (0, 1, 2).
+Mean +- sd over seeds; the untrained policy `u = target` scores 20% / 0.98
+deg on `so101` and 100% / 0.01 deg on `so100`.
+
+| variant | hidden arm | success in train sim | success on hidden arm | final error on hidden arm (deg) |
+|---|---|---|---|---|
+| default sim | so101 | 100% +- 0 | 20% +- 0 | 0.98 +- 0.00 |
+| fitted lock | so101 | 89% +- 3 | **86% +- 2** | **0.58 +- 0.05** |
+| fitted lock + data-derived DR | so101 | 86% +- 2 | 82% +- 2 | 0.61 +- 0.08 |
+| oracle (true parameters) | so101 | 83% +- 7 | 83% +- 7 | 0.67 +- 0.18 |
+| default sim + hand-picked +-30% DR | so101 | 100% +- 0 | 29% +- 2 | 1.66 +- 0.65 |
+| default sim | so100 | 100% +- 0 | 100% +- 0 | 0.01 +- 0.00 |
+| fitted lock | so100 | 89% +- 2 | 100% +- 0 | 0.32 +- 0.27 |
+| fitted lock + data-derived DR | so100 | 34% +- 12 | 74% +- 25 | 0.77 +- 0.25 |
+| oracle (true parameters) | so100 | 100% +- 0 | 100% +- 0 | 0.01 +- 0.00 |
+| default sim + hand-picked +-30% DR | so100 | 100% +- 0 | 100% +- 0 | 0.14 +- 0.05 |
+
+What it shows:
+
+* **On `so101` (soft servo, kp 10.5, 4 frames of latency) calibration is
+  the difference between failing and working.** The default-sim policy is
+  perfect in its own sim and reaches 20% on the hidden arm, exactly the
+  untrained policy: the default sim has no gravity sag or lag to learn
+  from, so it learns nothing. The lock-trained policy reaches 86% with
+  final error 0.98 -> 0.58 deg, lock + data-derived DR 82%, and the
+  hand-picked +-30% DR around the default sim 29%, because a +-30% band
+  around the wrong stiffness never contains the right one. The oracle
+  lands at 83% +- 7, below the lock, so it is not a practical upper bound
+  here: the CMA-ES training variance (sd 7 points over three seeds) is as
+  large as the gap between the fitted and the true parameters, and the
+  fitted lock (held-out replay 0.52 deg against 0.34 deg for the truth) is
+  already close enough to the arm that the policy cannot tell them apart.
+* **On `so100` (stiff servo, kp 1427) the task does not discriminate.**
+  The untrained policy already succeeds on 100% of the tasks at 0.01 deg,
+  so the default sim is good enough and calibration has nothing to add.
+  The fitted lock still reaches 100% but with 0.32 deg of final error, and
+  lock + DR drops to 74% +- 25 (one seed 45%, two 89%): the fit landed at
+  kp 120 / kv 0.23 against a truth of 1427 / 41.6, the gain versus
+  velocity-gain degeneracy the "Repeatable locks" section describes, and
+  the data-derived ranges (kp 120..176) inherit that basin rather than the
+  arm's real uncertainty, so the policy is trained for an arm softer than
+  the one it meets. The lock itself replays the hidden arm at 0.43 deg
+  against 0.39 deg for the truth; a reaching policy feels a parameter
+  error the replay metric barely registers.
+* **Conclusion.** Calibration helps when the default sim is wrong in a way
+  the task feels (sag and lag on a soft servo), is harmless when it is not,
+  and DR ranges are only as good as the basin the fit found, which is why
+  best-of-N seeds and the pinned-parameter list matter downstream of the
+  fit too.
+
+What it does not show. It is sim-to-sim: the hidden arm is the same MuJoCo
+model class as the sim, so backlash, temperature, cable drag, servo deadband
+and everything else the six parameters cannot express are absent, and a
+fitted lock can only be as wrong as the fit, never as wrong as the model.
+Observations are noise-free, the task is reaching without contact, and the
+policy is a 111-parameter controller, not a learned visuomotor policy. A
+run on the physical arm is the next step; the committed result is the
+sim-to-sim evidence that the mechanism exists.
+
+Full tables, per-seed 95% bootstrap intervals and the fitted parameters are
+in [`results/policy_transfer.md`](results/policy_transfer.md); the JSON
+next to it holds every per-task outcome and every trained policy. The run
+took 19.4 min on a 10-core laptop (fits about 200 s per arm, 272-363 s per
+policy, 30 policies in parallel); `--quick` runs the same pipeline with tiny
+budgets in about a second and is what the tests exercise.
+
+```sh
+.venv/bin/antares transfer run --seeds 3 --out results/policy_transfer
+.venv/bin/antares transfer report results/policy_transfer.json
+```
+
 ## Per-joint calibration
 
 The shared fit gives all six servos the same gain, damping, armature,
@@ -1355,7 +1455,8 @@ wrist cameras are skipped; the sim is the SO-101 model for both datasets.
 | `antares/compensate.py` | Lag compensation (shift, ILC), sim-validated |
 | `antares/specificity.py` | Cross-arm verdict, identifiability, swap and same-arm checks |
 | `antares/synthetic.py` | Simulated arm datasets with known parameters |
-| `results/` | Robot-specificity reports (`antares specificity`) |
+| `antares/transfer.py` | Sim-to-sim policy transfer experiment (`antares transfer`) |
+| `results/` | Robot-specificity reports (`antares specificity`), policy transfer report (`policy_transfer.{json,md}`) |
 | `antares/server.py` | FastAPI backend for the UI |
 | `examples/` | `randomize_env.py`: DR ranges in a training loop |
 
