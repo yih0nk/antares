@@ -530,9 +530,26 @@ the SO-101 lock's dynamics, 0.2-unit state noise and teleop-style pauses,
 Both modes recover the hidden bias to within 0.35 units and the gain to
 within 0.007. On an arm with no mismatch the map stays within 0.35 units
 of identity, at a small held-out cost (0.03° for `sim`, 0.09° for
-`kinematic`), mostly on the gravity-loaded shoulder and elbow. Whether
-real arms carry a mismatch worth fitting is a question for the real
-datasets.
+`kinematic`), mostly on the gravity-loaded shoulder and elbow. 
+On the two demo datasets (20 train / 10 held-out episodes, seed 0, 150
+evaluations per round, dynamics-only given the same budget), held-out
+RMSE in degrees:
+
+| | SO-101 dynamics only | SO-101 `sim` | SO-101 `kinematic` | SO-100 dynamics only | SO-100 `sim` | SO-100 `kinematic` |
+|---|---|---|---|---|---|---|
+| **overall** | 0.708 | **0.624** | 0.633 | 0.745 | **0.399** | 0.480 |
+| shoulder_pan | 0.407 | 0.376 | 0.368 | 0.326 | 0.313 | 0.311 |
+| shoulder_lift | 0.801 | 0.651 | 0.665 | 0.854 | 0.431 | 0.504 |
+| elbow_flex | 1.145 | 1.026 | 1.049 | 1.248 | 0.580 | 0.701 |
+| wrist_flex | 0.485 | 0.426 | 0.420 | 0.416 | 0.253 | 0.308 |
+| wrist_roll | 0.394 | 0.388 | 0.383 | 0.458 | 0.335 | 0.465 |
+
+Both real arms carry a real mismatch, mostly on the elbow (`sim` bias
++1.6 units on SO-101 and +2.2 on SO-100, gain about 0.98) and, on the
+SO-100, the shoulder lift (+1.3 units, gain 1.013). The fitted map cuts
+the SO-100's held-out error by 46% and the SO-101's by 12%. `kinematic`
+puts more into the gravity-loaded joints (an SO-101 elbow bias of +3.5),
+as its sag caveat predicts, and is never better overall.
 
 Locks fitted this way carry a `command_map`. Replay, the viewer, `cross`,
 `check`, residuals and events, `compensate` (whose `--out` commands come
