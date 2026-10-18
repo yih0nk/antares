@@ -27,10 +27,9 @@ def test_registry_entries_are_complete():
         assert r.scene_path.is_file(), r.scene_path
         assert r.mesh_dir.is_dir() and any(r.mesh_dir.glob("*.stl")), r.mesh_dir
         assert (r.model_path.parent / "LICENSE").is_file()
-        if name == "sg92r":  # the one-joint bench servo
-            assert r.joints == ("shaft",) and not r.grippers
-            continue
-        assert len(r.joint_names) == 6 and r.canonical_joints == CANONICAL
+        if not r.robot_types:  # the SO family (RobotModel.robot_types is "not for SO"): the canonical six
+            assert len(r.joint_names) == 6 and r.canonical_joints == CANONICAL, name
+    assert {n for n, r in REGISTRY.items() if not r.robot_types} >= {"so101", "so100"}
 
 
 def test_get_robot_default_and_unknown():
