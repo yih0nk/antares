@@ -38,6 +38,7 @@ import { CrossHeatmap, JointTrace, ResidualStrip, Sparkline } from "./Charts";
 import { AddDataset } from "./AddDataset";
 import { Factors } from "./Factors";
 import { FleetView } from "./Fleet";
+import { ARM_JOINTS, JointArm } from "./JointArm";
 
 // Layout: 3D viewer (real arm + ghost sim arm) on the left, gap panel on
 // the right, episode timeline along the bottom. The ghost is the simulator
@@ -332,6 +333,9 @@ export default function App() {
   const [playing, setPlaying] = useState(true);
   const [speed, setSpeed] = useState(1);
   const [show, setShow] = useState<Show>("both");
+  // Per-joint error as rows, or drawn on a sketch of the arm (default or ghost).
+  const [jointView, setJointView] = useState<"rows" | "arm">("rows");
+  const [armOf, setArmOf] = useState<"ghost" | "default">("ghost");
   // A second episode shown side by side with the first; null when off.
   const [compare, setCompare] = useState<number | null>(null);
   const [compareBase, setCompareBase] = useState<Replay | null>(null);
@@ -767,6 +771,8 @@ export default function App() {
   const inEvent = residual?.events.find((e) => frame >= e.start && frame < e.end);
   const compPoses = showComp && ghost !== LIVE && comp ? comp.sim_comp_poses : null;
 
+  // The arm sketch is drawn for the SO-100/101 joint layout only.
+  const canSketch = ARM_JOINTS.every((j) => jointNames.includes(j)) && jointNames.length === ARM_JOINTS.length;
   const ghostLabel =
     ghost === DEFAULT ? "default sim" : ghost === LIVE ? "best fit so far" : `lock ${ghost}`;
   // Camera fits live with a lock: the ghost's, or the dataset's first saved one.
@@ -1201,43 +1207,75 @@ export default function App() {
         </section>
 
         <section>
-          <div className="label">Per joint</div>
-          <div className="bars">
-            {jointNames.map((j) => {
-              const b = baseGap?.per_joint_deg[j];
-              const g = ghostGap?.per_joint_deg[j];
-              // Default error (grey dot) to the ghost's error (blue dot); the
-              // default ghost has nothing to compare, so it shows one dot.
-              const compared = ghost !== DEFAULT && b != null && g != null;
-              const pos = (v: number) => `${Math.min(100, (v / maxJointErr) * 100)}%`;
-              const change = compared && b > 0 ? (g - b) / b : null;
-              return (
-                <button
-                  key={j}
-                  className={`db-row ${j === jointNames[jIndex] ? "sel" : ""} ${scored.has(j) ? "" : "unscored"}`}
-                  onClick={() => setJoint(j)}
-                  title={scored.has(j) ? "" : "not scored (gripper contact isn't simulated)"}
-                >
-                  <span className="bar-name">{j}</span>
-                  <span className="db-track">
-                    {compared && (
-                      <span
-                        className="db-span"
-                        style={{ left: pos(Math.min(b, g)), width: `calc(${pos(Math.max(b, g))} - ${pos(Math.min(b, g))})` }}
-                      />
-                    )}
-                    {compared && <span className="db-dot base" style={{ left: pos(b) }} title={`default ${deg(b, 2)}`} />}
-                    {g != null && <span className="db-dot ghost" style={{ left: pos(g) }} title={`${ghostLabel} ${deg(g, 2)}`} />}
-                  </span>
-                  <span className="bar-val">{deg(g, 1)}</span>
-                  <span className={`db-change ${change == null ? "" : change <= 0 ? "good" : "bad"}`}>
-                    {change == null ? "" : `${change <= 0 ? "−" : "+"}${Math.abs(Math.round(change * 100))}%`}
-                  </span>
+          <div className="row">
+            <div className="label">Per joint</div>
+            {canSketch && (
+              <div className="segmented small-seg">
+                <button className={jointView === "rows" ? "on" : ""} onClick={() => setJointView("rows")}>
+                  rows
                 </button>
-              );
-            })}
+                <button className={jointView === "arm" ? "on" : ""} onClick={() => setJointView("arm")}>
+                  on the arm
+                </button>
+              </div>
+            )}
           </div>
-          {ghost !== DEFAULT && (
+          {canSketch && jointView === "arm" ? (
+            <>
+              {ghost !== DEFAULT && (
+                <div className="segmented small-seg">
+                  <button className={armOf === "default" ? "on" : ""} onClick={() => setArmOf("default")}>
+                    default sim
+                  </button>
+                  <button className={armOf === "ghost" ? "on" : ""} onClick={() => setArmOf("ghost")}>
+                    {ghostLabel}
+                  </button>
+                </div>
+              )}
+              <JointArm
+                errors={(ghost !== DEFAULT && armOf === "default" ? baseGap : ghostGap)?.per_joint_deg ?? {}}
+                selected={jointNames[jIndex] ?? ""}
+                onSelect={setJoint}
+              />
+            </>
+          ) : (
+            <div className="bars">
+              {jointNames.map((j) => {
+                const b = baseGap?.per_joint_deg[j];
+                const g = ghostGap?.per_joint_deg[j];
+                // Default error (grey dot) to the ghost's error (blue dot); the
+                // default ghost has nothing to compare, so it shows one dot.
+                const compared = ghost !== DEFAULT && b != null && g != null;
+                const pos = (v: number) => `${Math.min(100, (v / maxJointErr) * 100)}%`;
+                const change = compared && b > 0 ? (g - b) / b : null;
+                return (
+                  <button
+                    key={j}
+                    className={`db-row ${j === jointNames[jIndex] ? "sel" : ""} ${scored.has(j) ? "" : "unscored"}`}
+                    onClick={() => setJoint(j)}
+                    title={scored.has(j) ? "" : "not scored (gripper contact isn't simulated)"}
+                  >
+                    <span className="bar-name">{j}</span>
+                    <span className="db-track">
+                      {compared && (
+                        <span
+                          className="db-span"
+                          style={{ left: pos(Math.min(b, g)), width: `calc(${pos(Math.max(b, g))} - ${pos(Math.min(b, g))})` }}
+                        />
+                      )}
+                      {compared && <span className="db-dot base" style={{ left: pos(b) }} title={`default ${deg(b, 2)}`} />}
+                      {g != null && <span className="db-dot ghost" style={{ left: pos(g) }} title={`${ghostLabel} ${deg(g, 2)}`} />}
+                    </span>
+                    <span className="bar-val">{deg(g, 1)}</span>
+                    <span className={`db-change ${change == null ? "" : change <= 0 ? "good" : "bad"}`}>
+                      {change == null ? "" : `${change <= 0 ? "−" : "+"}${Math.abs(Math.round(change * 100))}%`}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          {ghost !== DEFAULT && !(canSketch && jointView === "arm") && (
             <div className="muted small">
               <i className="db-dot base inline" /> default <i className="db-dot ghost inline" /> {ghostLabel}
             </div>
