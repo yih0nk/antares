@@ -339,6 +339,8 @@ def fakes(monkeypatch, tmp_path):
     import antares.diagnose  # noqa: F401
     import antares.drift  # noqa: F401
     import antares.specificity  # noqa: F401
+    import antares.lerobot_calib  # noqa: F401
+    import antares.sensor  # noqa: F401
 
     sim = _module("antares.sim", JOINTS=JOINTS, SimParams=FakeParams, Arm=FakeArm, CommandMap=FakeCommandMap,
                   MODEL_PATH=tmp_path / "so101.xml",
@@ -741,6 +743,14 @@ def test_calibrate_default_name_is_slug(client, fakes):
     assert events[-1]["type"] == "done"
     assert events[-1]["lock"]["name"] == "fake__so101_unit_a"
     assert (fakes / "locks" / f"fake__so101_unit_a{LOCK_SUFFIX}").is_file()
+
+
+def test_calibrate_refuses_to_overwrite_a_saved_lock(client, fakes):
+    """Two tabs (or a CLI run) starting a fit under one name must not clobber it."""
+    write_lock(fakes, "unit-a", kp=50.0)
+    r = client.post("/api/calibrate", json={"dataset": FAKE_DS, "name": "unit-a"})
+    assert r.status_code == 409 and "already exists" in r.json()["detail"]
+    assert client.post("/api/calibrate", json={"dataset": FAKE_DS, "name": "unit-fresh"}).status_code == 200
 
 
 def test_calibrate_rejects_bad_input(client, fakes):
