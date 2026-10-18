@@ -150,9 +150,15 @@ def test_cli_lists(capsys):
     assert "lerobot/aloha_static_coffee" in capsys.readouterr().out
 
 
-def test_cli_rejects_unknown_factor(capsys):
+def test_cli_rejects_unknown_factor(monkeypatch, capsys):
+    """The selection is passed through as typed and resolved once, by
+    run_calibration; its 400 is the CLI's usage error."""
+    from antares import cli
     from antares.cli import main
+    from antares.synthetic import make_dataset
 
+    ds = make_dataset("x/y", SimParams(), n_episodes=2, T=20)
+    monkeypatch.setattr(cli, "_load_dataset", lambda repo_id: ds)
     assert main(["calibrate", "x/y", "--factors", "+nope"]) == 2
     assert "nope" in capsys.readouterr().err
     assert main(["calibrate", "x/y", "--factors", "+sensor_gain"]) == 2
@@ -160,6 +166,8 @@ def test_cli_rejects_unknown_factor(capsys):
     everything = ",".join("-" + n for n in factors.names("shared"))
     assert main(["calibrate", "x/y", f"--factors={everything}"]) == 2
     assert "nothing to fit" in capsys.readouterr().err
+    assert main(["calibrate", "x/y", "--per-joint", "--per-joint-factors", "+nope"]) == 2
+    assert "nope" in capsys.readouterr().err
 
 
 def test_robot_profile_from_toml(tmp_path):

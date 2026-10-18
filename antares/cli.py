@@ -204,23 +204,11 @@ def cmd_replay(args: argparse.Namespace) -> int:
 
 
 def cmd_calibrate(args: argparse.Namespace) -> int:
-    from antares import factors, server
+    from fastapi import HTTPException
+
+    from antares import server
 
     if not _load_factor_files(args.factors_file):
-        return EXIT_USAGE
-    from antares.calibrate import default_factor_names
-
-    # +/- edits apply to what this fit would search by default: the servo
-    # model's fields with --servo, and a per-joint stage derived from the
-    # shared selection, as calibrate builds them.
-    servo = args.servo != "position"
-    try:
-        fit = factors.parse_selection(args.factors, "shared", defaults=default_factor_names(servo)[0])
-        per = factors.parse_selection(
-            args.per_joint_factors, "per_joint", defaults=default_factor_names(servo, fit)[1]
-        )
-    except (KeyError, ValueError) as e:
-        print(f"--factors: {str(e).strip(chr(39))}", file=sys.stderr)
         return EXIT_USAGE
     ds = _load_dataset(args.repo_id)
     if ds is None:
@@ -256,30 +244,37 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
                 flush=True,
             )
 
-    result, lock, path = server.run_calibration(
-        ds,
-        n_train=args.n_train,
-        n_eval=args.n_eval,
-        max_evaluations=args.max_evaluations,
-        seed=args.seed,
-        name=args.name,
-        per_joint=args.per_joint,
-        per_joint_max_evaluations=args.per_joint_evaluations,
-        per_joint_sigma0=args.per_joint_sigma0,
-        fit_gravity=args.fit_gravity,
-        fit_deadband=args.fit_deadband,
-        robot=args.robot,
-        on_progress=on_progress,
-        fit_sensor=args.fit_sensor,
-        sensor_mode=args.sensor_mode,
-        n_seeds=args.seeds,
-        factors=None if fit is None else list(fit),
-        per_joint_factors=None if per is None else list(per),
-        calibration_path=args.calibration,
-        robot_id=args.robot_id,
-        robot_type=args.robot_type,
-        servo=args.servo,
-    )
+    try:
+        # The factor selections go through as typed; run_calibration resolves
+        # +/- edits against what the fit searches by default (once, for the
+        # CLI and the API alike) and answers a bad one with a 400.
+        result, lock, path = server.run_calibration(
+            ds,
+            n_train=args.n_train,
+            n_eval=args.n_eval,
+            max_evaluations=args.max_evaluations,
+            seed=args.seed,
+            name=args.name,
+            per_joint=args.per_joint,
+            per_joint_max_evaluations=args.per_joint_evaluations,
+            per_joint_sigma0=args.per_joint_sigma0,
+            fit_gravity=args.fit_gravity,
+            fit_deadband=args.fit_deadband,
+            robot=args.robot,
+            on_progress=on_progress,
+            fit_sensor=args.fit_sensor,
+            sensor_mode=args.sensor_mode,
+            n_seeds=args.seeds,
+            factors=[args.factors] if args.factors else None,
+            per_joint_factors=[args.per_joint_factors] if args.per_joint_factors else None,
+            calibration_path=args.calibration,
+            robot_id=args.robot_id,
+            robot_type=args.robot_type,
+            servo=args.servo,
+        )
+    except HTTPException as e:
+        print(f"error: {_detail(e)}", file=sys.stderr)
+        return EXIT_USAGE
     r = result.to_dict()
     only = lock.get("dynamics_only")
     before = r.get("per_joint_before") or {}
