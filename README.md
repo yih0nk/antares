@@ -136,17 +136,25 @@ registry (`antares/factors.py`) that the fit, `--explain`, drift, DR,
 export and the lock all read:
 
 ```
-name            what                 stages     range                  pinned by data
-kp              Servo stiffness      shared     10..5000 N*m/rad       no
-kv              Servo velocity gain  shared     0.1..50 N*m*s/rad      no
-damping         Joint damping        shared     0.01..10 N*m*s/rad     no
-armature        Rotor inertia        shared     0.0001..0.5 kg*m^2     partly
-frictionloss    Joint friction       shared     0.001..2 N*m           partly
-latency_frames  Command latency      shared     0..5 frames            yes
-forcerange      Torque limit         per_joint  0.5..30 N*m            untested
-sensor_gain     Joint reading scale  sensor     0.75..1.33 x           yes
-sensor_bias     Joint zero offset    sensor     -25..25 dataset units  yes
+name            what                 stages     range                  pinned by data  source
+kp              Servo stiffness      shared     10..5000 N*m/rad       no              builtin
+kv              Servo velocity gain  shared     0.1..50 N*m*s/rad      no              builtin
+damping         Joint damping        shared     0.01..10 N*m*s/rad     no              builtin
+armature        Rotor inertia        shared     0.0001..0.5 kg*m^2     partly          builtin
+frictionloss    Joint friction       shared     0.001..2 N*m           partly          builtin
+latency_frames  Command latency      shared     0..5 frames            yes             builtin
+forcerange      Torque limit         per_joint  0.5..30 N*m            untested        builtin
+servo_gain      Servo firmware gain             0.3..3 x               untested        builtin
+max_velocity    Servo rate limit                1..20 rad/s            untested        builtin
+gravity_scale   Gravity load                    0..2 x                 untested        builtin
+deadband        Servo deadband                  0..0.0523599 rad       untested        builtin
+sensor_gain     Joint reading scale  sensor     0.75..1.33 x           yes             builtin
+sensor_bias     Joint zero offset    sensor     -25..25 dataset units  yes             builtin
 ```
+
+(`servo_gain` and `max_velocity` belong to `--servo sts3215`, `gravity_scale`
+to `--fit-gravity` and `deadband` to `--fit-deadband`; they are listed as
+untested because no identifiability study has been run on them yet.)
 
 "Pinned by data" is what the robot-specificity study and the fleet showed:
 latency and the sensor map are measurements, stiffness and damping trade
@@ -394,7 +402,7 @@ back in raw units), `export` (in the sidecar) and the drift and DR refits
 
 ### Use your arm's LeRobot calibration
 
-Everything above infers the meaning of the dataset's numbers from the
+Everything else infers the meaning of the dataset's numbers from the
 MJCF: `UnitMap.from_model` spreads -100..100 over each joint's modelled
 range. But LeRobot already measured that for your arm. `lerobot-calibrate`
 writes one file per follower with, for every motor, the homing offset it
@@ -470,8 +478,8 @@ is for your own arm; without a file, nothing changes.
 
 ### Gravity load and servo deadband
 
-The contact section above blames the elbow's leftover error on pose. `antares
-sag` checks that: it replays a lock's held-out episodes and regresses each
+[Contact detection](#contact-detection-from-the-residual) blames the elbow's
+leftover error on pose. `antares sag` checks that: it replays a lock's held-out episodes and regresses each
 joint's residual on the torque that holds the real pose against gravity (with
 velocity as a covariate), prints the residual by torque bin and by motion
 (still, moving up, moving down), and converts the slope into an implied
@@ -1451,7 +1459,7 @@ arm's outline over the real video and an exported MJCF carries a
 `<camera>` per fitted camera.
 
 ```sh
-.venv/bin/pip install -e ".[video]"      # PyAV (AV1 via dav1d), OpenCV, SciPy
+# needs the `video` extra: PyAV (AV1 via dav1d), OpenCV, SciPy
 .venv/bin/antares camera-fit lerobot/svla_so101_pickplace --camera up --lock svla_so101_pickplace
 .venv/bin/antares camera-list svla_so101_pickplace
 ```
@@ -1769,8 +1777,9 @@ All three are sim-to-sim; nothing here was driven on hardware.
 
 ### A learned policy, judged in both sims
 
-The transfer experiment above uses a hand-built reaching controller on a
-synthetic arm. This section puts a policy *learned from the real logs* into
+The [reaching experiment](#does-calibration-help-a-policy-transfer) below
+uses a hand-built controller on a synthetic arm. This section puts a policy
+*learned from the real logs* into
 both simulators and measures how differently they judge it. If the stock
 sim and the calibrated sim disagree about what the same policy does, the
 stock sim would have misjudged it; the lock's held-out replay (0.74° vs
@@ -1778,8 +1787,8 @@ stock sim would have misjudged it; the lock's held-out replay (0.74° vs
 laptop CPU in well under a minute per dataset; nothing is driven on
 hardware.
 
-**The policy** (`antares/policy.py`, `pip install -e ".[policy]"` for
-torch). A state-based chunked policy, ACT without the images: the last
+**The policy** (`antares/policy.py`; the `policy` extra brings torch). A
+state-based chunked policy, ACT without the images: the last
 K=2 measured joint states in, the next H=10 commanded actions out, a 3x256
 MLP (151k parameters). It gets two more inputs that stand in for what the
 cameras would tell an image policy, because a pick-and-place policy that
@@ -1919,7 +1928,6 @@ Across training seeds 0-2 the SO-101 successes are 2/4/2 (stock), 3/5/3
   section.
 
 ```sh
-.venv/bin/pip install -e ".[policy]"
 .venv/bin/antares policy train lerobot/svla_so101_pickplace --lock svla_so101_pickplace
 .venv/bin/antares policy evaluate lerobot/svla_so101_pickplace --lock svla_so101_pickplace --mode both
 ```
@@ -2122,8 +2130,7 @@ use without Antares.
 
 ### Standalone MJCF
 
-A calibration is saved as a lock (`locks/<name>.lock.json`). Export one as
-a standalone MJCF to use it in any MuJoCo / RL pipeline without Antares:
+Export a lock as a standalone MJCF to use it in any MuJoCo / RL pipeline:
 
 ```sh
 .venv/bin/antares locks                               # list saved locks
@@ -2384,74 +2391,120 @@ and actuator, and the exported model replays the lock to within 1e-6 rad
 
 ## Layout
 
+One row per module, grouped like the reference above.
+
 | Path | What |
 |---|---|
-| `antares/data.py` | LeRobot dataset loader (tabular only) |
+| **Core** | |
+| `antares/cli.py`, `antares/__main__.py` | The `antares` command line (`python -m antares` too) |
+| `antares/server.py` | FastAPI backend for the UI; every job streams over `/api/jobs/{id}/events` |
+| `antares/data.py` | LeRobot dataset loader (tabular only): Hub id, zip upload or local directory |
 | `antares/validate.py` | Dataset checks shared by upload, `inspect` and the fleet scan |
+| `antares/catalog.py` | Public datasets of other arms to test on (`antares datasets`) |
 | `antares/sim.py` | MuJoCo model, column-to-joint mapping, unit mapping, replay and rollout |
 | `antares/robots.py` | Robot profiles: columns, joints, units, grippers, model file (`antares models`) |
-| `antares/factors.py` | What the fit can account for, and what it can't yet (`antares factors`) |
-| `antares/menagerie.py` | Fetches non-vendored MuJoCo Menagerie models at a pinned commit |
-| `antares/catalog.py` | Public datasets of other arms to test on (`antares datasets`) |
-| `antares/calibrate.py` | CMA-ES parameter fit |
-| `antares/sensor.py` | Per-joint command offset/scale fit |
+| `antares/menagerie.py` | Fetches non-vendored MuJoCo Menagerie models at a pinned commit (`antares fetch-model`) |
+| `antares/gap.py` | Tracking-error metrics (per joint and overall, degrees, gripper excluded) |
+| `antares/lock.py` | Calibrated sim saved per robot (`locks/*.lock.json`), pinned-parameter list |
+| **Calibrating the arm** | |
+| `antares/calibrate.py` | CMA-ES parameter fit: shared, per-joint, seeded, with the optional terms |
+| `antares/factors.py` | What the fit can account for, and what it can't yet (`antares factors`, `--factors-file`) |
+| `antares/sensor.py` | Per-joint command offset/scale fit (`--fit-sensor`) |
 | `antares/lerobot_calib.py` | The follower's LeRobot motor calibration as the arm's unit map; `inspect --calibration`, `/api/datasets/calibration-check` |
-| `antares/gap.py` | Tracking-error metrics |
-| `antares/lock.py` | Calibrated sim saved per robot (`locks/*.lock.json`) |
-| `antares/export.py` | Lock -> standalone MJCF, sidecar, scene, zip |
-| `antares/export_targets.py` | Lock -> Isaac Lab / ManiSkill / mjlab actuator configs and neutral JSON (`export --format`) |
-| `antares/drift.py` | Sliding-window refits and trend statistics over a session |
-| `antares/dr.py` | Domain-randomization ranges derived from refits (`locks/*.dr.json`) |
+| `antares/sag.py` | Residual vs gravity load and motion (`antares sag`) |
+| `antares/specificity.py` | Cross-arm verdict, identifiability, swap and same-arm checks (`antares specificity`, `cross`, `identify`) |
+| `antares/synthetic.py` | Simulated arm datasets with known parameters, for the synthetic studies |
+| `antares/synth.py` | Synthetic recordings of an arm with known wear, as a LeRobot directory (`antares synth`) |
+| **Every robot is different** | |
+| `antares/fleet.py` | Hub discovery, fleet scan, fleet statistics (`antares fleet`, `/api/fleet`) |
+| `antares/registry.py` | One id per physical robot, its lock lineage and active lock (`locks/registry.json`, `antares robots`, `@<robot>`, `/api/registry`) |
+| **Operating the robot** | |
+| `antares/drift.py` | Sliding-window refits and trend statistics over a session (`antares drift`) |
 | `antares/check.py` | Pre-deploy drift gate (`antares check`, `/api/check`) |
 | `antares/history.py` | Check history per lock across sessions (`locks/*.history.jsonl`, `antares history`, `/api/history`) |
-| `antares/registry.py` | One id per physical robot, its lock lineage and active lock (`locks/registry.json`, `antares robots`, `@<robot>`, `/api/registry`) |
-| `antares/diagnose.py` | Names the parameter change behind a drift (`check --explain`) |
-| `antares/synth.py` | Synthetic recordings of an arm with known wear (`antares synth`) |
-| `action.yml` | Composite GitHub Action running the gate in CI |
-| `.github/workflows/` | Tests on every push (`ci.yml`) and an example weekly drift gate on the SO-101 demo lock (`robot-check.yml`) |
-| `antares/events.py` | Contact events from the real-sim residual |
-| `antares/compensate.py` | Lag compensation (shift, ILC), sim-validated |
-| `antares/sag.py` | Residual vs gravity load and motion (`antares sag`) |
-| `antares/specificity.py` | Cross-arm verdict, identifiability, swap and same-arm checks |
-| `antares/synthetic.py` | Simulated arm datasets with known parameters |
-| `antares/transfer.py` | Sim-to-sim policy transfer experiment (`antares transfer`) |
-| `antares/policy.py` | State-based chunked policy trained on the logs; LeRobot checkpoint wrapper (`antares policy train`, `locks/*.policy.pt`) |
-| `antares/shadow.py` | Open-loop shadow evaluation: the policy's commands rolled through each sim |
-| `antares/closedloop.py` | Closed-loop evaluation: the policy drives each sim; grasp-point proxy success |
-| `results/` | Robot-specificity reports (`antares specificity`), policy transfer report (`policy_transfer.{json,md}`) |
-| `antares/cli.py` | The `antares` command line |
-| `antares/server.py` | FastAPI backend for the UI |
-| `examples/` | `randomize_env.py`: DR ranges in a training loop |
-| `experiments/` | `policy_transfer.py` (fleet transfer of tracking controllers), `dump_refs.py` (fleet reference trajectories), `results/` |
-| `scripts/` | `sensor_synthetic.py` (synthetic sensor-fit check), `dr_compare.py` (derived vs hand-picked DR ranges) |
-| `antares/fleet.py` | Hub discovery, fleet scan, fleet statistics |
+| `antares/diagnose.py` | Names the parameter change behind a drift (`check --explain`, `/api/diagnose`) |
+| `antares/notify.py` | Posts a check's verdict to a webhook, Slack Block Kit or generic JSON (`check --notify`, `antares notify-test`) |
+| `antares/recordcheck.py` | Drives `lerobot-record`, then runs the gate on the recording (`antares record-check`) |
+| `antares/events.py` | Contact events from the real-sim residual (`antares events`, `/api/residual`) |
+| `antares/compensate.py` | Lag compensation (shift, ILC), sim-validated (`antares compensate`) |
+| `antares/dr.py` | Domain-randomization ranges derived from refits (`antares dr`, `locks/*.dr.json`) |
+| **Seeing what the robot sees** | |
+| `antares/task.py` | Pick/place/start-pose distribution from the gripper and FK (`antares task`) |
+| `antares/noise.py` | Joint-reading noise model measured while parked (`antares noise`) |
 | `antares/video.py` | Dataset video frames (episode -> file/timestamp, AV1 decode, frame cache) |
 | `antares/silhouette.py` | Real arm mask: median background, colour model, static-arm region |
 | `antares/project.py` | Sim arm silhouette: mesh hulls, pinhole camera, polygon fill |
-| `antares/camera.py` | Fixed-camera fit (CMA-ES over look-at coordinates), `locks/*.camera.json` |
+| `antares/camera.py` | Fixed-camera fit (CMA-ES over look-at coordinates), `locks/*.camera.json` (`antares camera-fit`, `camera-list`) |
 | `antares/videodelay.py` | How many frames a camera's video lags the joint log (`antares camera-delay`) |
-| `antares/task.py` | Pick/place/start-pose distribution from the gripper and FK (`antares task`) |
-| `antares/noise.py` | Joint-reading noise model measured while parked (`antares noise`) |
-
-| `antares/scene.py` | Table, workspace and backdrops from the logs; sim-view composite (`locks/*.scene.json`, `locks/scene/`) |
+| `antares/scene.py` | Table, workspace and backdrops from the logs; sim-view composite (`antares scene-fit`, `locks/*.scene.json`, `locks/scene/`) |
 | `antares/objects.py` | The manipulated object found and tracked in the video, vision vs FK, cross-camera check (`antares objects-fit`, `locks/*.objects.json`, `locks/objects/`) |
 | `antares/payload.py` | Payload mass from the residual while the object is carried (`antares payload`) |
-| `locks/` | Committed locks for the demo arms; `locks/fleet/` for the fleet scan |
-| `web/` | React + three.js viewer |
+| **A policy in the loop** | |
+| `antares/policy.py` | State-based chunked policy trained on the logs; LeRobot checkpoint wrapper (`antares policy train`, `locks/*.policy.pt`) |
+| `antares/shadow.py` | Open-loop shadow evaluation: the policy's commands rolled through each sim |
+| `antares/closedloop.py` | Closed-loop evaluation: the policy drives each sim; grasp-point proxy success |
+| `antares/transfer.py` | Sim-to-sim reaching transfer experiment on hidden synthetic arms (`antares transfer`) |
+| **Export** | |
+| `antares/export.py` | Lock -> standalone MJCF, sidecar, scene with table, backdrops and object, zip |
+| `antares/export_targets.py` | Lock -> Isaac Lab / ManiSkill / mjlab actuator configs and neutral JSON (`export --format`) |
+| **Around the package** | |
+| `antares/assets/` | The vendored SO-101 and SO-100 MJCFs, meshes and licences |
+| `locks/` | Committed locks, camera/scene/object/policy fits for the demo arms; `locks/fleet/` for the fleet scan |
+| `results/` | Robot-specificity reports (`antares specificity`, `results/synthetic/`), the reaching transfer report (`policy_transfer.{json,md}`), the servo study (`servo_study.json`) |
+| `examples/` | `randomize_env.py` (DR ranges in a training loop), `drift_demo.py` (a ten-week wear story), `factors.toml` (an added factor) |
+| `experiments/` | `policy_transfer.py` (fleet transfer of tracking controllers), `dump_refs.py` (fleet reference trajectories), `results/` |
+| `scripts/` | `sensor_synthetic.py` (synthetic sensor-fit check), `dr_compare.py` (derived vs hand-picked DR ranges), `servo_study.py` (servo model vs position actuator) |
+| `tests/` | pytest suite; `slow` marks the tests that run real MuJoCo replays |
+| `action.yml` | Composite GitHub Action running the gate in CI |
+| `.github/workflows/` | Tests on every push (`ci.yml`) and an example weekly drift gate on the SO-101 demo lock (`robot-check.yml`) |
+| `web/` | React + three.js viewer (Viewer and Fleet views) |
 
 ## Status
 
-Started as a weekend hackathon project. On the SO-101 and SO-100 demo
-datasets, everything above works end to end from the CLI, the API and the
-viewer: replay, shared and per-joint calibration, sensor calibration, robot
-locks and MJCF export, drift scans and the pre-deploy gate with its cause
-diagnosis, data-derived DR ranges, contact events, sim-only lag
-compensation, the robot-specificity study, the fleet scan, and a learned
-state policy judged in the stock and the calibrated sim.
+Started as a weekend hackathon project in October 2026 (`antares_version`
+0.0.1 in every lock). What works end to end from the CLI, the API and the
+viewer, on the SO-101 and SO-100 demo datasets and on any SO-100/101
+dataset that passes `antares inspect`:
+
+* replay; shared, per-joint and best-of-N-seed calibration; the sensor map,
+  the gravity and deadband terms, the STS3215 servo model, and a user's own
+  LeRobot calibration file;
+* locks and the robot registry; MJCF export with the scene, and the Isaac
+  Lab, ManiSkill and mjlab configs (checked against Isaac Lab 2.3.2,
+  ManiSkill 3.0.1, mjlab 1.6.0);
+* drift scans; the pre-deploy gate with its history, `--explain`, webhook
+  alerts and the GitHub Action; `record-check`; `synth` for arms with known
+  wear;
+* contact events, sim-only lag compensation, data-derived DR ranges;
+* the robot-specificity study, the 58-arm fleet scan and the Fleet view;
+* camera, video-delay, scene and object fits from the dataset videos, and
+  the sim-view composite;
+* the state policy trained on a lock's split and judged open and closed
+  loop in both sims, plus the two sim-to-sim transfer experiments.
+
+Partial:
+
+* Other robots (ALOHA, Trossen AI, AgileX Piper, Koch) load, replay,
+  calibrate and export through the registry and are covered by tests, but
+  no lock for them is committed and no gap has been measured on a real
+  dataset of theirs.
+* The LeRobot checkpoint wrapper (`load_lerobot_policy`) is tested against
+  a stub; no ACT, diffusion or SmolVLA checkpoint has been run through the
+  evaluators. An image policy in closed loop needs the rendered sim view,
+  which the exported scene and `/api/scene/view` provide and nothing here
+  consumes yet.
+* `record-check` drives `lerobot-record` and was checked against LeRobot
+  0.6.1's documented flags, not at an arm.
+* Payload mass is implemented and reports the deflection, but the mass is
+  below the noise floor on both demo arms, so the export uses an assumed
+  30 g.
+* The servo model (`--servo sts3215`) beats the position actuator on both
+  demo arms but is opt-in; the committed demo locks are position-actuator
+  locks.
 
 Not yet measured on hardware: everything is judged against logged
-trajectories, so lag compensation and DR are validated in the sim only.
-Open questions: the fits are seed-sensitive and `kp`/`kv` are not
-identifiable from pick-and-place logs (see "Is a lock specific to its
-arm?"), and the elbow error is step-shaped, which the six servo
-parameters do not model.
+trajectories, so lag compensation, DR ranges and both policy experiments
+are validated in the sim only. Open questions: the fits are seed-sensitive
+and `kp`/`kv` are not identifiable from pick-and-place logs (see
+[Is a lock specific to its arm?](#is-a-lock-specific-to-its-arm)), and the
+elbow error is step-shaped, which the six servo parameters do not model.
