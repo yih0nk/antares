@@ -252,6 +252,69 @@ SO-101 per-joint lock 0.769° on SO-100 against 0.846°.
 Caveat: the gripper is not scored (object contacts are not logged), so its
 per-joint parameters are unconstrained and should not be read as physical.
 
+## Is a lock specific to its arm?
+
+A lock is only worth having per robot if it beats another arm's lock on
+this arm, by more than refitting the same arm moves the score. `antares
+specificity` runs that test on the newest shared (one value for all
+joints) lock of each dataset, scoring the held-out episodes of the split
+that lock was fitted with, and writes `results/robot_specificity.{md,json}`:
+
+```sh
+.venv/bin/antares specificity                # the two demo arms
+.venv/bin/antares specificity --synthetic    # same study on simulated arms with known parameters
+.venv/bin/antares identify lerobot/svla_so101_pickplace --lock svla_so101_pickplace
+```
+
+Per arm it reports the cross matrix with a verdict and margin, a same-arm
+control (refit on 20 episodes the lock never saw), a swap test (refit
+with the other arm's `kp`/`kv` pinned), two extra CMA-ES seeds on the same
+episodes, a linearized identifiability table (how far each parameter can
+move before the training error rises 0.1°, alone and with the others
+refit), the latency profile, and the error along the path to the other
+lock. `antares cross` also prints the verdict and takes `--json`.
+
+What the two demo arms show with the current shared locks (held-out
+error, full tables in [`results/robot_specificity.md`](results/robot_specificity.md)):
+
+| | SO-101 data | SO-100 data |
+|---|---|---|
+| own lock | **0.74°** | 0.79° |
+| other seeds, same episodes | 0.91°, 1.06° | **0.57°**, 0.66° |
+| same arm, refit on other episodes | 1.05° | 0.80° |
+| own fit, other arm's kp/kv pinned | 1.09° | 0.65° |
+| other arm's lock | 1.27° (1.73×) | 0.96° (1.22×) |
+
+* **The arms are distinguishable.** Each arm's own lock beats the other
+  arm's, and the best fit found for each arm beats the other arm's lock by
+  about 1.7× on both (0.74° vs 1.27°, 0.57° vs 0.96°).
+* **A single fit is not reliable.** The same episodes with another CMA-ES
+  seed score up to 1.4× worse on SO-101, and two seeds beat SO-100's own
+  lock (0.57° vs 0.79°). Which basin a 150-200 evaluation run lands in
+  matters as much as which arm it is fitting, so the cross margins above
+  carry that noise. Keeping the best of several seeds would make a lock,
+  and every check built on it, much more repeatable.
+* **The stiffness gap is not a difference between the arms.** The locks
+  sit at kp 10.5 (SO-101) and 1427 (SO-100), but SO-100's two better
+  seeds land at kp 13-14, and pinning SO-100's fit to SO-101's `kp`/`kv`
+  scores 0.65°, better than its own lock. Across seeds `kp` and `kv`
+  spread 25-125× at similar error.
+* **The linearized table is local only.** It finds SO-100's lock tightly
+  pinned (every parameter within ×1.4-1.6, condition number 3), yet better
+  fits sit 100× away. On SO-101 it shows `damping` unconstrained and
+  traded off against `kv` (×8800 with the others refit, ×1.9 alone).
+* **Latency is the best-pinned parameter**: one frame either side of the
+  lock costs 0.3-0.9° with everything else held fixed.
+
+The synthetic study ([`results/synthetic/robot_specificity.md`](results/synthetic/robot_specificity.md))
+gives each simulated arm one real lock's parameters as its truth (kp 10.5
+vs 1427). There the own lock wins by 2.2× and 5.4×, but the fit still
+misses the truth (SO-100-like arm: kp 182 vs 1427 at 0.40° against
+0.35°), and the seeds on one arm range from 0.55° to 1.91°. So the
+optimizer spread above is a property of the fit, not of the real data.
+The fleet scan's cross matrix over many arms is the larger version of
+this test.
+
 ## Gate deploys on your robot's drift
 
 A lock is a snapshot of how one arm behaved on the day it was calibrated.
@@ -591,6 +654,9 @@ back in raw units), `export` (in the sidecar) and the drift and DR refits
 | `antares/events.py` | Contact events from the real-sim residual |
 
 | `antares/compensate.py` | Lag compensation (shift, ILC), sim-validated |
+| `antares/specificity.py` | Cross-arm verdict, identifiability, swap and same-arm checks |
+| `antares/synthetic.py` | Simulated arm datasets with known parameters |
+| `results/` | Robot-specificity reports (`antares specificity`) |
 | `antares/server.py` | FastAPI backend for the UI |
 | `examples/` | `randomize_env.py`: DR ranges in a training loop |
 
