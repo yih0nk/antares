@@ -101,15 +101,26 @@ export function VideoBackdrop({
     const v = ref.current;
     if (!v) return;
     let raf = 0;
+    // A new delay, clip or speed seeks once whatever the drift, so a
+    // one-frame nudge shows while playing too.
+    let resync = true;
     const tick = () => {
       raf = requestAnimationFrame(tick);
       if (v.readyState < 1 || !isFinite(v.duration)) return;
+      const end = Math.max(0, v.duration - 0.5 / fps);
       // Frame f of the log is frame f + delay of the video (centre of the frame).
-      const t = Math.min(Math.max(0, (playhead.frame + delay + 0.5) / fps), Math.max(0, v.duration - 0.5 / fps));
-      if (playing) {
+      const raw = (Math.floor(playhead.frame) + delay + 0.5) / fps;
+      const t = Math.min(Math.max(0, raw), end);
+      // Past either end of the clip (a delay, or a log longer than the video)
+      // the video holds its first or last frame: play() on an ended video
+      // would restart it from frame 0.
+      if (playing && raw > 0 && raw < end && !v.ended) {
         if (v.playbackRate !== speed) v.playbackRate = speed;
         if (v.paused) v.play().catch(() => {});
-        if (!v.seeking && Math.abs(v.currentTime - t) > DRIFT_S * Math.max(1, speed)) v.currentTime = t;
+        if (!v.seeking && (resync || Math.abs(v.currentTime - t) > DRIFT_S * Math.max(1, speed))) {
+          v.currentTime = t;
+          resync = false;
+        }
       } else {
         if (!v.paused) v.pause();
         if (!v.seeking && Math.abs(v.currentTime - t) > 0.5 / fps) v.currentTime = t;
