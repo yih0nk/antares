@@ -163,3 +163,13 @@ def test_prefit_command_map_from_still_frames():
 def test_prefit_keeps_identity_without_still_frames():
     # the multi-sine episodes never hold still
     assert prefit_command_map(make_episodes(2)).is_identity()
+
+
+def test_calibrate_with_sensor_kinematic_mode():
+    eps = make_step_episodes(6, seed=2)
+    out = calibrate_with_sensor(eps[:4], eps[4:], simulate=toy_simulate, max_evaluations=60, mode="kinematic")
+    assert out.result.eval_score < 0.5 * out.dynamics_only.eval_score
+    for j in FIT_JOINTS:
+        assert out.command_map.bias[j] == pytest.approx(TRUE_MAP.bias[j], abs=0.2)
+    with pytest.raises(ValueError):
+        calibrate_with_sensor(eps[:1], [], simulate=toy_simulate, mode="nope")

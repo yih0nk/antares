@@ -256,6 +256,7 @@ def calibrate_with_sensor(
     max_evaluations: int = 150,
     rounds: int = 2,
     fit_gain: bool = True,
+    mode: str = "sim",
     seed: int = 0,
     on_progress: Callable[[ProgressEvent], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
@@ -267,9 +268,15 @@ def calibrate_with_sensor(
     as ``dynamics_only``). Each later round fits the command map with the
     current dynamics fixed, then refits the dynamics from where they were,
     under the new command map, with ``max_evaluations`` CMA-ES evaluations.
-    A final command-map fit follows the last round. ``calibrate_kwargs``
+    A final command-map fit follows the last round.
+
+    ``mode="kinematic"`` instead pre-fits the map from still frames
+    (:func:`prefit_command_map`), freezes it, and refits the dynamics once
+    under it, so the map cannot absorb dynamics error. ``calibrate_kwargs``
     (e.g. ``per_joint=True``) go to every dynamics fit.
     """
+    if mode not in ("sim", "kinematic"):
+        raise ValueError(f"mode must be 'sim' or 'kinematic', got {mode!r}")
     t0 = time.perf_counter()
     train, eval = list(train), list(eval)
     if simulate is None:
@@ -293,10 +300,13 @@ def calibrate_with_sensor(
     n_evals = first.n_evaluations
     params, cmap = first.params, ident
 
-    for k in range(1, rounds):
+    for k in range(1, rounds if mode == "sim" else 2):
         if stop():
             break
-        cmap = fit_command_map(params, train, simulate, start=cmap, fit_gain=fit_gain).command_map
+        if mode == "kinematic":
+            cmap = prefit_command_map(train, fit_gain=fit_gain)
+        else:
+            cmap = fit_command_map(params, train, simulate, start=cmap, fit_gain=fit_gain).command_map
         offset["n"] = n_evals
         nxt = calibrate(
             train, eval, simulate=with_map(cmap), start=params, max_evaluations=max_evaluations,
@@ -305,7 +315,8 @@ def calibrate_with_sensor(
         history += [(i + n_evals, s) for i, s in nxt.history[1:]]
         n_evals += nxt.n_evaluations
         params = nxt.params
-    cmap = fit_command_map(params, train, simulate, start=cmap, fit_gain=fit_gain).command_map
+    if mode == "sim":
+        cmap = fit_command_map(params, train, simulate, start=cmap, fit_gain=fit_gain).command_map
 
     from antares.calibrate import _per_joint, _safe_score
 
