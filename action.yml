@@ -65,6 +65,13 @@ inputs:
       json for anything else).
     required: false
     default: "auto"
+  record-history:
+    description: >-
+      Append the result to locks/<lock>.history.jsonl in the workspace, the
+      per-robot check history `antares history` and GET /api/history read.
+      Commit the file or upload it with actions/upload-artifact to keep it.
+    required: false
+    default: "true"
   python-version:
     description: Python version to set up.
     required: false
@@ -129,6 +136,7 @@ runs:
         WEBHOOK: ${{ inputs.webhook }}
         NOTIFY_WHEN: ${{ inputs.notify-when }}
         NOTIFY_FORMAT: ${{ inputs.notify-format }}
+        RECORD_HISTORY: ${{ inputs.record-history }}
         ACTION_PATH: ${{ github.action_path }}
       run: |
         set -o pipefail
@@ -145,10 +153,14 @@ runs:
         # Only this JSON run alerts; the table run below is for the log.
         notify=()
         [ -n "$WEBHOOK" ] && notify=(--notify "$WEBHOOK" --notify-when "$NOTIFY_WHEN" --notify-format "$NOTIFY_FORMAT")
+        # The history lives in the workspace even when the lock came from the
+        # action's own checkout; the second (human-readable) run below never records.
+        record=(--history-dir locks)
+        [ "$RECORD_HISTORY" != "true" ] && record=(--no-record)
 
         report="$RUNNER_TEMP/antares-check.json"
         set +e
-        antares check "${args[@]}" "${explain[@]}" "${notify[@]}" --json > "$report"
+        antares check "${args[@]}" "${explain[@]}" "${notify[@]}" "${record[@]}" --json > "$report"
         code=$?
         set -e
         echo "report=$report" >> "$GITHUB_OUTPUT"
@@ -168,7 +180,7 @@ runs:
           # Human-readable table in the job log and the step summary.
           {
             echo '```'
-            antares check "${args[@]}" || true
+            antares check "${args[@]}" --no-record || true
             python -c 'import json, sys; d = json.load(open(sys.argv[1])).get("diagnosis"); d and print("\n" + d["summary"])' "$report"
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"

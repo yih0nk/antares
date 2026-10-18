@@ -1553,3 +1553,95 @@ def test_lock_simulate_holds_the_lock_command_map():
     _, mapped = sim(SimParams(), ep)
     plain = server.lock_simulate({"command_map": {"gain": [1.0] * 6, "bias": [0.0] * 6}})(SimParams(), ep)[1]
     assert mapped[-1, 1] > plain[-1, 1]
+
+
+# --------------------------------------------------------------------------
+# check history across sessions (``LOCK_DIR/<lock>.history.jsonl``)
+# --------------------------------------------------------------------------
+
+TREND_KEYS = {"n", "first", "last", "slope_deg_per_day", "r2", "latest_verdict", "n_drifted"}
+ENTRY_KEYS = {"at", "lock", "dataset", "verdict", "passed", "score", "reference", "limit",
+              "n_episodes", "episodes", "worst_joint", "per_joint", "antares_version"}
+
+
+def _history_lines(fakes, name="unit-a"):
+    p = fakes / "locks" / f"{name}.history.jsonl"
+    return [json.loads(l) for l in p.read_text().splitlines()] if p.is_file() else None
+
+
+def test_check_records_history_unless_told_not_to(client, fakes):
+    write_lock(fakes, "unit-a", kp=50.0)
+    ok = client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a"}).json()
+    assert "history_error" not in ok
+    (rec,) = _history_lines(fakes)
+    assert set(rec) == ENTRY_KEYS
+    assert rec["lock"] == "unit-a" and rec["dataset"] == FAKE_DS and rec["verdict"] == "ok"
+    assert rec["score"] == pytest.approx(ok["score"]) and rec["limit"] == pytest.approx(1.8)
+    assert rec["episodes"] == [0, 1, 2, 3, 4, 5] and rec["worst_joint"] == ok["worst_joint"]
+    assert rec["per_joint"] == {j: pytest.approx(v["score"]) for j, v in ok["per_joint"].items()}
+    assert rec["at"].endswith("Z")
+
+    client.post("/api/check", json={"dataset": FAKE_DS2, "lock": "unit-a", "record": False})
+    assert len(_history_lines(fakes)) == 1
+
+    # insufficient data is recorded too, with a null score
+    out = client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a", "last": 2}).json()
+    assert out["verdict"] == "insufficient_data"
+    recs = _history_lines(fakes)
+    assert [r["verdict"] for r in recs] == ["ok", "insufficient_data"]
+    assert recs[1]["score"] is None and recs[1]["per_joint"] == {} and recs[1]["n_episodes"] == 2
+
+
+def test_history_get_entries_oldest_first_with_trend(client, fakes):
+    write_lock(fakes, "unit-a", kp=50.0)
+    client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a"})
+    client.post("/api/check", json={"dataset": FAKE_DS2, "lock": "unit-a"})
+    r = client.get("/api/history/unit-a")
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert set(d) == {"lock", "entries", "trend"} and d["lock"] == "unit-a"
+    assert [e["verdict"] for e in d["entries"]] == ["ok", "drifted"]
+    assert [e["dataset"] for e in d["entries"]] == [FAKE_DS, FAKE_DS2]
+    assert d["entries"][0]["at"] <= d["entries"][1]["at"]
+    t = d["trend"]
+    assert set(t) == TREND_KEYS
+    assert t["n"] == 2 and t["n_drifted"] == 1 and t["latest_verdict"] == "drifted"
+    assert t["first"] == d["entries"][0]["at"] and t["last"] == d["entries"][1]["at"]
+    json.dumps(d)
+
+
+def test_history_get_missing_lock_and_empty_history(client, fakes):
+    assert client.get("/api/history/ghost").status_code == 404
+    assert client.get("/api/history/..").status_code in (400, 404)
+    assert client.get("/api/history/a%2Fb").status_code in (400, 404)
+    write_lock(fakes, "unit-a", kp=50.0)
+    d = client.get("/api/history/unit-a").json()
+    assert d == {
+        "lock": "unit-a",
+        "entries": [],
+        "trend": {"n": 0, "first": None, "last": None, "slope_deg_per_day": None, "r2": None,
+                  "latest_verdict": None, "n_drifted": 0},
+    }
+
+
+def test_history_list_covers_every_lock(client, fakes):
+    assert client.get("/api/history").json() == {"locks": []}
+    write_lock(fakes, "unit-a", kp=50.0)
+    write_lock(fakes, "unit-b", kp=50.0)
+    client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a"})
+    d = client.get("/api/history").json()
+    assert [x["lock"] for x in d["locks"]] == ["unit-a", "unit-b"]
+    a, b = d["locks"]
+    assert set(a) == {"lock", "trend", "latest"} and set(a["trend"]) == TREND_KEYS
+    assert a["trend"]["n"] == 1 and a["latest"]["verdict"] == "ok" and set(a["latest"]) == ENTRY_KEYS
+    assert b["trend"]["n"] == 0 and b["latest"] is None
+
+
+def test_history_get_skips_a_corrupt_line(client, fakes):
+    write_lock(fakes, "unit-a", kp=50.0)
+    client.post("/api/check", json={"dataset": FAKE_DS, "lock": "unit-a"})
+    p = fakes / "locks" / "unit-a.history.jsonl"
+    p.write_text(p.read_text() + "garbage\n")
+    with pytest.warns(UserWarning, match="corrupt history line"):
+        d = client.get("/api/history/unit-a").json()
+    assert d["trend"]["n"] == 1 and len(d["entries"]) == 1
