@@ -1,22 +1,22 @@
 """Record one 60 s run from the servo_log sketch into a CSV.
 
     pip install pyserial
-    python capture.py servo_a_run1.csv            # auto-detects the Arduino
-    python capture.py servo_a_run1.csv --port /dev/cu.usbmodem1101
+    python bench/capture.py servo_a_run1.csv            # auto-detects the Arduino
+    python bench/capture.py servo_a_run1.csv --port /dev/cu.usbmodem1101
+
+The port search and the line reader are antares.servo_serial, shared with
+``antares bench live``; run from a checkout, the script finds the package
+next to it without an install.
 """
 import argparse
-import glob
 import sys
-import time
+from pathlib import Path
 
-import serial
-
-
-def find_port():
-    ports = glob.glob("/dev/cu.usbmodem*") + glob.glob("/dev/cu.usbserial*") + glob.glob("/dev/ttyACM*")
-    if not ports:
-        sys.exit("No Arduino found; pass --port (Arduino IDE > Tools > Port shows it).")
-    return ports[0]
+try:
+    from antares.servo_serial import BenchSerialError, find_port, open_port, run_lines
+except ImportError:  # a checkout without `pip install -e .`
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from antares.servo_serial import BenchSerialError, find_port, open_port, run_lines
 
 
 def main():
@@ -25,25 +25,17 @@ def main():
     ap.add_argument("--port")
     args = ap.parse_args()
 
-    port = args.port or find_port()
-    with serial.Serial(port, 115200, timeout=5) as ser:
-        time.sleep(2.0)  # opening the port resets the Uno
-        ser.reset_input_buffer()
-        ser.write(b"g")
+    try:
+        port = args.port or find_port()
         lines = 0
-        with open(args.out, "w") as f:
-            while True:
-                line = ser.readline().decode(errors="replace").strip()
-                if not line:
-                    sys.exit("Timed out waiting for data; is the sketch flashed?")
-                if line.startswith("#done"):
-                    break
-                if line.startswith("#"):
-                    continue
+        with open_port(port) as ser, open(args.out, "w") as f:
+            for line in run_lines(ser):
                 f.write(line + "\n")
                 lines += 1
                 if lines % 250 == 0:
                     print(f"  {lines // 50} s ...", flush=True)
+    except BenchSerialError as e:
+        sys.exit(f"error: {e}")
     print(f"Wrote {lines - 1} samples to {args.out} from {port}")
 
 
