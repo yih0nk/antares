@@ -3071,6 +3071,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", default=None, help="also save the estimate as JSON here")
     p.set_defaults(func=cmd_payload)
 
+    from antares import servo_bench
+
+    servo_bench.add_parser(sub)
+
     return parser
 
 
