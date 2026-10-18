@@ -238,3 +238,59 @@ export function Sparkline({ values, total, baseline, stageAt }: SparkProps) {
     </svg>
   );
 }
+
+export type HistoryPoint = {
+  at: string;
+  score: number;
+  limit: number | null;
+  // Verdict class for the marker: ok | drifted | insufficient.
+  status: string;
+};
+
+type HistorySparkProps = {
+  // Check scores in time order (oldest first).
+  points: HistoryPoint[];
+  // The lock's own held-out score; the dashed line the checks are judged against.
+  reference?: number | null;
+};
+
+// One lock's check scores over calendar time: the limit as a warm rule, the
+// lock's reference dashed, one marker per check coloured by its verdict.
+// Uniform scaling (not `none`) keeps the markers round.
+export function HistorySpark({ points, reference }: HistorySparkProps) {
+  const W = 320;
+  const H = 72;
+  const PAD = 8;
+  if (!points.length) return <svg className="spark history" viewBox={`0 0 ${W} ${H}`} />;
+  const ts = points.map((p) => Date.parse(p.at));
+  const t0 = Math.min(...ts);
+  const t1 = Math.max(...ts);
+  const x = (t: number) => (t1 > t0 ? PAD + ((t - t0) / (t1 - t0)) * (W - 2 * PAD) : W / 2);
+  const limit = points[points.length - 1].limit;
+  const hi = Math.max(reference ?? 0, limit ?? 0, ...points.map((p) => p.score)) * 1.15 || 1;
+  const y = (v: number) => H - PAD - (v / hi) * (H - 2 * PAD);
+  const d = points.map((p, i) => `${i ? "L" : "M"}${x(ts[i]).toFixed(1)},${y(p.score).toFixed(1)}`).join("");
+  return (
+    <svg className="spark history" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="xMinYMid meet" role="img">
+      <title>
+        {points.length} check{points.length === 1 ? "" : "s"}, {points[0].at.slice(0, 10)} to{" "}
+        {points[points.length - 1].at.slice(0, 10)}
+      </title>
+      {reference != null && (
+        <line x1={0} x2={W} y1={y(reference)} y2={y(reference)} className="spark-base" vectorEffect="non-scaling-stroke" />
+      )}
+      {limit != null && (
+        <line x1={0} x2={W} y1={y(limit)} y2={y(limit)} className="spark-limit" vectorEffect="non-scaling-stroke" />
+      )}
+      {points.length > 1 && <path d={d} className="spark-line" vectorEffect="non-scaling-stroke" />}
+      {points.map((p, i) => (
+        <circle key={i} cx={x(ts[i])} cy={y(p.score)} r={4} className={`spark-dot ${p.status}`}>
+          <title>
+            {p.at.slice(0, 10)}: {p.score.toFixed(2)}°{p.limit != null ? ` (limit ${p.limit.toFixed(2)}°)` : ""} ·{" "}
+            {p.status}
+          </title>
+        </circle>
+      ))}
+    </svg>
+  );
+}

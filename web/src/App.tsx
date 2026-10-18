@@ -21,6 +21,7 @@ import {
 import { Arm, compMaterial, ghostMaterial, realMaterial, type Playhead } from "./Arm";
 import { CrossHeatmap, JointTrace, ResidualStrip, Sparkline } from "./Charts";
 import { AddDataset } from "./AddDataset";
+import { FleetView } from "./Fleet";
 
 // Layout: 3D viewer (real arm + ghost sim arm) on the left, gap panel on
 // the right, episode timeline along the bottom. The ghost is the simulator
@@ -111,6 +112,15 @@ function Driver({
 }
 
 export default function App() {
+  // Top-level screen: the single-arm viewer, or the fleet dashboard. The
+  // hash deep-links to the fleet (`#fleet`, or `#fleet/<lock>` with a row open).
+  const [view, setViewState] = useState<"viewer" | "fleet">(() =>
+    window.location.hash.startsWith("#fleet") ? "fleet" : "viewer",
+  );
+  const setView = (v: "viewer" | "fleet") => {
+    setViewState(v);
+    window.history.replaceState(null, "", v === "fleet" ? "#fleet" : window.location.pathname + window.location.search);
+  };
   const [datasets, setDatasets] = useState<DatasetInfo[]>([]);
   const [dataset, setDataset] = useState<string>("");
   const [dsState, setDsState] = useState<"idle" | "loading" | "ready" | "error">("idle");
@@ -471,10 +481,19 @@ export default function App() {
   };
 
   return (
-    <div className="shell">
+    <div className={`shell${view === "fleet" ? " fleet-shell" : ""}`}>
       <header className="topbar">
         <span className="brand">antares</span>
         <span className="tagline">sim, calibrated to this robot</span>
+        <nav className="segmented views" aria-label="view">
+          <button className={view === "viewer" ? "on" : ""} onClick={() => setView("viewer")}>
+            Viewer
+          </button>
+          <button className={view === "fleet" ? "on" : ""} onClick={() => setView("fleet")}>
+            Fleet
+          </button>
+        </nav>
+        {view === "fleet" ? null : (
         <div className="picker-wrap">
           {dsState === "loading" && <span className="muted small">loading dataset…</span>}
           {currentDs && (
@@ -504,8 +523,13 @@ export default function App() {
           </select>
           <AddDataset disabled={running} onAdded={addDataset} />
         </div>
+        )}
       </header>
 
+      {view === "fleet" ? (
+        <FleetView initialOpen={decodeURIComponent(window.location.hash.replace(/^#fleet\/?/, "")) || null} />
+      ) : (
+      <>
       <main className="viewer">
         <Canvas shadows camera={{ position: [0.62, 0.48, 0.72], fov: 38, near: 0.01, far: 20 }}>
           <color attach="background" args={["#0b0d12"]} />
@@ -882,6 +906,8 @@ export default function App() {
           </>
         )}
       </footer>
+      </>
+      )}
     </div>
   );
 }
