@@ -117,10 +117,9 @@ def rejected(verdict: Verdict, what: str) -> HTTPException:
 
 def fetch_hub_info(repo_id: str) -> dict:
     """Only ``meta/info.json`` from the Hub (cached by huggingface_hub)."""
-    from huggingface_hub import hf_hub_download
+    from antares.hub import download
 
-    path = hf_hub_download(repo_id, "meta/info.json", repo_type="dataset")
-    return json.loads(Path(path).read_text())
+    return json.loads(download(repo_id, "meta/info.json").read_text())
 
 
 def _upload_dir_for(repo_id: str) -> Path | None:
