@@ -1820,36 +1820,36 @@ standing in for a real arm. The controller sees the joint angles, the last
 velocity, its last 5 commands and the next 8 frames of the path; the
 learned ones are linear (21 weights shared by all joints) and trained with
 CMA-ES on closed-loop tracking error, 3 seeds each. References are 480 real
-measured episodes from the fleet datasets; 10 locks are held out (one per
-Hub account), and each is driven along its own dataset's paths and again
-with 150 g at the gripper that no lock models.
+measured episodes from the fleet datasets (48 training arms); 10 locks are
+held out (one per Hub account), and each is driven along its own dataset's
+paths and again with 150 g at the gripper that no lock models.
 
 RMS tracking error in degrees on the 10 unseen arms (gripper excluded,
 100 rollouts, mean over seeds):
 
 | controller | mean | median | worst arm | payload mean | payload worst |
 |---|---|---|---|---|---|
-| send the path as is | 3.27 | 3.04 | 6.45 | 3.32 | 6.45 |
-| learned in the default sim | 2.12 | 1.89 | 4.17 | 2.17 | 4.18 |
-| learned in the default sim +-30% | 2.41 | 2.16 | 4.77 | 2.46 | 4.77 |
-| learned on the SO-101 lock | 3.17 | 0.57 | 21.4 | 4.11 | 30.3 |
-| learned on the SO-101 lock + `antares dr` ranges | 0.81 | 0.75 | 1.23 | 2.56 | 18.3 |
-| learned on 28 fleet locks | 2.23 | 0.48 | 17.2 | 2.69 | 20.8 |
-| same, given latency and response time | 1.42 | 0.65 | 4.92 | 2.00 | 9.91 |
-| shift by the fleet's mean latency (3) | 0.89 | 0.83 | 1.64 | 1.01 | 2.29 |
-| shift by the arm's own latency | 0.73 | 0.55 | 1.64 | 0.86 | 2.29 |
-| ILC in the arm's own lock (ceiling) | 0.10 | 0.05 | 0.22 | 0.24 | 0.79 |
+| send the path as is | 2.82 | 2.75 | 4.08 | 2.92 | 4.45 |
+| learned in the default sim | 1.93 | 1.84 | 3.00 | 2.04 | 3.36 |
+| learned in the default sim +-30% | 2.12 | 2.03 | 3.31 | 2.24 | 3.71 |
+| learned on the SO-101 lock | 0.78 | 0.77 | 1.08 | 1.09 | 3.24 |
+| learned on the SO-101 lock + `antares dr` ranges | 0.84 | 0.72 | 1.82 | 2.20 | 13.4 |
+| learned on 48 fleet locks | 0.92 | 0.70 | 2.51 | 2.21 | 13.4 |
+| same, given latency and response time | 1.19 | 0.80 | 4.66 | 1.43 | 4.97 |
+| shift by the fleet's mean latency (3) | 0.86 | 0.74 | 2.06 | 1.09 | 2.69 |
+| shift by the arm's own latency | 0.74 | 0.41 | 2.17 | 0.98 | 2.68 |
+| ILC in the arm's own lock (ceiling) | 0.08 | 0.06 | 0.14 | 0.34 | 0.89 |
 
 * Latency is most of the gap: shifting by the arm's own latency alone goes
-  from 3.27 to 0.73 deg.
-* The default MJCF has no latency, so controllers trained there reach
-  0.23 deg in their own sim and 2.12 on real-like arms; +-30% around it is
-  worse on every rollout.
-* Trained on locks without randomization, the controllers are best on a
-  typical arm but go unstable on the softest test arm (kp 51): their
-  feedback gains are too aggressive for it. The data-derived ranges remove
-  that (worst arm 21.4 to 1.23 deg) but not under the unmodelled payload.
-* Knowing the whole lock is worth seven times the latency shift (ILC 0.10
+  from 2.82 to 0.74 deg.
+* The default MJCF has no latency, so controllers trained there stay near
+  1.9 deg on real-like arms; +-30% around it is worse on every rollout.
+* Training on the calibrated SO-101 lock gives the best learned controller
+  (0.78 deg, worst arm 1.08), as good as knowing each arm's own latency.
+  The `antares dr` ranges around that lock and the fleet of 48 locks do not
+  improve on it here, and both are fragile under the unmodelled payload
+  (worst arm 13.4 deg), where the single-lock controller holds at 3.2.
+* Knowing the whole lock is worth nine times the latency shift (ILC 0.08
   deg), and an action chunk gives ILC the path ahead it needs, so the
   practical next step is a deployment adapter that runs ILC on each chunk.
 
