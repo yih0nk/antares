@@ -41,6 +41,8 @@ type Props = {
   onError: (message: string) => void;
   // A camera fit finished and was saved (the video underlay refetches the fits).
   onFitSaved?: () => void;
+  // Changes when a fit was saved elsewhere (the video underlay's automatic fit).
+  fitsRev?: number;
 };
 
 type ObjectsJob = {
@@ -78,7 +80,7 @@ const stageLabel = (ev?: CameraProgressEvent) => {
 const mm = (v: number | null | undefined) => (v == null || !isFinite(v) ? "--" : `${(v * 1000).toFixed(1)} mm`);
 const cm = (v: number) => `${(v * 100).toFixed(0)}`;
 
-export function CameraView({ dataset, episode, frame, playing, lock, busy, scene, onSceneChange, objects, onObjectsChange, track, onError, onFitSaved }: Props) {
+export function CameraView({ dataset, episode, frame, playing, lock, busy, scene, onSceneChange, objects, onObjectsChange, track, onError, onFitSaved, fitsRev }: Props) {
   const [cameras, setCameras] = useState<CameraInfo[]>([]);
   const [objectsJob, setObjectsJob] = useState<ObjectsJob | null>(null);
   const objectsSourceRef = useRef<EventSource | null>(null);
@@ -124,7 +126,7 @@ export function CameraView({ dataset, episode, frame, playing, lock, busy, scene
     }
     api.cameraFits(name).then((r) => setFits(r.cameras), () => setFits({}));
   };
-  useEffect(() => refreshFits(lock), [lock]);
+  useEffect(() => refreshFits(lock), [lock, fitsRev]);
 
   // ---- overlay at the playhead, only while paused ---------------------------
   const running = job?.status === "running" || job?.status === "cancelled";

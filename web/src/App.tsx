@@ -874,7 +874,7 @@ export default function App() {
   const [videoOn, setVideoOn] = useState(false);
   const [videoError, setVideoError] = useState<string | null>(null);
   const [fitsRev, setFitsRev] = useState(0);
-  const video = useUnderlay(dataset, episode, cameraLock, videoOn, fitsRev);
+  const video = useUnderlay(dataset, episode, cameraLock, videoOn, fitsRev, running);
   const underlay = video.underlay;
   const videoAvail = video.cameras.length > 0;
 
@@ -1209,9 +1209,35 @@ export default function App() {
                   ? `video from the ${underlay.camera.name} camera, view pinned to its fitted pose${underlay.fit.lock && underlay.fit.lock !== cameraLock ? ` (fitted with lock ${underlay.fit.lock})` : ""}, held-out overlap ${(underlay.fit.heldout_iou * 100).toFixed(0)}%`
                   : !underlay.camera.fixed
                     ? `video from the ${underlay.camera.name} camera as a plain backdrop: it moves with the arm, so the 3D view cannot be lined up with it`
-                    : !cameraLock
-                      ? `video from the ${underlay.camera.name} camera as a plain backdrop: calibrate first, then fit the camera under Camera to line the arm up`
-                      : `video from the ${underlay.camera.name} camera as a plain backdrop: no fitted camera for this lock yet, fit it under Camera to line the arm up`}
+                    : video.lineUp?.status === "running" || video.lineUp?.status === "done"
+                      ? (
+                        <>
+                          lining the 3D view up with the {underlay.camera.name} camera
+                          {video.lineUp.status === "done"
+                            ? " (saved)"
+                            : video.lineUp.last
+                            ? ` (${
+                                video.lineUp.last.stage === "start"
+                                  ? `try ${video.lineUp.last.start + 1} of ${video.lineUp.last.n_starts}`
+                                  : video.lineUp.last.stage === "sample"
+                                    ? "first guesses"
+                                    : video.lineUp.last.stage === "refine"
+                                      ? "refining"
+                                      : "checking"
+                              }, overlap ${(video.lineUp.last.best_iou * 100).toFixed(0)}%)`
+                            : "…"}{" "}
+                          <button className="link" onClick={video.stopLineUp} disabled={!video.lineUp.jobId || video.lineUp.status === "done"}>
+                            stop
+                          </button>
+                        </>
+                      )
+                      : video.lineUp?.status === "error"
+                        ? `could not line the 3D view up with the ${underlay.camera.name} camera: ${video.lineUp.error}`
+                        : !cameraLock
+                          ? `video from the ${underlay.camera.name} camera as a plain backdrop: calibrate first, then the view lines up with the video`
+                          : running
+                            ? `video from the ${underlay.camera.name} camera as a plain backdrop: the view lines up with it once calibration finishes`
+                            : `video from the ${underlay.camera.name} camera as a plain backdrop: no fitted camera yet, fit it under Camera to line the arm up`}
             </span>
           )}
           {scene && !underlay && (
@@ -1569,6 +1595,7 @@ export default function App() {
           track={track}
           onError={setError}
           onFitSaved={() => setFitsRev((r) => r + 1)}
+          fitsRev={video.fitsRev}
         />
 
         <section>

@@ -1728,3 +1728,7 @@ button.link:disabled {
   font-size: 12px;
   color: var(--muted);
 }
+
+.legend button.link {
+  pointer-events: auto;
+}
