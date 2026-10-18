@@ -213,5 +213,11 @@ def test_lock_without_command_map_omits_it():
 def test_committed_locks_still_load():
     from pathlib import Path
 
-    for lk in list_locks(Path(__file__).resolve().parent.parent / "locks"):
-        assert lk.command_map is None
+    from antares.sim import CommandMap
+
+    locks = list_locks(Path(__file__).resolve().parent.parent / "locks")
+    assert locks
+    for lk in locks:
+        # locks from before sensor fitting have none; sensor locks parse
+        cmap = CommandMap.from_dict(lk.command_map)
+        assert cmap.gain.shape == cmap.bias.shape == (6,)
