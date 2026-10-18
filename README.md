@@ -537,12 +537,19 @@ per dataset, with each dataset's own lock:
 
 | dataset | latency | raw commands | shift | ILC | ILC iterations |
 |---|---|---|---|---|---|
-| `lerobot/svla_so101_pickplace` | 4 frames | 1.054 | 0.133 | 0.048 | 4 per episode |
-| `lerobot/svla_so100_pickplace` | 3 frames | 0.791 | 0.477 | 0.119 | 3–6 per episode |
+| `lerobot/svla_so101_pickplace` | 4 frames | 0.736 | 0.923 | 0.108 | 7–10 per episode |
+| `lerobot/svla_so100_pickplace` | 3 frames | 0.787 | 0.369 | 0.120 | 3–5 per episode |
+
+On the SO-101 the pure shift makes tracking worse than the raw commands.
+Its lock's `kp` of about 10 makes the sim servo respond as a slow lag, not
+a pure 4-frame delay, so shifting the commands alone does not help; ILC
+does, with more iterations than on the stiffer SO-100.
+
 
 Feasibility (also sim-only): the compensated commands stay within the
-actuator range, exceed the original commands' range by at most 0.6°, and
-their peak velocity is 0.99× (SO-101) and 1.15× (SO-100) the fastest
+actuator range, exceed the original commands' range by at most 0.8°, and
+their peak velocity is 1.04× (SO-101) and 1.11× (SO-100) the fastest
+
 joint motion seen in the real data; the tool flags any joint above 1.5×.
 Frames sitting on the control limit are reported for the raw and the
 compensated commands side by side, because a desired trajectory that
