@@ -882,7 +882,7 @@ def export_zip(
 
             reason = unsupported_reason(lock)
             if reason is None:
-                export_targets(lock, root, targets, fps=fps)
+                export_targets(lock, root, targets, fps=fps, lock_dir=lock_dir)
             else:  # the MJCF and scene still ship; say why the configs do not
                 (root / "TARGETS-NOT-EXPORTED.txt").write_text(reason + "\n")
         with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
