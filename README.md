@@ -1563,6 +1563,55 @@ should show the policy the arm as it was ~100 ms earlier. The wrist number
 is weak (low correlation, since the whole view moves with the arm) and is
 best read as "late, by a similar amount".
 
+## Does a calibrated sim train a better controller? (sim-to-sim)
+
+A LeRobot policy hands the servos a short future path (its action chunk);
+underneath, something has to make the arm actually follow it.
+`experiments/policy_transfer.py` trains that tracking layer in different
+simulators and tests it on fleet arms it has never seen, each fleet lock
+standing in for a real arm. The controller sees the joint angles, the last
+velocity, its last 5 commands and the next 8 frames of the path; the
+learned ones are linear (21 weights shared by all joints) and trained with
+CMA-ES on closed-loop tracking error, 3 seeds each. References are 480 real
+measured episodes from the fleet datasets; 10 locks are held out (one per
+Hub account), and each is driven along its own dataset's paths and again
+with 150 g at the gripper that no lock models.
+
+RMS tracking error in degrees on the 10 unseen arms (gripper excluded,
+100 rollouts, mean over seeds):
+
+| controller | mean | median | worst arm | payload mean | payload worst |
+|---|---|---|---|---|---|
+| send the path as is | 3.27 | 3.04 | 6.45 | 3.32 | 6.45 |
+| learned in the default sim | 2.12 | 1.89 | 4.17 | 2.17 | 4.18 |
+| learned in the default sim +-30% | 2.41 | 2.16 | 4.77 | 2.46 | 4.77 |
+| learned on the SO-101 lock | 3.17 | 0.57 | 21.4 | 4.11 | 30.3 |
+| learned on the SO-101 lock + `antares dr` ranges | 0.81 | 0.75 | 1.23 | 2.56 | 18.3 |
+| learned on 28 fleet locks | 2.23 | 0.48 | 17.2 | 2.69 | 20.8 |
+| same, given latency and response time | 1.42 | 0.65 | 4.92 | 2.00 | 9.91 |
+| shift by the fleet's mean latency (3) | 0.89 | 0.83 | 1.64 | 1.01 | 2.29 |
+| shift by the arm's own latency | 0.73 | 0.55 | 1.64 | 0.86 | 2.29 |
+| ILC in the arm's own lock (ceiling) | 0.10 | 0.05 | 0.22 | 0.24 | 0.79 |
+
+* Latency is most of the gap: shifting by the arm's own latency alone goes
+  from 3.27 to 0.73 deg.
+* The default MJCF has no latency, so controllers trained there reach
+  0.23 deg in their own sim and 2.12 on real-like arms; +-30% around it is
+  worse on every rollout.
+* Trained on locks without randomization, the controllers are best on a
+  typical arm but go unstable on the softest test arm (kp 51): their
+  feedback gains are too aggressive for it. The data-derived ranges remove
+  that (worst arm 21.4 to 1.23 deg) but not under the unmodelled payload.
+* Knowing the whole lock is worth seven times the latency shift (ILC 0.10
+  deg), and an action chunk gives ILC the path ahead it needs, so the
+  practical next step is a deployment adapter that runs ILC on each chunk.
+
+All of it is sim-to-sim, with test arms from the same model class as the
+training arms. Rerun: `python experiments/dump_refs.py` where the Hub is
+reachable, then `python experiments/policy_transfer.py --refs
+.policy-data/refs.npz` (about 80 minutes on 4 cores). The summary is
+`experiments/results/policy_transfer_summary.json`.
+
 ## Layout
 
 | Path | What |
@@ -1596,6 +1645,7 @@ best read as "late, by a similar amount".
 | `antares/cli.py` | The `antares` command line |
 | `antares/server.py` | FastAPI backend for the UI |
 | `examples/` | `randomize_env.py`: DR ranges in a training loop |
+| `experiments/` | `policy_transfer.py` (fleet transfer of tracking controllers), `dump_refs.py` (fleet reference trajectories), `results/` |
 | `scripts/` | `sensor_synthetic.py` (synthetic sensor-fit check), `dr_compare.py` (derived vs hand-picked DR ranges) |
 | `antares/fleet.py` | Hub discovery, fleet scan, fleet statistics |
 | `antares/video.py` | Dataset video frames (episode -> file/timestamp, AV1 decode, frame cache) |
