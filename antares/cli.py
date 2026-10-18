@@ -1140,6 +1140,108 @@ def cmd_events(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_noise(args: argparse.Namespace) -> int:
+    import math
+
+    from antares import server
+    from antares.noise import estimate
+    from antares.sim import JOINTS
+
+    ds = server.get_dataset(args.repo_id)
+    name = args.name or server._slug(ds.repo_id)
+    model = estimate(list(ds.episodes), name=name, dataset=ds.repo_id)
+    print(f"{ds.repo_id}: joint-reading noise while each joint is parked")
+    deg = lambda v, nd=3: "-" if not math.isfinite(v) else f"{math.degrees(v):.{nd}f}"  # noqa: E731
+    rows = [
+        [j, str(int(model.n_frames[i])), deg(model.scale[i]),
+         "-" if not math.isfinite(model.acf1[i]) else f"{model.acf1[i]:.2f}", deg(model.quantum[i], 4)]
+        for i, j in enumerate(JOINTS)
+    ]
+    print(_table(["joint", "parked frames", "std (deg)", "lag-1 corr", "step (deg)"], rows))
+    if not args.no_save:
+        path = model.save(args.out or model.default_path(server.LOCK_DIR))
+        print(f"saved noise model {model.name} -> {path}")
+    return 0
+
+
+def cmd_camera_delay(args: argparse.Namespace) -> int:
+    import json
+    from pathlib import Path
+
+    import numpy as np
+
+    from antares import server
+    from antares.video import VideoUnavailable
+    from antares.videodelay import camera_delay
+
+    try:
+        ds = server.get_dataset(args.repo_id)
+    except Exception as e:  # noqa: BLE001
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    cams = {c["name"] for c in server.list_camera_infos(args.repo_id)}
+    if args.camera not in cams:
+        print(f"error: {args.repo_id} has no camera {args.camera!r}; cameras: {sorted(cams)}", file=sys.stderr)
+        return 1
+    n = min(args.episodes, len(ds.episodes))
+    picks = [ds.episodes[int(i)].index for i in np.unique(np.linspace(0, len(ds.episodes) - 1, n).round())]
+    try:
+        res = camera_delay(ds, args.camera, picks, max_lag=args.max_lag)
+    except VideoUnavailable as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    rows = [[str(ep), f"{lag:+.2f}", f"{res.peak_corr[ep]:.2f}"] for ep, lag in res.per_episode.items()]
+    print(f"{ds.repo_id} camera {args.camera}: video lag behind the joint log, per episode")
+    print(_table(["episode", "lag (frames)", "peak corr"], rows))
+    print(f"median: {res.frames:+.2f} frames = {res.ms:+.0f} ms at {res.fps:g} fps (positive: video is late)")
+    if args.out:
+        Path(args.out).write_text(json.dumps(res.to_dict(), indent=2, sort_keys=True) + "\n")
+        print(f"saved -> {args.out}")
+    return 0
+
+
+def cmd_task(args: argparse.Namespace) -> int:
+    from antares import server
+    from antares.task import TaskDistribution
+
+    ds = server.get_dataset(args.repo_id)
+    name = args.name or server._slug(ds.repo_id)
+    td = TaskDistribution.from_episodes(list(ds.episodes), name=name, dataset=ds.repo_id, held_gap=args.held_gap)
+    s = td.summary()
+    if not td.held:
+        print(
+            f"error: {ds.repo_id}: none of the {s['grasps']} closes of the gripper held anything "
+            f"(jaw never stopped {args.held_gap:g} units above its empty-closed level); "
+            f"nothing to sample from, so no task file was written (try a smaller --held-gap)",
+            file=sys.stderr,
+        )
+        return 1
+    print(
+        f"{ds.repo_id}: {s['episodes']} episodes, {s['grasps']} closes of the gripper: "
+        f"{s['held']} picks ({s['carried']} carried somewhere else), {s['missed']} missed, "
+        f"{s['idle']} idle closes after letting go"
+    )
+    rows = []
+    for label, st in (("pick", s["pick"]), ("place", s["place"])):
+        if st is None:
+            continue
+        cm = lambda v, f="+.1f": ", ".join(f"{100 * x:{f}}" for x in v)  # noqa: E731
+        rows.append([label, str(st["n"]), cm(st["mean"]), cm(st["std"], ".1f"), cm(st["min"]), cm(st["max"])])
+    if rows:
+        print("gripper tip in the base frame, cm (x, y, z):")
+        print(_table(["", "n", "mean", "std", "min", "max"], rows))
+    if s["jaw_deg_median"] is not None:
+        print(f"jaw stops at {s['jaw_deg_median']:.1f} deg on a held object (median)")
+    if s["missed_episodes"]:
+        print(f"episodes with a missed grasp: {_episode_list(s['missed_episodes'])}")
+    if s["episodes_without_pick"]:
+        print(f"episodes with no pick found: {_episode_list(s['episodes_without_pick'])}")
+    if not args.no_save:
+        path = td.save(args.out or td.default_path(server.LOCK_DIR))
+        print(f"saved task {td.name} -> {path}")
+    return 0
+
+
 def _feasibility_line(f: dict) -> str:
     verdict = "ok" if f.get("ok") else f"FLAGGED {', '.join(f.get('flagged_joints', []))}"
     bits = [f"feasibility (sim-only): {verdict}"]
@@ -1559,28 +1661,49 @@ def cmd_export(args: argparse.Namespace) -> int:
     from fastapi import HTTPException
 
     from antares import server
-    from antares.export import SCENE_FILENAME, export_scene, sidecar_path
+    from antares.export import SCENE_FILENAME, TASK_FILENAME, export_scene, sidecar_path
     from antares.export_targets import TARGET_LABELS, TargetExportError, dataset_fps, render, resolve_targets
     from antares.lock import RobotLock
+    from antares.task import TASK_SUFFIX, TaskDistribution
 
     try:
         lock = RobotLock.from_dict(server.load_lock_dict(args.name))
     except HTTPException as e:
         print(f"error: {e.detail}", file=sys.stderr)
         return 1
+    task = None
+    if args.task:
+        task_path = Path(args.task)
+        if not task_path.is_file():
+            task_path = server.LOCK_DIR / f"{args.task}{TASK_SUFFIX}"
+        if not task_path.is_file():
+            print(f"error: no task file {args.task} (run `antares task` first)", file=sys.stderr)
+            return 1
+        task = TaskDistribution.load(task_path)
+        if not task.held:
+            print(f"error: task {task.name} ({task_path}) has no held grasps: nothing to put in the scene", file=sys.stderr)
+            return 1
     try:
         targets = resolve_targets(getattr(args, "format", "mjcf"))
     except TargetExportError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
     out_dir = Path(args.output) if args.output else Path("export") / lock.name
-    scene = export_scene(lock, out_dir, bundle_assets=not args.no_bundle)
+    try:
+        scene = export_scene(
+            lock, out_dir, bundle_assets=not args.no_bundle, task=task, object_size=args.object_size
+        )
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
     arm = out_dir / f"{lock.name}.xml"
     p = lock.params
     print(f"exported lock {lock.name} ({lock.dataset}) -> {out_dir}/")
     print(f"  {arm.name:<40} calibrated arm MJCF")
     print(f"  {sidecar_path(arm).name:<40} params incl. latency_frames={p.latency_frames}, unit map")
-    print(f"  {SCENE_FILENAME:<40} arm + floor/light")
+    print(f"  {SCENE_FILENAME:<40} arm + floor/light" + (" + cube and place marker" if task else ""))
+    if task is not None:
+        print(f"  {TASK_FILENAME:<40} pick/place/start-pose distribution ({task.name})")
     if args.no_bundle:
         print("  meshdir points at the antares package assets (absolute path)")
     else:
@@ -2109,6 +2232,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_events)
 
 
+    p = sub.add_parser("noise", help="measure joint-reading noise while the arm is parked")
+    p.add_argument("repo_id")
+    p.add_argument("--name", default=None, help="noise model name (default: dataset slug)")
+    p.add_argument("--out", default=None, help="output path (default: locks/<name>.noise.json)")
+    p.add_argument("--no-save", action="store_true")
+    p.set_defaults(func=cmd_noise)
+
+    p = sub.add_parser("task", help="where objects were picked and placed, from the gripper and FK")
+    p.add_argument("repo_id")
+    p.add_argument("--name", default=None, help="task name (default: dataset slug)")
+    p.add_argument("--held-gap", type=float, default=3.0,
+                   help="jaw this far above an empty close (0..100 units) counts as holding")
+    p.add_argument("--out", default=None, help="output path (default: locks/<name>.task.json)")
+    p.add_argument("--no-save", action="store_true")
+    p.set_defaults(func=cmd_task)
+
     p = sub.add_parser(
         "compensate",
         help="commands that make the calibrated sim track an episode's real trajectory (sim-only)",
@@ -2198,6 +2337,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="do not copy the STL meshes; point meshdir at the package assets instead",
     )
+    p.add_argument("--task", default=None,
+                   help="task name or .task.json path (from `antares task`): add a cube and place marker")
+    p.add_argument("--object-size", type=float, default=0.03, help="cube edge length in metres (with --task)")
     p.add_argument(
         "--format",
         choices=["mjcf", "isaaclab", "maniskill", "mjlab", "json", "all"],  # antares.export_targets.FORMATS
@@ -2241,6 +2383,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--starts", type=int, default=8, help="CMA-ES starts kept from the random sample")
     p.add_argument("--seed", type=int, default=0)
     p.set_defaults(func=cmd_camera_fit)
+
+    p = sub.add_parser("camera-delay", help="how many frames a camera's video lags the joint log")
+    p.add_argument("repo_id", help="Hub dataset id or a LeRobot dataset directory on disk")
+    p.add_argument("--camera", required=True, help="camera name, e.g. up (observation.images.up)")
+    p.add_argument("--episodes", type=int, default=6, help="episodes measured, spread over the dataset")
+    p.add_argument("--max-lag", type=int, default=10, help="largest lag tried either way, frames")
+    p.add_argument("--out", default=None, help="also save the result as JSON here")
+    p.set_defaults(func=cmd_camera_delay)
 
     p = sub.add_parser("camera-list", help="list the camera fits saved for a lock")
     p.add_argument("lock")

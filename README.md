@@ -1328,6 +1328,78 @@ Locks fitted this way carry a `command_map`. Replay, the viewer, `cross`,
 back in raw units), `export` (in the sidecar) and the drift and DR refits
 (which hold the map fixed) all use it. Locks without one behave as before.
 
+## The task and the sensors, from the logs
+
+A lock matches the arm. A policy trained in sim also needs the rest of the
+world to match: where objects are and how noisy the joint readings are.
+Both can be read off the same LeRobot logs (cameras are covered in
+[Cameras from the logs](#cameras-from-the-logs)).
+
+### Where objects were picked and placed
+
+```sh
+.venv/bin/antares task lerobot/svla_so101_pickplace     # -> locks/<name>.task.json
+```
+
+Each time the gripper command closes, forward kinematics of the measured
+joints at the MJCF's `gripperframe` site gives where the gripper tip was;
+each time it lets go gives where the object ended up. The jaw says whether
+anything was in it: with an object between them the jaws stop open by its
+width, on a miss they close all the way (the dataset's empty-closed level
+of the measured jaw; the leader's closed command has a level of its own,
+since the two arms are calibrated separately, and is only ever compared
+with that). The jaw is read once it has settled, 0.3 s after the command
+closes; a close the command undoes sooner is a blip across the hysteresis
+band, not a grasp. Each close is a *pick*, a *miss* (empty, before
+anything was picked), or an *idle* close (empty, after letting go). Only
+picks that moved the object more than 3 cm give a place position.
+
+On the two demo datasets (gripper tip in the base frame):
+
+| | picks | carried | missed | idle | pick x, y (cm) | place x, y, z (cm) | jaw on the cube |
+|---|---|---|---|---|---|---|---|
+| SO-101 | 51 in 50 episodes | 48 | 0 | 27 | 3..24, -14..13 | 2.8, -15.4, 7.0 (±1) | -2.3° |
+| SO-100 | 50 in 49 episodes | 49 | 1 | 49 | 19..33, -8..14 | 8.4, -12.4, 8.0 (±1) | +5.8° |
+
+Picks spread over a 20 x 27 cm area on SO-101 and land in one spot about
+7 cm up (on top of something). That is the distribution a sim environment
+for this task should draw from, and `TaskDistribution.sample(n)` does
+(pick, place and start pose, with 1 cm of jitter).
+`antares export <lock> --task <name>` adds a free 3 cm cube at the mean
+pick and a marker at the mean place to `scene.xml`;
+`antares.task.set_task(model, data, instance)` resets a scene to one draw.
+
+The SO-101 pick heights come out 0.3-1.0 cm below the table plane, so the
+lock's kinematics put the tip slightly low there; the exported cube is
+lifted to rest on the floor.
+
+### Joint-reading noise
+
+```sh
+.venv/bin/antares noise lerobot/svla_so101_pickplace    # -> locks/<name>.noise.json
+```
+
+While a joint's command has not moved for half a second, whatever its
+reading still does is sensor noise. Pooled over those stretches:
+
+| joint | SO-101 std | lag-1 corr | step | SO-100 std | lag-1 corr | step |
+|---|---|---|---|---|---|---|
+| shoulder_pan | 0.030° | 0.33 | 0.088° | 0.045° | 0.78 | 0.097° |
+| shoulder_lift | 0.013° | 0.79 | 0.084° | 0.060° | 0.51 | 0.088° |
+| elbow_flex | 0.035° | 0.80 | 0.087° | 0.017° | 0.86 | 0.085° |
+| wrist_flex | 0.066° | 0.67 | 0.081° | 0.018° | 0.77 | 0.084° |
+| wrist_roll | 0.030° | 0.59 | 0.078° | 0.046° | 0.39 | 0.141° |
+
+The readings barely move: the noise is smaller than one encoder step
+(about 0.09°), so a parked joint mostly reads the same value. The common
+habit of adding ~0.5-1° of white Gaussian noise to joint observations is
+10-30x too much for these arms. `NoiseModel.apply(q)` adds noise of the
+measured size and colour (AR(1)) to simulated readings and rounds them to
+the same steps, on the same lattice: the model also keeps one real reading
+per joint (`origin_rad`) because the unit map's offset puts the dataset's
+lattice off the plain multiples of the step in radians.
+
+
 ### Use your arm's LeRobot calibration
 
 Everything above infers the meaning of the dataset's numbers from the
@@ -1464,6 +1536,33 @@ against field of view (a farther camera with a narrower fov looks nearly
 the same), so expect the position to be loose along the optical axis;
 wrist cameras are skipped; the sim is the SO-101 model for both datasets.
 
+### Video delay
+
+```sh
+.venv/bin/antares camera-delay lerobot/svla_so101_pickplace --camera up --episodes 8
+```
+
+A policy trained on images and joint states assumes both show the same
+instant. `camera-delay` measures how many frames a camera's video lags the
+joint log: the share of pixels that change between frames rises and falls
+with joint speed, so cross-correlating the two over +-10 frames and
+refining the peak gives the lag per episode (median reported). Any camera
+works, wrist cameras included. On the demo datasets, 8 episodes each
+(positive: video is late):
+
+| dataset | camera | median lag | per-episode range | peak corr |
+|---|---|---|---|---|
+| svla_so101_pickplace | `up` | -0.37 frames (-12 ms) | -0.92..+0.15 | 0.75-0.91 |
+| svla_so101_pickplace | `side` | -0.33 frames (-11 ms) | -0.72..-0.13 | 0.66-0.92 |
+| svla_so100_pickplace | `top` | +2.88 frames (+96 ms) | +2.13..+2.92 | 0.54-0.65 |
+| svla_so100_pickplace | `wrist` | +1.96 frames (+65 ms) | +1.46..+2.95 | 0.25-0.45 |
+
+The SO-101 cameras match the joint log to within half a frame. The SO-100
+top camera is consistently about 3 frames late, so a sim for that setup
+should show the policy the arm as it was ~100 ms earlier. The wrist number
+is weak (low correlation, since the whole view moves with the arm) and is
+best read as "late, by a similar amount".
+
 ## Layout
 
 | Path | What |
@@ -1503,6 +1602,9 @@ wrist cameras are skipped; the sim is the SO-101 model for both datasets.
 | `antares/silhouette.py` | Real arm mask: median background, colour model, static-arm region |
 | `antares/project.py` | Sim arm silhouette: mesh hulls, pinhole camera, polygon fill |
 | `antares/camera.py` | Fixed-camera fit (CMA-ES over look-at coordinates), `locks/*.camera.json` |
+| `antares/videodelay.py` | How many frames a camera's video lags the joint log (`antares camera-delay`) |
+| `antares/task.py` | Pick/place/start-pose distribution from the gripper and FK (`antares task`) |
+| `antares/noise.py` | Joint-reading noise model measured while parked (`antares noise`) |
 | `locks/` | Committed locks for the demo arms; `locks/fleet/` for the fleet scan |
 | `web/` | React + three.js viewer |
 

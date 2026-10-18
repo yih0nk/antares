@@ -25,7 +25,6 @@ import math
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +32,7 @@ import numpy as np
 
 from antares import __version__
 from antares.data import Dataset, Episode
+from antares.lock import now_iso
 from antares.project import ArmHulls, Camera, arm_hulls, mat_to_rotvec, project_polygons, rasterize, rotvec_to_mat
 from antares.silhouette import BackgroundModel, masks
 
@@ -430,10 +430,6 @@ class CameraFit:
         }
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
 # --------------------------------------------------------------------------
 # The fit
 # --------------------------------------------------------------------------
@@ -711,7 +707,7 @@ def fit_camera(
         n_evaluations=int(evaluations),
         elapsed_s=float(elapsed),
         cancelled=bool(cancelled),
-        created_at=_now_iso(),
+        created_at=now_iso(),
         appearance={k: v for k, v in bgm.appearance.to_dict().items() if k != "p_arm"},
     )
     if on_progress is not None:

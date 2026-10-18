@@ -34,7 +34,7 @@ def test_help_exits_zero(capsys):
         cli.main(["--help"])
     assert e.value.code == 0
     out = capsys.readouterr().out
-    for cmd in ("serve", "inspect", "replay", "calibrate", "cross", "drift", "dr", "locks", "export", "check", "events", "compensate", "fleet", "synth"):
+    for cmd in ("serve", "inspect", "replay", "calibrate", "cross", "drift", "dr", "locks", "export", "check", "events", "compensate", "fleet", "synth", "task", "noise", "camera-delay"):
         assert cmd in out
 
 
@@ -1339,6 +1339,120 @@ def test_calibrate_fit_sensor_prints_comparison(monkeypatch, capsys):
     assert seen["fit_sensor"] is True and seen["sensor_mode"] == "kinematic"
     assert "dynamics only" in out and "1.500" in out and "0.750" in out
     assert "sensor calibration" in out and "-2.500" in out and "0.9800" in out
+
+
+def test_task_prints_clouds_and_saves(monkeypatch, capsys, tmp_path):
+    from antares import server
+    from test_task import pick_place_episode
+
+    eps = (pick_place_episode(0), pick_place_episode(1, held_jaw=2.5), pick_place_episode(2))
+    ds = Dataset("fake/robot", "so101", 30.0, eps[0].joint_names, eps)
+    monkeypatch.setattr(server, "_DATASETS", {"fake/robot": ds})
+    out_path = tmp_path / "robot.task.json"
+    assert cli.main(["task", "fake/robot", "--out", str(out_path)]) == 0
+    out = capsys.readouterr().out
+    assert "3 closes of the gripper: 2 picks (2 carried somewhere else), 1 missed, 0 idle" in out
+    assert "pick" in out and "place" in out
+    assert "episodes with a missed grasp: 1" in out
+    assert "episodes with no pick found: 1" in out
+    saved = json.loads(out_path.read_text())
+    assert saved["name"] == "robot" and saved["summary"]["held"] == 2
+
+
+def test_task_then_export_with_task(monkeypatch, tmp_path, capsys):
+    import mujoco
+
+    from antares import server
+    from test_task import pick_place_episode
+
+    monkeypatch.setattr(server, "LOCK_DIR", tmp_path / "locks")
+    monkeypatch.setattr(server, "LOCK_SUFFIX", ".lock.json")
+    _real_lock().save(tmp_path / "locks" / "unit_a.lock.json")
+    eps = (pick_place_episode(0), pick_place_episode(1))
+    monkeypatch.setattr(server, "_DATASETS", {"fake/robot": Dataset("fake/robot", "so101", 30.0, eps[0].joint_names, eps)})
+
+    assert cli.main(["task", "fake/robot"]) == 0
+    assert (tmp_path / "locks" / "robot.task.json").is_file()
+    out = tmp_path / "out"
+    assert cli.main(["export", "unit_a", "-o", str(out), "--task", "robot", "--no-bundle"]) == 0
+    text = capsys.readouterr().out
+    assert "cube and place marker" in text and "task.json" in text
+    assert mujoco.MjModel.from_xml_path(str(out / "scene.xml")).nq == 13
+
+    assert cli.main(["export", "unit_a", "-o", str(out), "--task", "nope"]) == 1
+    assert "antares task" in capsys.readouterr().err
+
+
+def test_task_refuses_a_dataset_with_no_held_grasp(monkeypatch, capsys, tmp_path):
+    from antares import server
+    from test_task import SHUT, pick_place_episode
+
+    eps = (pick_place_episode(0, held_jaw=SHUT), pick_place_episode(1, held_jaw=SHUT + 0.5))
+    monkeypatch.setattr(server, "LOCK_DIR", tmp_path / "locks")
+    monkeypatch.setattr(server, "_DATASETS", {"fake/robot": Dataset("fake/robot", "so101", 30.0, eps[0].joint_names, eps)})
+    assert cli.main(["task", "fake/robot"]) == 1
+    err = capsys.readouterr().err
+    assert "error:" in err and "held anything" in err and "--held-gap" in err
+    assert not (tmp_path / "locks").exists()
+    assert cli.main(["task", "fake/robot", "--out", str(tmp_path / "x.task.json")]) == 1
+    assert not (tmp_path / "x.task.json").exists()
+
+
+def test_export_refuses_a_task_with_no_held_grasp(monkeypatch, capsys, tmp_path):
+    from antares import server
+    from antares.task import TaskDistribution
+    from test_task import SHUT, pick_place_episode
+
+    monkeypatch.setattr(server, "LOCK_DIR", tmp_path / "locks")
+    monkeypatch.setattr(server, "LOCK_SUFFIX", ".lock.json")
+    _real_lock().save(tmp_path / "locks" / "unit_a.lock.json")
+    td = TaskDistribution.from_episodes([pick_place_episode(0, held_jaw=SHUT)], name="empty")
+    assert not td.held
+    task_path = td.save(td.default_path(tmp_path / "locks"))
+
+    out = tmp_path / "out"
+    for ref in ("empty", str(task_path)):
+        assert cli.main(["export", "unit_a", "-o", str(out), "--task", ref, "--no-bundle"]) == 1
+        err = capsys.readouterr().err
+        assert err.startswith("error:") and "no held grasps" in err and "Traceback" not in err
+        assert not out.exists()  # refused before anything was written
+
+
+def test_noise_prints_table_and_saves(monkeypatch, capsys, tmp_path):
+    from antares import server
+    from test_noise import parked_episode
+
+    rng = np.random.default_rng(0)
+    eps = tuple(parked_episode(i, rng) for i in range(3))
+    monkeypatch.setattr(server, "LOCK_DIR", tmp_path)
+    monkeypatch.setattr(server, "_DATASETS", {"fake/robot": Dataset("fake/robot", "so101", 30.0, eps[0].joint_names, eps)})
+    assert cli.main(["noise", "fake/robot"]) == 0
+    out = capsys.readouterr().out
+    assert "lag-1 corr" in out and "elbow_flex" in out
+    saved = json.loads((tmp_path / "robot.noise.json").read_text())
+    assert saved["name"] == "robot" and len(saved["scale_rad"]) == 6
+
+
+def test_camera_delay_reports_the_median_lag(monkeypatch, capsys, tmp_path):
+    from antares import server, video
+    from test_videodelay import _blob_video, _jerky
+
+    eps, vids = [], {}
+    for i in range(3):
+        q = _jerky(seed=i)
+        eps.append(Episode(index=i, fps=30.0, joint_names=tuple("abcdef"), state=q, action=q))
+        vids[i] = _blob_video(q, 3, seed=i)[..., None].repeat(3, axis=-1).repeat(4, axis=1).repeat(4, axis=2)
+    ds = Dataset("fake/robot", "so101", 30.0, tuple("abcdef"), tuple(eps))
+    monkeypatch.setattr(server, "_DATASETS", {"fake/robot": ds})
+    monkeypatch.setattr(server, "list_camera_infos", lambda repo: [{"name": "front", "fixed": True}])
+    monkeypatch.setattr(video, "frames", lambda repo, cam, ep, idx, dataset=None, cache=True: vids[ep][idx])
+
+    out_path = tmp_path / "delay.json"
+    assert cli.main(["camera-delay", "fake/robot", "--camera", "front", "--out", str(out_path)]) == 0
+    out = capsys.readouterr().out
+    assert "median: +" in out and "positive: video is late" in out
+    assert json.loads(out_path.read_text())["delay_frames"] == pytest.approx(3, abs=0.5)
+    assert cli.main(["camera-delay", "fake/robot", "--camera", "side"]) == 1
 
 
 # ---------------------------------------------------------------------------
