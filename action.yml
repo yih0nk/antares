@@ -42,6 +42,36 @@ inputs:
       change that explains it (extra lag, a weaker servo, more friction).
     required: false
     default: "false"
+  webhook:
+    description: >-
+      Webhook URL to alert when the robot drifts: a Slack incoming webhook
+      (hooks.slack.com, posted as Block Kit) or any endpoint that accepts a
+      JSON POST. Pass it from a repository secret (secrets.ANTARES_WEBHOOK_URL
+      or similar), never as a literal, so it stays out of the workflow file
+      and the logs. Empty means no alert. A failed POST is a warning in the
+      log and does not change the verdict or the exit code.
+    required: false
+    default: ""
+  notify-when:
+    description: >-
+      Which outcomes post an alert: drifted, failure (drifted, too few
+      episodes or a check that could not run) or always.
+    required: false
+    default: "drifted"
+  notify-format:
+    description: >-
+      Alert payload: slack (Block Kit), json (a generic {"event":
+      "antares.check", ...} envelope) or auto (slack for hooks.slack.com,
+      json for anything else).
+    required: false
+    default: "auto"
+  record-history:
+    description: >-
+      Append the result to locks/<lock>.history.jsonl in the workspace, the
+      per-robot check history `antares history` and GET /api/history read.
+      Commit the file or upload it with actions/upload-artifact to keep it.
+    required: false
+    default: "true"
   python-version:
     description: Python version to set up.
     required: false
@@ -103,6 +133,10 @@ runs:
         LAST: ${{ inputs.last }}
         MIN_EPISODES: ${{ inputs.min-episodes }}
         EXPLAIN: ${{ inputs.explain }}
+        WEBHOOK: ${{ inputs.webhook }}
+        NOTIFY_WHEN: ${{ inputs.notify-when }}
+        NOTIFY_FORMAT: ${{ inputs.notify-format }}
+        RECORD_HISTORY: ${{ inputs.record-history }}
         ACTION_PATH: ${{ github.action_path }}
       run: |
         set -o pipefail
@@ -116,10 +150,17 @@ runs:
         [ -n "$LAST" ] && args+=(--last "$LAST")
         explain=()
         [ "$EXPLAIN" = "true" ] && explain=(--explain)
+        # Only this JSON run alerts; the table run below is for the log.
+        notify=()
+        [ -n "$WEBHOOK" ] && notify=(--notify "$WEBHOOK" --notify-when "$NOTIFY_WHEN" --notify-format "$NOTIFY_FORMAT")
+        # The history lives in the workspace even when the lock came from the
+        # action's own checkout; the second (human-readable) run below never records.
+        record=(--history-dir locks)
+        [ "$RECORD_HISTORY" != "true" ] && record=(--no-record)
 
         report="$RUNNER_TEMP/antares-check.json"
         set +e
-        antares check "${args[@]}" "${explain[@]}" --json > "$report"
+        antares check "${args[@]}" "${explain[@]}" "${notify[@]}" "${record[@]}" --json > "$report"
         code=$?
         set -e
         echo "report=$report" >> "$GITHUB_OUTPUT"
@@ -139,7 +180,7 @@ runs:
           # Human-readable table in the job log and the step summary.
           {
             echo '```'
-            antares check "${args[@]}" || true
+            antares check "${args[@]}" --no-record || true
             python -c 'import json, sys; d = json.load(open(sys.argv[1])).get("diagnosis"); d and print("\n" + d["summary"])' "$report"
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"

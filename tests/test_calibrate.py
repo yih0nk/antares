@@ -402,6 +402,131 @@ def test_calibrate_per_joint_skipped_when_cancelled():
 
 
 # ---------------------------------------------------------------------------
+# best of N seeds
+# ---------------------------------------------------------------------------
+
+
+def test_calibrate_best_of_n_seeds_keeps_the_best_held_out_candidate():
+    eps = make_episodes(5, T=60, seed=4)
+    train, eval = eps[:3], eps[3:]
+    kw = dict(simulate=fake_simulate, max_evaluations=12, popsize=4, seed=0)
+    events: list[ProgressEvent] = []
+    res = calibrate(train, eval, n_seeds=3, on_progress=events.append, **kw)
+
+    # one shared stage per seed, seeds 0/100/200, every evaluation counted
+    assert [s["name"] for s in res.stages] == ["shared"] * 3
+    assert [s["seed"] for s in res.stages] == [0, 100, 200]
+    assert all(s["n_evaluations"] == 12 for s in res.stages)
+    assert res.n_evaluations == 36 and len(events) == 37
+    assert [e.evaluation for e in events] == list(range(37))
+    assert [e.seed for e in events[:13]] == [0] * 13
+    assert [e.seed for e in events[13:25]] == [1] * 12 and [e.seed for e in events[25:]] == [2] * 12
+    assert events[-1].to_dict()["seed"] == 2
+    assert res.history == [(e.evaluation, e.best_score) for e in events]
+
+    # each seed run is the plain single-seed fit with that seed, from the same start
+    singles = [calibrate(train, eval, **{**kw, "seed": s}) for s in (0, 100, 200)]
+    for stage, single in zip(res.stages, singles):
+        assert stage["params"] == single.params.to_dict()
+        assert stage["train_score"] == pytest.approx(single.train_score)
+
+    # the candidate with the best held-out score wins, whatever its train score
+    sd = res.seeds
+    assert sd["n"] == 3 and sd["seeds"] == [0, 100, 200]
+    assert sd["eval_scores"] == pytest.approx([s.eval_score for s in singles])
+    assert sd["train_scores"] == pytest.approx([s.train_score for s in singles])
+    assert sd["params"] == [s.params.to_dict() for s in singles]
+    assert sd["chosen"] == int(np.argmin(sd["eval_scores"]))
+    assert res.params == singles[sd["chosen"]].params
+    assert res.eval_score == pytest.approx(min(sd["eval_scores"]))
+    assert res.train_score == pytest.approx(sd["train_scores"][sd["chosen"]])
+    assert res.space == "shared"
+
+    # spread covers the shared search space, pinned follows the rule
+    assert set(sd["spread"]) == set(SPACE)
+    for name, (_, _, scale) in SPACE.items():
+        sp = sd["spread"][name]
+        vals = [p[name] for p in sd["params"]]
+        assert sp["min"] == pytest.approx(min(vals)) and sp["max"] == pytest.approx(max(vals))
+        if scale == "log":
+            assert sp["ratio"] == pytest.approx(max(vals) / min(vals))
+            assert (name in sd["pinned"]) == (sp["ratio"] <= 2.0)
+        else:
+            assert sp["range"] == max(vals) - min(vals)
+            assert (name in sd["pinned"]) == (sp["range"] <= 1)
+
+    # JSON round trip keeps the block; a single-seed result has none
+    d = json.loads(json.dumps(res.to_dict()))
+    back = CalibrationResult.from_dict(d)
+    assert back.seeds == res.seeds and back.stages == res.stages
+    assert singles[0].seeds is None and "seeds" not in singles[0].to_dict()
+    assert [s["seed"] for s in singles[0].stages] == [0]
+    del d["seeds"]
+    assert CalibrationResult.from_dict(d).seeds is None
+
+
+def test_calibrate_explicit_seeds_and_no_eval_episodes():
+    eps = make_episodes(2, T=60)
+    res = calibrate(eps, [], simulate=fake_simulate, max_evaluations=8, popsize=4, seeds=[3, 5])
+    assert [s["seed"] for s in res.stages] == [3, 5] and res.seeds["seeds"] == [3, 5]
+    # no eval set: the training score stands in and decides
+    assert res.seeds["eval_scores"] == res.seeds["train_scores"]
+    assert res.seeds["chosen"] == int(np.argmin(res.seeds["train_scores"]))
+    assert res.eval_score == pytest.approx(res.train_score)
+    assert res.n_evaluations == 16
+    with pytest.raises(ValueError):
+        calibrate(eps, [], simulate=fake_simulate, n_seeds=0)
+    with pytest.raises(ValueError):
+        calibrate(eps, [], simulate=fake_simulate, seeds=[])
+
+
+def test_calibrate_seeds_then_per_joint_runs_once_from_the_winner():
+    eps = make_episodes(3, T=60, seed=3, true=TRUE_PER_JOINT)
+    res = calibrate(eps[:2], eps[2:], simulate=fake_simulate, max_evaluations=8, popsize=4, n_seeds=2,
+                    per_joint=True, per_joint_max_evaluations=8, per_joint_popsize=4)
+    assert [s["name"] for s in res.stages] == ["shared", "shared", "per_joint"]
+    assert res.stages[2]["seed"] == 1  # base seed + 1, as before
+    assert res.n_evaluations == 24 and res.space == "per_joint"
+    chosen = res.seeds["chosen"]
+    # the refinement can only improve on the chosen shared optimum
+    assert res.train_score <= res.seeds["train_scores"][chosen] + 1e-12
+
+
+def test_calibrate_seeds_should_stop_returns_the_best_so_far():
+    eps = make_episodes(2, T=60)
+    seen: list[ProgressEvent] = []
+    res = calibrate(
+        eps[:1], eps[1:], simulate=fake_simulate, max_evaluations=10, popsize=5, n_seeds=3,
+        per_joint=True, on_progress=seen.append, should_stop=lambda: len(seen) >= 14,
+    )
+    # seed 0 finished (10 evaluations), seed 1 was cut short, seed 2 never ran
+    assert [s["name"] for s in res.stages] == ["shared", "shared"]
+    assert res.stages[0]["n_evaluations"] == 10 and res.stages[1]["n_evaluations"] < 10
+    assert res.n_evaluations == len(seen) - 1 < 30
+    assert res.seeds["n"] == 2 and res.seeds["seeds"] == [0, 100]
+    assert res.space == "shared" and not res.params.has_per_joint
+    assert res.eval_score == pytest.approx(min(res.seeds["eval_scores"]))
+
+
+def test_param_spread_of_rule():
+    from antares.calibrate import param_spread_of
+
+    a = SimParams(kp=100.0, kv=1.0, damping=0.1, armature=0.01, frictionloss=0.1, latency_frames=2)
+    b = a.replace(kp=190.0, kv=2.5, damping=0.1, latency_frames=3)
+    c = a.replace(kp=120.0, kv=1.0, armature=(0.01, 0.01, 0.05, 0.01, 0.01, 0.01), latency_frames=2)
+    spread, pinned = param_spread_of([a, b, c])
+    assert spread["kp"] == {"min": 100.0, "max": 190.0, "ratio": pytest.approx(1.9)}
+    assert spread["kv"]["ratio"] == pytest.approx(2.5)
+    assert spread["armature"] == {"min": 0.01, "max": 0.05, "ratio": pytest.approx(5.0)}  # per-joint values count
+    assert spread["latency_frames"] == {"min": 2.0, "max": 3.0, "range": 1.0}
+    assert pinned == ["kp", "damping", "frictionloss", "latency_frames"]
+    _, pinned = param_spread_of([a, a.replace(latency_frames=4)])
+    assert "latency_frames" not in pinned
+    with pytest.raises(ValueError):
+        param_spread_of([a])
+
+
+# ---------------------------------------------------------------------------
 # split_episodes
 # ---------------------------------------------------------------------------
 
