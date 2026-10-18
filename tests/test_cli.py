@@ -684,8 +684,8 @@ def test_calibrate_cli_fit_gravity_flag(monkeypatch, capsys, tmp_path):
 
     monkeypatch.setattr(server, "_DATASETS", {"fake/robot": _dataset()})
     monkeypatch.setattr(server, "run_calibration", fake_run)
-    assert cli.main(["calibrate", "fake/robot", "--fit-gravity"]) == 0
-    assert calls[0]["fit_gravity"] is True
+    assert cli.main(["calibrate", "fake/robot", "--fit-gravity", "--fit-deadband"]) == 0
+    assert calls[0]["fit_gravity"] is True and calls[0]["fit_deadband"] is True
     assert "gravity_scale=0.4" in capsys.readouterr().out
     assert cli.main(["calibrate", "fake/robot"]) == 0
-    assert calls[1]["fit_gravity"] is False
+    assert calls[1]["fit_gravity"] is False and calls[1]["fit_deadband"] is False

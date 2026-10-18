@@ -125,6 +125,7 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
         per_joint_max_evaluations=args.per_joint_evaluations,
         per_joint_sigma0=args.per_joint_sigma0,
         fit_gravity=args.fit_gravity,
+        fit_deadband=args.fit_deadband,
         on_progress=on_progress,
     )
     r = result.to_dict()
@@ -562,6 +563,12 @@ def cmd_sag(args: argparse.Namespace) -> int:
     if worst is not None:
         bins = ", ".join(f"{t:+.2f} N*m: {r:+.2f} deg" for t, r, _ in rep.joints[worst].bins)
         print(f"{worst} mean residual by holding torque: {bins}")
+    motion = []
+    for j in rep.joints.values():
+        m = j.by_motion
+        motion.append([j.joint] + ["-" if m[k] is None else f"{m[k]:+.2f}" for k in ("still", "up", "down")])
+    print("mean residual (deg) by motion; a jump between columns is deadband or backlash, not sag")
+    print(_table(["joint", "still", "moving up", "moving down"], motion))
     if rep.implied_gravity_scale is not None:
         print(f"implied gravity_scale {rep.implied_gravity_scale:.3g}; fit it with calibrate --fit-gravity")
     return 0
@@ -821,6 +828,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--fit-gravity",
         action="store_true",
         help="also fit gravity_scale, the arm's gravity load (sets how much it sags per pose)",
+    )
+    p.add_argument(
+        "--fit-deadband",
+        action="store_true",
+        help="also fit the servo deadband (firmware deadzone + gear backlash), per joint with --per-joint",
     )
     p.set_defaults(func=cmd_calibrate)
 
