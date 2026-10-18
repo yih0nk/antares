@@ -73,6 +73,100 @@ directory. From Python, `antares.export.export_mjcf(lock, path)` /
 `export_scene(lock, dir)`; `load_exported_arm(path)` builds an `Arm` from
 an export, and its replay matches `Arm(params=lock.params)` to 1e-9.
 
+## Bring your own dataset
+
+The two demo datasets are pinned in the picker, but the point is *your*
+robot. Three ways in:
+
+* **Any Hub id.** In the UI, **+ add dataset** → type `owner/name` → **Check**
+  fetches only `meta/info.json` and shows the verdict (reasons in red,
+  warnings in amber) before anything is downloaded; **Load** then pulls the
+  parquet files behind the usual overlay. From the API:
+  `GET /api/datasets/validate?dataset=<id>` (the verdict, cheap) and
+  `POST /api/datasets/load?dataset=<id>` (400 with the reasons if the
+  dataset cannot be replayed; warnings ride along in the summary when it can).
+* **A zip upload.** Drop a `.zip` of a LeRobot dataset directory
+  (`meta/info.json` + `data/**/*.parquet`; videos may be present and are
+  ignored) on the same popover, or `POST /api/datasets/upload` (multipart
+  field `file`; a bare `.parquet` is accepted with an `info` field holding
+  `meta/info.json`; optional `name`). The archive is extracted with
+  traversal checks under `uploads/<name>-<hash>/` (`ANTARES_UPLOAD_DIR`),
+  capped at 200 MB (413), validated, loaded and registered as
+  `upload/<name>`; `DELETE /api/datasets?dataset=upload/<name>` removes it.
+  Uploads survive a server restart.
+* **A directory on disk.** Every CLI command takes a LeRobot dataset
+  directory wherever it takes a Hub id, and so does the API
+  (`dataset=/path/to/recording`):
+
+  ```sh
+  .venv/bin/antares inspect ./recordings/2026-10-17      # verdict + summary, no sim
+  .venv/bin/antares calibrate ./recordings/2026-10-17 --name my_arm
+  .venv/bin/antares replay upload/bench_arm --episode 0 --lock my_arm
+  ```
+
+`GET /api/datasets` lists everything loaded in the process with
+`source` (`demo` | `hub` | `upload` | `local`), `warnings`, `robot_family`
+(what the dataset says it was recorded on) and `robot` (the registry model
+that simulates it). The UI shows those as a chip next to the picker.
+
+### What a dataset needs
+
+`antares/validate.py` is the one place that decides (the fleet scan, the
+API and `antares inspect` all call it):
+
+| check | outcome |
+|---|---|
+| `robot_type` recognisable: `so100*`, `so101*`, `so_follower` (any spelling) | reject otherwise; bimanual rigs (`bi_so100_follower`, 12 joints) are rejected with their own reason |
+| six joints named `shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper` (after stripping `main_` / `.pos`), same names and order in `action` and `observation.state` | reject |
+| `fps` 30 or 50 | reject |
+| episodes: at least 5 for uploads and Hub ids (the fleet scan wants 15) | reject below, warn below 15 |
+| `codebase_version` v2.x / v3.x | reject other versions, warn when missing |
+| name looks like a simulator (`sim`, `mujoco`, `isaac`, …) or a merge (`merged`, `community`, …) | warning (the fleet scan rejects) |
+| loaded data: NaN/inf episodes, episodes under 2 frames | warning, skipped |
+| loaded data: body joints outside about [-120, 120] or gripper outside [-5, 105], or everything within ±3.3 | warning: "values look like degrees / radians; replay will be wrong" |
+
+### Supported robots
+
+`antares/robots.py` is a registry of MuJoCo models: `so101` (MuJoCo
+Menagerie `robotstudio_so101`, the default) and `so100` (Menagerie
+`trs_so_arm100`, vendored under `antares/assets/so100/` with its licence).
+`Arm(robot="so100")`, `/api/model?robot=so100`,
+`/api/model/mesh/<file>?robot=so100`, `antares replay --robot so100` and
+`antares calibrate --robot so100` all work; the server keeps one `Arm` per
+model, each behind its own lock, `/api/replay` reports the `robot` it used,
+and every lock records its `robot` (older locks read as `so101`).
+
+Which model a dataset gets is `MODEL_FOR_FAMILY` in `robots.py`. Both
+families currently map to the SO-101 model, decided on the committed
+`svla_so100_pickplace` lock's 10 held-out episodes (RMS degrees, gripper
+excluded):
+
+| model | default params | fresh 150-eval calibration (seed 0) |
+|---|---|---|
+| so101 (Menagerie file, implicitfast @ 5 ms) | 2.744 | **0.787** (the committed lock) |
+| so100 (Menagerie file verbatim, Euler @ 2 ms) | 2.720 | 0.697 |
+| so100 with so101's `<option>` block (implicitfast @ 5 ms) | 2.737 | 0.777 (lands on the same parameters as the so101 lock) |
+
+The SO-100 geometry does not change the answer: stepped the same way the
+two files are within 0.01° and find the same optimum, and the committed
+so100 lock scores 0.791 on the so100 model. The verbatim so100 file's 11%
+gain comes from its finer timestep, which costs 17 physics substeps per
+frame instead of 7 (2.4x slower replay; the live 150-evaluation
+calibration would take 90 s instead of 45 s) and would invalidate every
+committed SO-100 number in this README. So SO-100 datasets stay on the
+SO-101 model and the SO-100 meshes are there for anyone who wants them.
+The exporter (`antares export`) writes the SO-101 MJCF only.
+
+To add a robot: vendor its MJCF, meshes and LICENSE under
+`antares/assets/<name>/`; add a `RobotModel` to `REGISTRY` with the MJCF's
+joint names in canonical order (the SO-100 file calls them
+`Rotation, Pitch, Elbow, Wrist_Pitch, Wrist_Roll, Jaw`) and a
+`unit_map_factory` if LeRobot's normalized units do not map onto the joint
+ranges the way `UnitMap.from_model` assumes; teach
+`validate.robot_family` its `robot_type` spellings; point the family at the
+model in `MODEL_FOR_FAMILY`. `tests/test_robots.py` loads every registry
+entry through `Arm`.
+
 ## Drift over a session
 
 Episodes are recorded in order, so a servo that heats up or a joint that
