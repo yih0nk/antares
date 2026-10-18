@@ -58,7 +58,7 @@ def test_check_info_accepts_so101_and_so100_naming():
 @pytest.mark.parametrize(
     "over, needle",
     [
-        ({"robot_type": "koch"}, "robot_type"),
+        ({"robot_type": "ur5e"}, "robot_type"),
         ({"robot_type": ""}, "robot_type"),
         ({"codebase_version": "v1.6"}, "codebase_version"),
         ({"fps": 60}, "fps 60"),
@@ -121,7 +121,7 @@ def fake_hub(infos: dict, sizes: dict | None = None):
 def test_discover_filters_and_records_reasons():
     infos = {
         "alice/so101_a": info(),
-        "bob/koch_b": info(robot_type="koch"),
+        "bob/koch_b": info(robot_type="ur5e"),
         "carol/so100_c": info(robot_type="so100"),
         "dave/nope": FileNotFoundError("meta/info.json"),
         "erin/huge": info(),

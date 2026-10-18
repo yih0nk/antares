@@ -33,6 +33,9 @@ from antares.data import Dataset, Episode
 from antares.lock import LOCK_DIR, LOCK_SUFFIX, slug
 from antares.validate import ALLOWED_FPS, JOINTS, merged_name_match, sim_name_match, validate_dataset_info
 
+#: Robot families the fleet scan calibrates; every lock in it uses one model.
+FLEET_FAMILIES: tuple[str, ...] = ("so100", "so101")
+
 FLEET_LOCK_DIR: Path = LOCK_DIR / "fleet"
 FLEET_REPORT_NAME = "fleet.json"
 
@@ -141,6 +144,8 @@ def check_info(
         return reject("codebase_version missing (need the v2/v3 parquet layout)")
     if not verdict.ok:
         return reject(verdict.reasons[0])
+    if verdict.robot_family not in FLEET_FAMILIES:
+        return reject(f"robot_type {robot_type!r} is not an SO-100/101 (the fleet scans SO arms only)")
     if data_bytes is not None:
         if data_bytes <= 0:
             return reject("no data/*.parquet files")

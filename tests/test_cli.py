@@ -83,11 +83,11 @@ def test_inspect_rejects_without_loading(monkeypatch, capsys):
     import antares.data
     from antares import server
 
-    monkeypatch.setattr(server, "fetch_hub_info", lambda repo_id: _info(robot_type="koch", fps=60))
+    monkeypatch.setattr(server, "fetch_hub_info", lambda repo_id: _info(robot_type="ur5e", fps=60))
     monkeypatch.setattr(antares.data, "load_dataset", lambda *a, **k: pytest.fail("must not download a rejected dataset"))
     assert cli.main(["inspect", "someone/koch_arm"]) == 1
     out = capsys.readouterr().out
-    assert "verdict: REJECTED" in out and "reason:  robot_type 'koch'" in out and "fps 60" in out
+    assert "verdict: REJECTED" in out and "reason:  robot_type 'ur5e'" in out and "fps 60" in out
 
 
 def test_inspect_warns_but_loads(monkeypatch, capsys):
@@ -116,10 +116,10 @@ def test_replay_rejected_dataset_exits_two(monkeypatch, capsys):
     from antares import server
 
     monkeypatch.setattr(server, "_DATASETS", {})
-    monkeypatch.setattr(server, "fetch_hub_info", lambda repo_id: _info(robot_type="koch"))
+    monkeypatch.setattr(server, "fetch_hub_info", lambda repo_id: _info(robot_type="ur5e"))
     assert cli.main(["replay", "someone/koch", "--episode", "0"]) == 2
     err = capsys.readouterr().err
-    assert "cannot be replayed" in err and "koch" in err
+    assert "cannot be replayed" in err and "ur5e" in err
 
 
 def test_locks_empty_and_listing(monkeypatch, tmp_path, capsys):

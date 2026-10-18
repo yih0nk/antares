@@ -48,12 +48,15 @@ def info(**over):
         ("so_arm101", "so101"),
         ("so_follower", "so101"),
         ("so-follower", "so101"),
-        ("koch", None),
+        ("koch", "koch"),
+        ("ur5e", None),
         ("", None),
         (None, None),
         ("bi_so100_follower", None),
         ("bi_so_follower", None),
-        ("piper_follower", None),
+        ("piper_follower", "piper"),
+        ("aloha", "aloha"),
+        ("bi_widowxai_follower", "trossen_ai"),
         ("xlerobot", None),
     ],
 )
@@ -89,7 +92,7 @@ def test_accepts_so101_and_so100_naming():
 @pytest.mark.parametrize(
     "over, needle",
     [
-        ({"robot_type": "koch"}, "robot_type 'koch' is not an SO-100/101"),
+        ({"robot_type": "ur5e"}, "robot_type 'ur5e' is not an SO-100/101"),
         ({"robot_type": ""}, "robot_type missing"),
         ({"robot_type": "bi_so100_follower"}, "bimanual"),
         ({"codebase_version": "v1.6"}, "codebase_version v1.6"),
@@ -112,7 +115,7 @@ def test_rejects_with_reason(over, needle):
 
 
 def test_collects_every_reason_not_just_the_first():
-    v = validate_dataset_info(info(robot_type="koch", fps=60, total_episodes=1))
+    v = validate_dataset_info(info(robot_type="ur5e", fps=60, total_episodes=1))
     assert len(v.reasons) == 3
     assert v.robot_family is None
 

@@ -205,11 +205,11 @@ def test_zip_without_dataset_layout_is_rejected(client, app):
 
 
 def test_upload_validation_failure_is_400_with_verdict_and_cleans_up(client, app):
-    r = upload(client, make_zip(info_over={"robot_type": "koch"}))
+    r = upload(client, make_zip(info_over={"robot_type": "ur5e"}))
     assert r.status_code == 400
     detail = r.json()["detail"]
     assert "cannot be replayed" in detail["message"]
-    assert any("koch" in reason for reason in detail["verdict"]["reasons"])
+    assert any("ur5e" in reason for reason in detail["verdict"]["reasons"])
     assert not (app / "uploads").exists() or list((app / "uploads").iterdir()) == []
     # too few episodes for an upload
     r = upload(client, make_zip(n_episodes=3))
@@ -266,13 +266,15 @@ def test_hub_load_is_gated_by_the_verdict(client, app, monkeypatch):
 
 def test_robots_endpoint_lists_the_registry(client):
     out = client.get("/api/robots").json()
-    assert {r["name"] for r in out} >= {"so101", "so100"}
-    assert all(r["joints"] == list(JOINTS) for r in out)
+    by = {r["name"]: r for r in out}
+    assert set(by) >= {"so101", "so100", "aloha", "trossen_ai", "piper", "koch"}
+    assert by["so101"]["joints"] == by["so100"]["joints"] == list(JOINTS)
+    assert by["aloha"]["grippers"] == ["left_gripper", "right_gripper"] and len(by["aloha"]["joints"]) == 14
 
 
 def test_model_rejects_unknown_robot(client):
-    assert client.get("/api/model", params={"robot": "koch"}).status_code == 400
-    assert client.get("/api/model/mesh/Base.stl", params={"robot": "koch"}).status_code == 400
+    assert client.get("/api/model", params={"robot": "ur5e"}).status_code == 400
+    assert client.get("/api/model/mesh/Base.stl", params={"robot": "ur5e"}).status_code == 400
 
 
 @pytest.mark.slow
