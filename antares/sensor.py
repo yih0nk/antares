@@ -1,0 +1,172 @@
+"""Fit each arm's sensor calibration: the per-joint :class:`~antares.sim.CommandMap`.
+
+A LeRobot SO-100/101 dataset normalizes the commands (the leader arm's
+readings) and the measured state (the follower's) with two separate
+per-arm calibrations. Any disagreement between them shows up in the sim as
+a steady per-joint offset or a range mismatch that no dynamics parameter
+can model, so the CMA-ES fit bends kp/latency to hide it instead.
+
+This module fits ``u' = gain*u + bias`` per body joint *through the sim*
+(Levenberg-Marquardt on the replay residual, finite-difference Jacobian),
+holding the dynamics fixed, and alternates that with the dynamics fit of
+:func:`antares.calibrate.calibrate`. Fitting through the sim rather than
+regressing state on commands keeps gravity sag, which the sim already
+models with kp, out of the bias.
+
+The gripper is left at identity: it is excluded from the score, and its
+error is dominated by unlogged object contacts.
+
+Simulation is injected as ``simulate(params, command_map, episode) ->
+(real_q, sim_q)`` so tests do not need MuJoCo.
+"""
+
+from __future__ import annotations
+
+import time
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+
+import numpy as np
+
+from antares.calibrate import SimParams
+from antares.data import Episode
+from antares.sim import GRIPPER_INDEX, JOINTS, CommandMap
+
+SensorSimulateFn = Callable[[SimParams, CommandMap, Episode], tuple[np.ndarray, np.ndarray]]
+
+#: Joints whose command map is fitted (the scored body joints).
+FIT_JOINTS: tuple[int, ...] = tuple(i for i in range(len(JOINTS)) if i != GRIPPER_INDEX)
+
+#: Bounds, in dataset units for bias. Wider than any sane calibration error.
+BIAS_BOUND = 25.0
+GAIN_BOUNDS = (0.75, 1.33)
+
+
+def sensor_simulate() -> SensorSimulateFn:
+    """One MuJoCo :class:`~antares.sim.Arm` wrapped as a ``SensorSimulateFn``."""
+    from antares.sim import Arm
+
+    arm = Arm()
+    real_cache: dict[int, tuple[Episode, np.ndarray]] = {}
+
+    def simulate(params: SimParams, cmap: CommandMap, episode: Episode) -> tuple[np.ndarray, np.ndarray]:
+        arm.apply(params)
+        arm.command_map = cmap
+        hit = real_cache.get(id(episode))
+        if hit is None or hit[0] is not episode:
+            hit = (episode, arm.real_q(episode))
+            real_cache[id(episode)] = hit
+        return hit[1], arm.replay(episode)
+
+    return simulate
+
+
+# --------------------------------------------------------------------------
+# Command-map fit (dynamics held fixed)
+# --------------------------------------------------------------------------
+
+
+def _pack(cmap: CommandMap, joints: Sequence[int], fit_gain: bool) -> np.ndarray:
+    theta = [cmap.bias[j] for j in joints]
+    if fit_gain:
+        theta += [cmap.gain[j] for j in joints]
+    return np.array(theta, dtype=np.float64)
+
+
+def _unpack(theta: np.ndarray, base: CommandMap, joints: Sequence[int], fit_gain: bool) -> CommandMap:
+    bias, gain = base.bias.copy(), base.gain.copy()
+    n = len(joints)
+    for k, j in enumerate(joints):
+        bias[j] = np.clip(theta[k], -BIAS_BOUND, BIAS_BOUND)
+        if fit_gain:
+            gain[j] = np.clip(theta[n + k], *GAIN_BOUNDS)
+    return CommandMap(gain=gain, bias=bias)
+
+
+def _residual(
+    params: SimParams, cmap: CommandMap, episodes: Sequence[Episode], simulate: SensorSimulateFn, joints
+) -> np.ndarray:
+    """Stacked (sim - real) in degrees over the fitted joints of every frame."""
+    parts = []
+    for ep in episodes:
+        real_q, sim_q = simulate(params, cmap, ep)
+        parts.append(np.degrees(np.asarray(sim_q)[:, joints] - np.asarray(real_q)[:, joints]).ravel())
+    return np.concatenate(parts)
+
+
+def _rms(r: np.ndarray) -> float:
+    return float(np.sqrt(np.mean(r**2))) if r.size and np.all(np.isfinite(r)) else float("inf")
+
+
+@dataclass(frozen=True)
+class CommandMapFit:
+    command_map: CommandMap
+    rms_before: float  # RMS over fitted joints and frames, degrees
+    rms_after: float
+    n_simulations: int  # full passes over ``episodes``
+
+
+def fit_command_map(
+    params: SimParams,
+    episodes: Sequence[Episode],
+    simulate: SensorSimulateFn,
+    start: CommandMap | None = None,
+    fit_gain: bool = True,
+    iterations: int = 5,
+    joints: Sequence[int] = FIT_JOINTS,
+) -> CommandMapFit:
+    """Levenberg-Marquardt fit of the command map with ``params`` fixed.
+
+    The residual is nearly linear in bias and gain (a command shift moves
+    the servo's set point), so a few iterations converge. Each iteration
+    costs one simulation per fitted scalar plus one.
+    """
+    episodes = list(episodes)
+    if not episodes:
+        raise ValueError("fit_command_map needs at least one episode")
+    joints = tuple(joints)
+    base = start if start is not None else CommandMap.identity()
+    theta = _pack(base, joints, fit_gain)
+    steps = np.array([0.5] * len(joints) + ([0.01] * len(joints) if fit_gain else []))
+
+    def res(th: np.ndarray) -> np.ndarray:
+        return _residual(params, _unpack(th, base, joints, fit_gain), episodes, simulate, joints)
+
+    r = res(theta)
+    n_sim = 1
+    rms0 = cur = _rms(r)
+    lam = 1e-3
+    for _ in range(iterations):
+        if not np.isfinite(cur):
+            break
+        J = np.empty((r.size, theta.size))
+        for k in range(theta.size):
+            th = theta.copy()
+            th[k] += steps[k]
+            J[:, k] = (res(th) - r) / steps[k]
+            n_sim += 1
+        JtJ, Jtr = J.T @ J, J.T @ r
+        improved = False
+        for _ in range(4):
+            delta = np.linalg.solve(JtJ + lam * np.diag(np.diag(JtJ) + 1e-9), -Jtr)
+            cand = _pack(_unpack(theta + delta, base, joints, fit_gain), joints, fit_gain)
+            r_c = res(cand)
+            n_sim += 1
+            if _rms(r_c) < cur:
+                theta, r, cur = cand, r_c, _rms(r_c)
+                lam = max(lam / 10, 1e-7)
+                improved = True
+                break
+            lam *= 10
+        if not improved or np.max(np.abs(delta) / steps) < 0.02:
+            break
+    return CommandMapFit(_unpack(theta, base, joints, fit_gain), rms0, cur, n_sim)
+
+
+__all__ = [
+    "FIT_JOINTS",
+    "CommandMapFit",
+    "SensorSimulateFn",
+    "fit_command_map",
+    "sensor_simulate",
+]
