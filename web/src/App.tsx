@@ -137,7 +137,8 @@ function applyTune(base: Params, adj: Partial<Record<NumericParamKey, number>>):
   const out: Params = { ...base };
   for (const { key, kind } of TUNE_KEYS) {
     const a = adj[key] ?? 0;
-    const v = base[key] ?? (key === "gravity_scale" ? 1 : undefined);
+    // A lock without a gravity term gets one only once its slider moves.
+    const v = base[key] ?? (key === "gravity_scale" && a !== 0 ? 1 : undefined);
     if (v == null) continue;
     const f = kind === "frames" ? (x: number) => Math.max(0, Math.round(x + a)) : (x: number) => x * 10 ** a;
     out[key] = Array.isArray(v) ? v.map(f) : f(v);
@@ -370,6 +371,9 @@ export default function App() {
   // each slider's setting (log10 multiplier, or frames for latency).
   const [tuneBase, setTuneBase] = useState<Params | null>(null);
   const [tuneFrom, setTuneFrom] = useState("");
+  // The saved lock the tuning started from (its command map and unit map
+  // stay with the tuned parameters), or null for the default/live sim.
+  const [tuneLock, setTuneLock] = useState<string | null>(null);
   const [tuneAdj, setTuneAdj] = useState<Partial<Record<NumericParamKey, number>>>({});
   // A second episode shown side by side with the first; null when off.
   const [compare, setCompare] = useState<number | null>(null);
@@ -538,7 +542,8 @@ export default function App() {
   // while one is in flight the newest wanted one waits (the live fit lands a
   // new best every few events), and a reply for an older episode or ghost is
   // dropped.
-  const liveParams = ghost === LIVE || ghost === MANUAL ? replay?.params ?? null : null;
+  const tuned = useMemo(() => (tuneBase ? applyTune(tuneBase, tuneAdj) : null), [tuneBase, tuneAdj]);
+  const liveParams = ghost === MANUAL ? tuned : ghost === LIVE ? replay?.params ?? null : null;
   const [compareBusy, setCompareBusy] = useState(false);
   const compareKey = useRef("");
   const compareWanted = useRef<{ key: string; episode: number; run: () => Promise<Replay> } | null>(null);
@@ -572,10 +577,13 @@ export default function App() {
     compareWanted.current = {
       key,
       episode: ep,
-      run: () => ((ghost === LIVE || ghost === MANUAL) && liveParams ? api.replayParams(dataset, ep, liveParams) : api.replay(dataset, ep, ghost)),
+      run: () =>
+        (ghost === LIVE || ghost === MANUAL) && liveParams
+          ? api.replayParams(dataset, ep, liveParams, ghost === MANUAL ? tuneLock : null)
+          : api.replay(dataset, ep, ghost),
     };
     pumpCompare();
-  }, [dataset, compare, ghost, liveParams, pumpCompare]);
+  }, [dataset, compare, ghost, liveParams, tuneLock, pumpCompare]);
   const shownCompare = ghost === DEFAULT ? compareBase : compareReplay;
 
   // ---- ghost replay for a saved lock ----------------------------------------
@@ -638,29 +646,37 @@ export default function App() {
   // ---- live ghost while calibrating: replay the best params so far ----------
   // One request in flight at a time; when it lands, the newest best (if it
   // changed meanwhile) goes next. Each landing eases the ghost to the new fit.
+  // The same pump serves the hand-tuned ghost: `liveLock` is the lock the
+  // tuned params started from (its maps travel with the request) and
+  // `liveReport` says whether a failed replay is shown (hand tuning) or
+  // stays quiet (a transient failure during a fit).
   const liveWanted = useRef<Params | null>(null);
   const liveInFlight = useRef(false);
   const liveKey = useRef("");
+  const liveLock = useRef<string | null>(null);
+  const liveReport = useRef(false);
   const where = useRef({ dataset, episode });
   where.current = { dataset, episode };
   const pumpLive = useCallback(() => {
     const { dataset: ds, episode: ep } = where.current;
     if (liveInFlight.current || !liveWanted.current || ep == null) return;
     const params = liveWanted.current;
-    const key = `${ds}#${ep}#${JSON.stringify(params)}`;
+    const lock = liveLock.current;
+    const key = `${ds}#${ep}#${lock ?? ""}#${JSON.stringify(params)}`;
     if (key === liveKey.current) return;
     liveInFlight.current = true;
     liveKey.current = key;
     setReplayBusy(true);
     api
-      .replayParams(ds, ep, params)
+      .replayParams(ds, ep, params, lock)
       .then(
         (r) => {
           if (where.current.dataset === ds && where.current.episode === ep) setReplay(r);
         },
-        () => {},
+        (e) => liveReport.current && setError(`Replay with your parameters failed: ${(e as Error).message}`),
       )
       .finally(() => {
+        // Cleared whatever the ghost is now, so the busy dot never sticks.
         liveInFlight.current = false;
         setReplayBusy(false);
         pumpLive();
@@ -668,37 +684,38 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (ghost !== MANUAL) {
+      liveLock.current = null;
+      liveReport.current = false;
+    }
     if (ghost === LIVE) pumpLive(); // also re-runs the latest best on a new episode
   }, [ghost, dataset, episode, pumpLive]);
 
   // ---- hand-tuned ghost: replay whenever a slider settles -------------------
-  const tuned = useMemo(() => (tuneBase ? applyTune(tuneBase, tuneAdj) : null), [tuneBase, tuneAdj]);
+  // Through the same one-in-flight pump as the live fit: a dragged slider
+  // never queues more than one request on the server, and the newest value
+  // goes next when the current replay lands.
   const tunedKey = tuned ? JSON.stringify(tuned) : "";
   useEffect(() => {
     if (ghost !== MANUAL || !tuned || !dataset || episode == null) return;
-    let live = true;
     const t = setTimeout(() => {
-      setReplayBusy(true);
-      api
-        .replayParams(dataset, episode, tuned)
-        .then(
-          (r) => live && setReplay(r),
-          (e) => live && setError(`Replay with your parameters failed: ${e.message}`),
-        )
-        .finally(() => live && setReplayBusy(false));
+      liveWanted.current = tuned;
+      pumpLive();
     }, 200);
-    return () => {
-      live = false;
-      clearTimeout(t);
-    };
+    return () => clearTimeout(t);
     // tunedKey stands for tuned's contents
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ghost, dataset, episode, tunedKey]);
+  }, [ghost, dataset, episode, tunedKey, pumpLive]);
 
   const startTuning = () => {
+    const fromLock = ghost !== DEFAULT && ghost !== LIVE && ghost !== MANUAL ? ghost : null;
     setTuneBase(replay?.params ?? baseline?.params ?? null);
     setTuneFrom(ghostLabel);
+    setTuneLock(fromLock);
     setTuneAdj({});
+    liveLock.current = fromLock;
+    liveReport.current = true;
+    liveKey.current = ""; // the lock's own replay came from GET /api/replay; replay the base once
     setGhost(MANUAL);
   };
 
@@ -1298,7 +1315,7 @@ export default function App() {
             {TUNE_KEYS.map(({ key, kind, hint }) => {
               if (servoOf(tuneBase) !== "position" && LINEARIZED_KEYS.has(key)) return null;
               const a = tuneAdj[key] ?? 0;
-              const v = tuned[key];
+              const v = tuned[key] ?? (key === "gravity_scale" ? 1 : null);
               if (v == null) return null;
               return (
                 <label key={key} className="tune-row" title={hint}>
@@ -1374,7 +1391,7 @@ export default function App() {
                 // default ghost has nothing to compare, so it shows one dot.
                 const compared = ghost !== DEFAULT && b != null && g != null;
                 const pos = (v: number) => `${Math.min(100, (v / maxJointErr) * 100)}%`;
-                const change = compared && b > 0 ? (g - b) / b : null;
+                const pct = compared && b > 0 ? Math.round(((g - b) / b) * 100) : null;
                 return (
                   <button
                     key={j}
@@ -1394,8 +1411,8 @@ export default function App() {
                       {g != null && <span className="db-dot ghost" style={{ left: pos(g) }} title={`${ghostLabel} ${deg(g, 2)}`} />}
                     </span>
                     <span className="bar-val">{deg(g, 1)}</span>
-                    <span className={`db-change ${change == null ? "" : change <= 0 ? "good" : "bad"}`}>
-                      {change == null ? "" : `${change <= 0 ? "−" : "+"}${Math.abs(Math.round(change * 100))}%`}
+                    <span className={`db-change ${pct == null || pct === 0 ? "" : pct < 0 ? "good" : "bad"}`}>
+                      {pct == null ? "" : pct === 0 ? "0%" : `${pct < 0 ? "−" : "+"}${Math.abs(pct)}%`}
                     </span>
                   </button>
                 );

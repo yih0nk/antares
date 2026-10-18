@@ -605,6 +605,15 @@ body {
   transition: r 0.4s ease, fill 0.4s ease;
 }
 
+.arm-joint:focus-visible {
+  outline: none;
+}
+
+.arm-joint:focus-visible circle {
+  stroke: var(--text);
+  stroke-width: 2;
+}
+
 .arm-joint.sel circle {
   stroke: var(--text);
 }
@@ -1640,19 +1649,13 @@ body {
 
 .tune-row input[type="range"] {
   grid-area: slider;
-}
-
-.tune-val {
-  grid-area: val;
-}
-
-.tune-row input[type="range"] {
   width: 100%;
   min-width: 0;
   accent-color: var(--sim);
 }
 
 .tune-val {
+  grid-area: val;
   font-family: "JetBrains Mono", monospace;
   font-size: 11px;
   text-align: right;

@@ -58,7 +58,21 @@ export function JointArm({ errors, selected, onSelect }: Props) {
           const { p, dx, dy, anchor } = AT[j];
           const r = 7 + Math.min(1, e / HOT_DEG) * 9;
           return (
-            <g key={j} className={`arm-joint ${j === selected ? "sel" : ""}`} onClick={() => onSelect(j)}>
+            <g
+              key={j}
+              className={`arm-joint ${j === selected ? "sel" : ""}`}
+              role="button"
+              tabIndex={0}
+              aria-label={`${j}: ${e.toFixed(1)} degrees`}
+              aria-pressed={j === selected}
+              onClick={() => onSelect(j)}
+              onKeyDown={(ev) => {
+                if (ev.key === "Enter" || ev.key === " ") {
+                  ev.preventDefault();
+                  onSelect(j);
+                }
+              }}
+            >
               <circle cx={p[0]} cy={p[1]} r={r} fill={heat(e)} />
               <text x={p[0] + dx} y={p[1] + dy} textAnchor={anchor} className="arm-name">
                 {j}
