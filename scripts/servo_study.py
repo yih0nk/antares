@@ -27,6 +27,7 @@ from pathlib import Path
 from antares.calibrate import calibrate, default_simulate, score
 from antares.data import load_dataset
 from antares.lock import RobotLock
+from antares.server import command_map_from_lock, unit_map_from_lock
 from antares.sim import SimParams
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -60,7 +61,12 @@ def study(name: str, seeds: int, evals: int) -> dict:
     by_index = {ep.index: ep for ep in ds.episodes}
     train = [by_index[i] for i in lock.result.train_episodes]
     eval_ = [by_index[i] for i in lock.result.eval_episodes]
-    sim = default_simulate(robot=lock.robot)
+    # The lock's sensor calibration (command map) and the follower's own
+    # LeRobot unit map are held fixed, as server.calibrate_cross replays a
+    # lock; without them a sensor-fitted lock replays through the wrong map.
+    lock_d = lock.to_dict()
+    cmap, unit_map = command_map_from_lock(lock_d), unit_map_from_lock(lock_d)
+    sim = default_simulate(cmap, robot=lock.robot, **({"unit_map": unit_map} if unit_map is not None else {}))
     out: dict = {"name": name, "dataset": lock.dataset, "n_train": len(train), "n_eval": len(eval_)}
     out["stock"] = held_out(SimParams(), eval_, sim)
     out["lock"] = held_out(lock.params, eval_, sim)

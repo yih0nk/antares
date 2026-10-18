@@ -1537,11 +1537,20 @@ held-out RMS tracking error in degrees, body joints:
   frames of delay where the position fits needed 3 to 4. The rate limit
   and back-EMF account for the rest of the lag.
 
-Exports carry the servo's PD equivalent (`kp`, `kv`, stall torque as the
-effort limit) into the MJCF and the Isaac Lab, ManiSkill and mjlab configs.
-The `.antares.json` sidecar keeps the full model. The `drift`, `dr`,
-`identify` and `check --explain` refits do not understand servo locks yet:
-they still search the position actuator's parameters.
+A servo lock's `kp`, `kv` and `forcerange` are derived, not fitted: they
+always hold the model's PD equivalent (the linearized gain, the back-EMF
+velocity gain and the stall torque), so anything that reads only those
+fields (an older antares, the fleet table, `antares sag`) sees a ~9 N·m/rad
+servo rather than the stock 998 one. Exports bake that PD equivalent into
+the MJCF (`kp`, `kv`, and the stall torque as `forcerange`, the effort
+limit) and into the Isaac Lab, ManiSkill and mjlab configs; the
+`.antares.json` sidecar keeps the full model. The `drift`, `dr` and
+`check --explain` refits search the servo's own fields when they start from
+a servo lock (`calibrate` switches to the servo space: `servo_gain`,
+`max_velocity`, friction, inertia and latency), so a drift trend, a
+randomization range or a named cause is on `servo_gain`, never on `kp`.
+`identify` still perturbs the position actuator's parameters, which a
+servo lock ignores; run it on a position lock.
 
 ## Sensor calibration
 
