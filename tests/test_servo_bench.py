@@ -1,0 +1,81 @@
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+from antares import servo_bench as sb
+from antares.data import read_local
+from antares.sim import Arm
+
+SKETCH = Path(__file__).resolve().parents[1] / "bench" / "servo_log" / "servo_log.ino"
+
+
+def test_python_program_matches_the_sketch():
+    src = SKETCH.read_text()
+    steps = re.search(r"STEPS\[\] = \{([^}]*)\}", src).group(1)
+    assert tuple(int(v) for v in steps.replace("\n", " ").split(",")) == sb._STEPS
+    holds = re.search(r"holds\[5\] = \{([^}]*)\}", src).group(1)
+    assert [float(v) for v in holds.split(",")] == [h[2] for h in sb.HOLDS]
+    assert "TICK_MS = 20" in src and "LO = 30.0, HI = 150.0" in src
+
+
+def test_program_is_whole_degrees_inside_the_safe_range():
+    cmd = sb.program()
+    assert len(cmd) == 3000
+    assert np.all(cmd == np.round(cmd))
+    assert cmd.min() >= 30 and cmd.max() <= 150
+    assert cmd[0] == 30 and cmd[int(9.5 * 50)] == 150
+
+
+def test_sg92r_model_replays_a_step():
+    arm = Arm(robot="sg92r")
+    q = arm.rollout(np.radians(np.full((40, 1), 120.0)), np.radians([60.0]), 50.0)
+    assert np.degrees(q[-1, 0]) == pytest.approx(120.0, abs=1.0)
+    assert np.degrees(q[1, 0]) < 100  # rate-limited, not a jump
+
+
+def test_simulate_then_import_recovers_the_pot_and_episodes(tmp_path):
+    csv = sb.simulate_run(tmp_path / "a.csv", pot_scale=0.3, pot_offset=-50.0, noise_counts=0.5, seed=1)
+    run = sb.read_run(csv)
+    assert set(run.raw) == {"a"} and len(run.t) == 3000
+    out, pot, timing = sb.import_runs([csv], "a", tmp_path / "ds")
+    assert pot.scale == pytest.approx(0.3, rel=0.02)
+    assert pot.offset == pytest.approx(-50.0, abs=1.5)
+    assert timing[0]["late_ticks"] == 0
+    ds = read_local(out)
+    assert ds.robot_type == sb.ROBOT_TYPE and ds.joint_names == ("shaft",)
+    assert len(ds.episodes) == 12 and all(len(e) == 250 for e in ds.episodes)
+
+
+def test_import_rejects_a_pot_that_does_not_move(tmp_path):
+    p = tmp_path / "flat.csv"
+    p.write_text("t_ms,cmd_deg,raw_a\n" + "".join(f"{i * 20},{int(sb.program()[i])},500\n" for i in range(3000)))
+    with pytest.raises(ValueError, match="barely moves"):
+        sb.import_runs([p], "a", tmp_path / "ds")
+
+
+def test_cross_scores_and_payload_check_tell_servos_apart(tmp_path):
+    from types import SimpleNamespace
+
+    base = Arm(robot="sg92r").default_params()
+    pa = base.replace(kp=(2.2,), armature=(0.0005,), latency_frames=1)
+    pb = base.replace(kp=(1.0,), armature=(0.0002,), kv=(0.03,), latency_frames=1)
+    dsa = read_local(sb.import_runs([sb.simulate_run(tmp_path / "a.csv", pa.replace(latency_frames=0))], "a", tmp_path / "a")[0])
+    dsb = read_local(sb.import_runs([sb.simulate_run(tmp_path / "b.csv", pb.replace(latency_frames=0))], "a", tmp_path / "b")[0])
+    heavy = pa.replace(armature=(0.0005 + 3 * 5.7e-5,), latency_frames=0)
+    dsc = read_local(sb.import_runs([sb.simulate_run(tmp_path / "c.csv", heavy, seed=2)], "a", tmp_path / "c")[0])
+
+    def lock(params, name):
+        result = SimpleNamespace(eval_score=0.6, train_score=0.6, per_joint_after={})
+        return SimpleNamespace(name=name, dataset=name, params=params, result=result, robot=sb.ROBOT)
+
+    locks = {"a": lock(pa, "a"), "b": lock(pb, "b")}
+    scores = sb.cross_scores({"a": dsa, "b": dsb}, locks)
+    for own, other in (("a", "b"), ("b", "a")):
+        assert scores[own][own] < 0.5 * scores[own][other]
+        assert scores[own][own] < 0.5 * scores[own]["default"]
+    assert sb.payload_check(dsa, locks["a"]).verdict == "ok"
+    assert sb.payload_check(dsc, locks["a"]).verdict == "drifted"
