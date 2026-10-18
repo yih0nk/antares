@@ -876,6 +876,7 @@ export default function App() {
   const [fitsRev, setFitsRev] = useState(0);
   const video = useUnderlay(dataset, episode, cameraLock, videoOn, fitsRev);
   const underlay = video.underlay;
+  const videoAvail = video.cameras.length > 0;
 
   const compareFrames = compareBase?.real_poses.length ?? 0;
   // ---- scene fit saved for the camera lock -----------------------------------
@@ -1208,7 +1209,9 @@ export default function App() {
                   ? `video from the ${underlay.camera.name} camera, view pinned to its fitted pose (held-out overlap ${(underlay.fit.heldout_iou * 100).toFixed(0)}%)`
                   : !underlay.camera.fixed
                     ? `video from the ${underlay.camera.name} camera as a plain backdrop: it moves with the arm, so the 3D view cannot be lined up with it`
-                    : `video from the ${underlay.camera.name} camera as a plain backdrop: no fitted camera for this lock yet, fit it under Camera to line the arm up`}
+                    : !cameraLock
+                      ? `video from the ${underlay.camera.name} camera as a plain backdrop: calibrate first, then fit the camera under Camera to line the arm up`
+                      : `video from the ${underlay.camera.name} camera as a plain backdrop: no fitted camera for this lock yet, fit it under Camera to line the arm up`}
             </span>
           )}
           {scene && !underlay && (
@@ -1243,10 +1246,10 @@ export default function App() {
           </div>
           <div className="segmented video-controls" role="group" aria-label="Video underlay">
             <button
-              className={videoOn ? "on" : ""}
+              className={videoOn && videoAvail ? "on" : ""}
               onClick={() => setVideoOn((v) => !v)}
-              disabled={!video.cameras.length}
-              title={video.cameras.length ? "Show the dataset's video behind the arms" : "This dataset has no camera video"}
+              disabled={!videoAvail}
+              title={videoAvail ? "Show the dataset's video behind the arms" : "This dataset has no camera video"}
             >
               Video
             </button>
@@ -1259,7 +1262,7 @@ export default function App() {
                 ))}
               </select>
             )}
-            {videoOn && (
+            {videoOn && videoAvail && (
               <span className="video-delay" title="Frames the video lags the joint log (antares camera-delay measures it)">
                 <button onClick={() => video.setDelay((d) => d - 1)} aria-label="Video earlier">
                   −
