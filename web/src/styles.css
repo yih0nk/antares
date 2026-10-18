@@ -931,3 +931,34 @@ body {
     width: auto;
   }
 }
+
+/* ---- scene: real | sim view ---- */
+
+.cam-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+}
+
+.cam-pair .cam-view {
+  aspect-ratio: inherit;
+}
+
+.cam-tag {
+  position: absolute;
+  left: 6px;
+  top: 6px;
+  background: rgba(11, 13, 18, 0.7);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.scene-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 10px;
+}
+
+.scene-stats .mono {
+  font-size: 13px;
+}
