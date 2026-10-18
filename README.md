@@ -531,9 +531,11 @@ Both modes recover the hidden bias to within 0.35 units and the gain to
 within 0.007. On an arm with no mismatch the map stays within 0.35 units
 of identity, at a small held-out cost (0.03° for `sim`, 0.09° for
 `kinematic`), mostly on the gravity-loaded shoulder and elbow. 
-On the two demo datasets (20 train / 10 held-out episodes, seed 0, 150
-evaluations per round, dynamics-only given the same budget), held-out
-RMSE in degrees:
+On the two demo datasets (20 train / 10 held-out episodes, seed 0, two
+rounds of 150 evaluations, with the wider `kp` range), held-out RMSE in degrees.
+"Dynamics only" is a fresh shared fit given the same 300 evaluations under
+the identity map, which is why it beats the committed shared locks (0.736
+SO-101 at 200 evaluations, 0.787 SO-100 at 150):
 
 | | SO-101 dynamics only | SO-101 `sim` | SO-101 `kinematic` | SO-100 dynamics only | SO-100 `sim` | SO-100 `kinematic` |
 |---|---|---|---|---|---|---|
