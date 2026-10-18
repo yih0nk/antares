@@ -805,6 +805,14 @@ export const api = {
   meshUrl: (file: string, robot?: string) =>
     `/api/model/mesh/${file.split("/").map(encodeURIComponent).join("/")}${robot ? `?${q({ robot })}` : ""}`,
   locks: () => fetch("/api/locks").then((r) => json<LockSummary[]>(r)),
+  // Hand-tuned parameters saved as a lock, scored like a calibration;
+  // `fromLock` (the lock they were tuned from) lends its sensor map and fits.
+  saveLock: (dataset: string, name: string, params: Params, fromLock: string | null) =>
+    fetch("/api/locks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dataset, name, params, from_lock: fromLock }),
+    }).then((r) => json<LockSummary>(r)),
   replay: (dataset: string, episode: number, lock: string | null) =>
     fetch(`/api/replay?${q(lock ? { dataset, episode, lock } : { dataset, episode })}`).then((r) =>
       json<Replay>(r),

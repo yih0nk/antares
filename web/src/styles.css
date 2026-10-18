@@ -1686,3 +1686,19 @@ button.link:disabled {
   color: var(--muted);
   cursor: default;
 }
+
+.save-lock {
+  display: flex;
+  gap: 8px;
+}
+
+.save-lock input {
+  flex: 1;
+  min-width: 0;
+}
+
+.save-lock .cta {
+  flex: none;
+  width: auto;
+  padding-inline: 14px;
+}
