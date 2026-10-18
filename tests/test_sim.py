@@ -557,6 +557,120 @@ def test_model_geometry_poses_place_raw_stl_files(arm):
         np.testing.assert_allclose(got.max(0), want.max(0), atol=1e-6)
 
 
+# -- gravity_scale ---------------------------------------------------------
+
+
+def test_gravity_scale_defaults_and_serializes_only_when_fitted():
+    p = SimParams()
+    assert p.gravity_scale == 1.0
+    assert "gravity_scale" not in p.to_dict()  # old lock format, byte for byte
+    q = p.replace(gravity_scale=0.4)
+    assert q.to_dict()["gravity_scale"] == 0.4
+    assert SimParams.from_dict(q.to_dict()) == q
+    assert SimParams.from_dict({"kp": 50.0}).gravity_scale == 1.0  # old locks load
+
+
+def test_gravity_scale_is_shared_and_non_negative():
+    assert SimParams(gravity_scale=[0.5] * 6).per_joint("gravity_scale").tolist() == [0.5] * 6
+    with pytest.raises(ValueError):
+        SimParams(gravity_scale=[0.5, 1, 1, 1, 1, 1])
+    with pytest.raises(ValueError):
+        SimParams(gravity_scale=-0.1)
+
+
+def test_gravity_scale_sets_the_static_sag():
+    soft = SimParams(kp=10.0, kv=0.5)
+    ep = Episode(index=0, fps=30.0, joint_names=JOINTS,
+                 state=np.zeros((60, 6)), action=np.zeros((60, 6)))
+    arm = Arm(soft)
+    stock = arm.replay(ep)[-1]
+    np.testing.assert_array_equal(Arm(soft.replace(gravity_scale=1.0)).replay(ep)[-1], stock)
+    arm.apply(soft.replace(gravity_scale=0.0))
+    weightless = arm.replay(ep)[-1]
+    arm.apply(soft.replace(gravity_scale=0.5))
+    half = arm.replay(ep)[-1]
+    lift = JOINTS.index("shoulder_lift")
+    sag = abs(stock[lift] - weightless[lift])
+    assert sag > np.radians(1.0)  # a soft servo droops by degrees
+    assert abs(half[lift] - weightless[lift]) == pytest.approx(sag / 2, rel=0.1)
+    arm.apply(soft)
+    np.testing.assert_array_equal(arm.replay(ep)[-1], stock)  # apply restores gravity
+
+
+# -- deadband --------------------------------------------------------------
+
+
+def test_deadband_defaults_off_and_serializes_only_when_set():
+    p = SimParams()
+    assert p.deadband == 0.0 and "deadband" not in p.to_dict()
+    q = p.replace(deadband=[0.0, 0.0, 0.01, 0.0, 0.0, 0.0])
+    assert q.to_dict()["deadband"] == [0.0, 0.0, 0.01, 0.0, 0.0, 0.0]
+    assert SimParams.from_dict(q.to_dict()) == q
+    with pytest.raises(ValueError):
+        SimParams(deadband=-0.01)
+
+
+def test_deadband_leaves_the_arm_parked_inside_the_band():
+    elbow = JOINTS.index("elbow_flex")
+    T = 90
+    action = np.zeros((T, 6))
+    action[5:, elbow] = 30.0  # a step, dataset units
+    ep = Episode(index=0, fps=30.0, joint_names=JOINTS, state=np.zeros((T, 6)), action=action)
+    base = SimParams(kp=20.0, kv=0.3, frictionloss=0.001, gravity_scale=0.0)
+    arm = Arm(base)
+    target = arm.unit_map.to_rad(action[-1])[elbow]
+    smooth = arm.replay(ep)
+    assert abs(smooth[-1, elbow] - target) < np.radians(0.05)
+    np.testing.assert_array_equal(Arm(base.replace(deadband=0.0)).replay(ep), smooth)
+    band = np.radians(1.0)
+    arm.apply(base.replace(deadband=band))
+    off = abs(target - arm.replay(ep)[-1, elbow])
+    # with no torque inside the band the arm stops wherever it coasts to in it
+    assert np.radians(0.1) < off <= 1.05 * band
+
+
+def test_deadband_replay_takes_the_multistep_path_unless_a_band_is_set(monkeypatch):
+    import antares.sim as sim_mod
+
+    T = 20
+    ep = constant_episode([0.0] * 6, [0.0, 0.0, 30.0, 0.0, 0.0, 0.0], T)
+    base = SimParams(kp=20.0, kv=0.3, gravity_scale=0.0)
+    arm = Arm(base)
+    plain = arm.replay(ep)  # the pre-deadband replay: deadband at its scalar default
+    n_sub = max(1, int(round((1.0 / ep.fps) / arm.model.opt.timestep)))
+    assert n_sub > 1
+    calls: list[int] = []
+    real_step = sim_mod.mujoco.mj_step
+
+    def counting_step(m, d, nstep=1):
+        calls.append(nstep)
+        real_step(m, d, nstep)
+
+    monkeypatch.setattr(sim_mod.mujoco, "mj_step", counting_step)
+    # no band on any joint: one C-side multi-step call per frame, bit-identical
+    arm.apply(base.replace(deadband=(0.0,) * 6))
+    np.testing.assert_array_equal(arm.replay(ep), plain)
+    assert calls == [n_sub] * (T - 1)
+    # a band on one joint: the shrink runs every substep and the replay changes
+    calls.clear()
+    arm.apply(base.replace(deadband=(0.0, 0.0, np.radians(1.0), 0.0, 0.0, 0.0)))
+    banded = arm.replay(ep)
+    assert calls == [1] * ((T - 1) * n_sub)
+    assert abs(banded[-1, 2] - plain[-1, 2]) > np.radians(0.1)
+
+
+def test_broadcast_round_trips_through_to_dict():
+    import json
+
+    b = SimParams().broadcast()
+    d = b.to_dict()
+    assert d["gravity_scale"] == [1.0] * 6 and d["deadband"] == [0.0] * 6
+    assert SimParams.from_dict(d) == b
+    assert SimParams.from_dict(json.loads(json.dumps(d))) == b
+    # the scalar defaults still serialize as the old lock format
+    assert "gravity_scale" not in SimParams().to_dict() and "deadband" not in SimParams().to_dict()
+
+
 # -- CommandMap ---------------------------------------------------------------
 
 

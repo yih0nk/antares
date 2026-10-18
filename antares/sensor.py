@@ -44,15 +44,16 @@ BIAS_BOUND = factors.get("sensor_bias").bounds[1]
 GAIN_BOUNDS = factors.get("sensor_gain").bounds
 
 
-def sensor_simulate(robot: str | None = None) -> SensorSimulateFn:
+def sensor_simulate(robot: str | None = None, unit_map: Any | None = None) -> SensorSimulateFn:
     """One MuJoCo :class:`~antares.sim.Arm` wrapped as a ``SensorSimulateFn``.
 
     ``robot`` picks the model from :data:`antares.robots.REGISTRY` (default
-    SO-101).
+    SO-101); ``unit_map`` replaces the model-derived unit map (see
+    :mod:`antares.lerobot_calib`).
     """
     from antares.sim import Arm
 
-    arm = Arm(robot=robot)
+    arm = Arm(robot=robot, unit_map=unit_map)
     real_cache: dict[int, tuple[Episode, np.ndarray]] = {}
 
     def simulate(params: SimParams, cmap: CommandMap, episode: Episode) -> tuple[np.ndarray, np.ndarray]:
@@ -345,12 +346,14 @@ def calibrate_with_sensor(
     on_progress: Callable[[ProgressEvent], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
     refit_sigma0: float = 0.15,
+    prior: CommandMap | None = None,
     **calibrate_kwargs: Any,
 ) -> SensorCalibrationResult:
     """Fit dynamics and command map together by alternation.
 
-    Round 0 is the ordinary dynamics fit with an identity command map (kept
-    as ``dynamics_only``). Each later round fits the command map with the
+    Round 0 is the ordinary dynamics fit with the ``prior`` command map
+    (identity by default; kept as ``dynamics_only``), and the first map fit
+    starts from the prior too. Each later round fits the command map with the
     current dynamics fixed, then refits the dynamics from where they were,
     under the new command map, with ``max_evaluations`` CMA-ES evaluations
     and step size ``refit_sigma0``. A final command-map fit follows the
@@ -415,7 +418,7 @@ def calibrate_with_sensor(
             seed=seed + k, on_progress=on_prog, should_stop=stop, **kw,
         )
 
-    ident = CommandMap.identity(n_cols)
+    ident = prior if prior is not None else CommandMap.identity(n_cols)
     first = calibrate(
         train, eval, simulate=with_map(ident), start=start, max_evaluations=max_evaluations,
         seed=seed, on_progress=progress, should_stop=stop, **calibrate_kwargs,

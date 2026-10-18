@@ -21,6 +21,7 @@ config-only factors that scale or set a MuJoCo model field, or give
 from __future__ import annotations
 
 import importlib
+import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -76,6 +77,9 @@ class Factor:
     mjcf: tuple[str, str] | None = None
     #: ``"builtin"`` for the factors below, ``"model"``/``"plugin"`` for added ones.
     origin: str = "builtin"
+    #: False for a factor that is one value for the whole arm (gravity), so
+    #: the per-joint stage never searches it.
+    per_joint_ok: bool = True
 
     def __post_init__(self) -> None:
         if self.acts_on not in ACTS_ON:
@@ -217,6 +221,36 @@ BUILTIN: tuple[Factor, ...] = (
         identifiable="untested",
         evidence="only searched in the per-joint refinement; no study yet",
         stages=("per_joint",),
+    ),
+    Factor(
+        name="gravity_scale",
+        label="Gravity load",
+        explains="How much the arm sags under its own weight: the servos' static error in a held pose.",
+        acts_on="model",
+        unit="x",
+        scale="linear",
+        bounds=(0.0, 2.0),  # 0 a weightless arm, 2 a doubled load
+        neutral=1.0,
+        needs="holds and slow moves in poses spread across the workspace",
+        identifiable="untested",
+        evidence="opt-in (calibrate --fit-gravity); `antares sag` reads the implied value off a lock's residual",
+        stages=(),
+        per_joint_ok=False,
+    ),
+    Factor(
+        name="deadband",
+        label="Servo deadband",
+        explains="Position error the servo ignores (firmware deadzone plus gear backlash): "
+        "a held joint rests off its target on the side gravity pulls it.",
+        acts_on="actuator",
+        unit="rad",
+        scale="linear",
+        bounds=(0.0, math.radians(3.0)),  # 3 deg, well past the STS3215's deadzone plus backlash
+        neutral=0.0,
+        needs="holds and direction reversals",
+        identifiable="untested",
+        evidence="opt-in (calibrate --fit-deadband); no real-data study yet",
+        stages=(),
     ),
     Factor(
         name="sensor_gain",

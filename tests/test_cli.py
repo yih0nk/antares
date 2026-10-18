@@ -34,7 +34,7 @@ def test_help_exits_zero(capsys):
         cli.main(["--help"])
     assert e.value.code == 0
     out = capsys.readouterr().out
-    for cmd in ("serve", "inspect", "replay", "calibrate", "cross", "drift", "dr", "locks", "export", "check", "events", "compensate", "fleet", "synth"):
+    for cmd in ("serve", "inspect", "replay", "calibrate", "cross", "drift", "dr", "locks", "export", "check", "events", "compensate", "sag", "fleet", "synth", "task", "noise", "camera-delay"):
         assert cmd in out
 
 
@@ -1078,6 +1078,47 @@ def test_fleet_scan_wires_discover_and_scan(monkeypatch, capsys, tmp_path):
     assert "2 robots calibrated" in out  # final tables
 
 
+def test_sag_scores_the_locks_heldout_episodes(monkeypatch, capsys, tmp_path):
+    from antares import server
+
+    T = 60
+    eps = []
+    for i in range(3):
+        a = np.zeros((T, 6))
+        a[:, 2] = np.linspace(-40, 40, T)
+        eps.append(Episode(index=i, fps=30.0, joint_names=JOINTS, state=a + 1.0, action=a))
+    ds = Dataset(repo_id="fake/robot", robot_type="so101_follower", fps=30.0, joint_names=JOINTS, episodes=tuple(eps))
+    monkeypatch.setattr(server, "_DATASETS", {"fake/robot": ds})
+    monkeypatch.setattr(server, "LOCK_DIR", tmp_path)
+    monkeypatch.setattr(server, "LOCK_SUFFIX", ".lock.json")
+    (tmp_path / "unit-a.lock.json").write_text(json.dumps({"name": "unit-a", "params": {"kp": 10.0},
+                                                          "result": {"eval_episodes": [1, 2]}}))
+    assert cli.main(["sag", "fake/robot", "--lock", "unit-a"]) == 0
+    out = capsys.readouterr().out
+    assert "2 held-out episodes, 120 frames" in out and "elbow_flex" in out and "implied scale" in out
+    assert cli.main(["sag", "fake/robot", "--lock", "unit-a", "--all", "--json"]) == 0
+    d = json.loads(capsys.readouterr().out)
+    assert d["n_episodes"] == 3 and "elbow_flex" in d["joints"]
+
+
+def test_calibrate_cli_fit_gravity_flag(monkeypatch, capsys, tmp_path):
+    from antares import server
+
+    calls = []
+    params = {"kp": 100.0, "kv": 1.0, "damping": 0.1, "armature": 0.01, "frictionloss": 0.01,
+              "latency_frames": 2, "forcerange": 2.94, "gravity_scale": 0.4}
+
+    def fake_run(ds, **kw):
+        calls.append(kw)
+        return _Result(_result_dict(params, [])), {"name": "x"}, tmp_path / "x.lock.json"
+
+    monkeypatch.setattr(server, "_DATASETS", {"fake/robot": _dataset()})
+    monkeypatch.setattr(server, "run_calibration", fake_run)
+    assert cli.main(["calibrate", "fake/robot", "--fit-gravity", "--fit-deadband"]) == 0
+    assert calls[0]["fit_gravity"] is True and calls[0]["fit_deadband"] is True
+    assert "gravity_scale=0.4" in capsys.readouterr().out
+    assert cli.main(["calibrate", "fake/robot"]) == 0
+    assert calls[1]["fit_gravity"] is False and calls[1]["fit_deadband"] is False
 def test_synth_rejects_bad_wear(capsys):
     assert cli.main(["synth", "/nonexistent/out", "--wear", "stiffness=2"]) == 2
     assert "unknown parameter 'stiffness'" in capsys.readouterr().err
@@ -1118,7 +1159,7 @@ def test_check_explain_evaluations_has_a_floor(monkeypatch, capsys):
     _patch_check(monkeypatch, _check_result(3.0))
     _patch_diagnose(monkeypatch, calls)
     assert cli.main(["check", "fake/robot", "--lock", "unit-a", "--explain", "--explain-evaluations", "0"]) == 2
-    assert "--explain-evaluations must be >= 10" in capsys.readouterr().err
+    assert "--explain-evaluations must be >= 20" in capsys.readouterr().err
     assert calls == []
 
 
@@ -1346,3 +1387,442 @@ def test_params_table_uses_the_robots_columns():
 
     out = _params_table({"kp": [1.0] * 7, "latency_frames": 2}, [f"joint{i}" for i in range(1, 7)] + ["gripper"])
     assert "joint7" not in out and "gripper" in out and out.count("\n") == 9
+
+
+def test_task_prints_clouds_and_saves(monkeypatch, capsys, tmp_path):
+    from antares import server
+    from test_task import pick_place_episode
+
+    eps = (pick_place_episode(0), pick_place_episode(1, held_jaw=2.5), pick_place_episode(2))
+    ds = Dataset("fake/robot", "so101", 30.0, eps[0].joint_names, eps)
+    monkeypatch.setattr(server, "_DATASETS", {"fake/robot": ds})
+    out_path = tmp_path / "robot.task.json"
+    assert cli.main(["task", "fake/robot", "--out", str(out_path)]) == 0
+    out = capsys.readouterr().out
+    assert "3 closes of the gripper: 2 picks (2 carried somewhere else), 1 missed, 0 idle" in out
+    assert "pick" in out and "place" in out
+    assert "episodes with a missed grasp: 1" in out
+    assert "episodes with no pick found: 1" in out
+    saved = json.loads(out_path.read_text())
+    assert saved["name"] == "robot" and saved["summary"]["held"] == 2
+
+
+def test_task_then_export_with_task(monkeypatch, tmp_path, capsys):
+    import mujoco
+
+    from antares import server
+    from test_task import pick_place_episode
+
+    monkeypatch.setattr(server, "LOCK_DIR", tmp_path / "locks")
+    monkeypatch.setattr(server, "LOCK_SUFFIX", ".lock.json")
+    _real_lock().save(tmp_path / "locks" / "unit_a.lock.json")
+    eps = (pick_place_episode(0), pick_place_episode(1))
+    monkeypatch.setattr(server, "_DATASETS", {"fake/robot": Dataset("fake/robot", "so101", 30.0, eps[0].joint_names, eps)})
+
+    assert cli.main(["task", "fake/robot"]) == 0
+    assert (tmp_path / "locks" / "robot.task.json").is_file()
+    out = tmp_path / "out"
+    assert cli.main(["export", "unit_a", "-o", str(out), "--task", "robot", "--no-bundle"]) == 0
+    text = capsys.readouterr().out
+    assert "cube and place marker" in text and "task.json" in text
+    assert mujoco.MjModel.from_xml_path(str(out / "scene.xml")).nq == 13
+
+    assert cli.main(["export", "unit_a", "-o", str(out), "--task", "nope"]) == 1
+    assert "antares task" in capsys.readouterr().err
+
+
+def test_task_refuses_a_dataset_with_no_held_grasp(monkeypatch, capsys, tmp_path):
+    from antares import server
+    from test_task import SHUT, pick_place_episode
+
+    eps = (pick_place_episode(0, held_jaw=SHUT), pick_place_episode(1, held_jaw=SHUT + 0.5))
+    monkeypatch.setattr(server, "LOCK_DIR", tmp_path / "locks")
+    monkeypatch.setattr(server, "_DATASETS", {"fake/robot": Dataset("fake/robot", "so101", 30.0, eps[0].joint_names, eps)})
+    assert cli.main(["task", "fake/robot"]) == 1
+    err = capsys.readouterr().err
+    assert "error:" in err and "held anything" in err and "--held-gap" in err
+    assert not (tmp_path / "locks").exists()
+    assert cli.main(["task", "fake/robot", "--out", str(tmp_path / "x.task.json")]) == 1
+    assert not (tmp_path / "x.task.json").exists()
+
+
+def test_export_refuses_a_task_with_no_held_grasp(monkeypatch, capsys, tmp_path):
+    from antares import server
+    from antares.task import TaskDistribution
+    from test_task import SHUT, pick_place_episode
+
+    monkeypatch.setattr(server, "LOCK_DIR", tmp_path / "locks")
+    monkeypatch.setattr(server, "LOCK_SUFFIX", ".lock.json")
+    _real_lock().save(tmp_path / "locks" / "unit_a.lock.json")
+    td = TaskDistribution.from_episodes([pick_place_episode(0, held_jaw=SHUT)], name="empty")
+    assert not td.held
+    task_path = td.save(td.default_path(tmp_path / "locks"))
+
+    out = tmp_path / "out"
+    for ref in ("empty", str(task_path)):
+        assert cli.main(["export", "unit_a", "-o", str(out), "--task", ref, "--no-bundle"]) == 1
+        err = capsys.readouterr().err
+        assert err.startswith("error:") and "no held grasps" in err and "Traceback" not in err
+        assert not out.exists()  # refused before anything was written
+
+
+def test_noise_prints_table_and_saves(monkeypatch, capsys, tmp_path):
+    from antares import server
+    from test_noise import parked_episode
+
+    rng = np.random.default_rng(0)
+    eps = tuple(parked_episode(i, rng) for i in range(3))
+    monkeypatch.setattr(server, "LOCK_DIR", tmp_path)
+    monkeypatch.setattr(server, "_DATASETS", {"fake/robot": Dataset("fake/robot", "so101", 30.0, eps[0].joint_names, eps)})
+    assert cli.main(["noise", "fake/robot"]) == 0
+    out = capsys.readouterr().out
+    assert "lag-1 corr" in out and "elbow_flex" in out
+    saved = json.loads((tmp_path / "robot.noise.json").read_text())
+    assert saved["name"] == "robot" and len(saved["scale_rad"]) == 6
+
+
+def test_camera_delay_reports_the_median_lag(monkeypatch, capsys, tmp_path):
+    from antares import server, video
+    from test_videodelay import _blob_video, _jerky
+
+    eps, vids = [], {}
+    for i in range(3):
+        q = _jerky(seed=i)
+        eps.append(Episode(index=i, fps=30.0, joint_names=tuple("abcdef"), state=q, action=q))
+        vids[i] = _blob_video(q, 3, seed=i)[..., None].repeat(3, axis=-1).repeat(4, axis=1).repeat(4, axis=2)
+    ds = Dataset("fake/robot", "so101", 30.0, tuple("abcdef"), tuple(eps))
+    monkeypatch.setattr(server, "_DATASETS", {"fake/robot": ds})
+    monkeypatch.setattr(server, "list_camera_infos", lambda repo: [{"name": "front", "fixed": True}])
+    monkeypatch.setattr(video, "frames", lambda repo, cam, ep, idx, dataset=None, cache=True: vids[ep][idx])
+
+    out_path = tmp_path / "delay.json"
+    assert cli.main(["camera-delay", "fake/robot", "--camera", "front", "--out", str(out_path)]) == 0
+    out = capsys.readouterr().out
+    assert "median: +" in out and "positive: video is late" in out
+    assert json.loads(out_path.read_text())["delay_frames"] == pytest.approx(3, abs=0.5)
+    assert cli.main(["camera-delay", "fake/robot", "--camera", "side"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# the follower's LeRobot calibration
+# ---------------------------------------------------------------------------
+
+
+def _calibration_file(path, shift_joint=None, shift=0):
+    """A calibration matching the SO-101 model's ranges, one joint optionally shifted."""
+    from antares import lerobot_calib as lc
+    from antares.sim import load_model
+
+    jr = load_model().jnt_range
+    out = {}
+    for i, j in enumerate(JOINTS):
+        span = int(round((jr[i, 1] - jr[i, 0]) / lc.RAD_PER_TICK))
+        lo = 1000 if j == "gripper" else lc.HALF_TURN - span // 2
+        if j == shift_joint:
+            lo += shift
+        out[j] = {"id": i + 1, "drive_mode": 0, "homing_offset": 0, "range_min": lo, "range_max": lo + span}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(out))
+    return path
+
+
+def test_inspect_with_calibration_prints_the_disagreement_table(monkeypatch, capsys, tmp_path):
+    import antares.data
+    from antares import server
+
+    monkeypatch.setattr(server, "fetch_hub_info", lambda repo_id: _info())
+    monkeypatch.setattr(antares.data, "load_dataset", lambda repo_id, cache_dir=None: _dataset(repo_id, n=20))
+    path = _calibration_file(tmp_path / "arm.json", shift_joint="wrist_roll", shift=100)  # 8.8 deg
+    assert cli.main(["inspect", "fake/robot", "--calibration", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert f"LeRobot calibration {path} vs the so101 model" in out
+    assert "range_min" in out and "FLAG" in out
+    assert "warning: wrist_roll is off by up to 8.8 deg: the model's assumed range does not match" in out
+    assert "use --calibration when calibrating" in out
+    # the untouched joints are not flagged
+    assert out.count("FLAG") == 1
+
+
+def test_inspect_with_robot_id_uses_lerobot_dir(monkeypatch, capsys, tmp_path):
+    import antares.data
+    from antares import server
+
+    monkeypatch.setattr(server, "fetch_hub_info", lambda repo_id: _info())
+    monkeypatch.setattr(antares.data, "load_dataset", lambda repo_id, cache_dir=None: _dataset(repo_id, n=20))
+    monkeypatch.setenv("HF_LEROBOT_CALIBRATION", str(tmp_path / "cal"))
+    _calibration_file(tmp_path / "cal" / "robots" / "so_follower" / "my_arm.json")
+    assert cli.main(["inspect", "fake/robot", "--robot-id", "my_arm"]) == 0
+    out = capsys.readouterr().out
+    assert "all joints within 2 deg" in out and "FLAG" not in out
+    assert cli.main(["inspect", "fake/robot", "--robot-id", "nope"]) == 2
+    err = capsys.readouterr().err
+    assert "no LeRobot calibration named 'nope'" in err and "so101_follower" in err
+
+
+def test_calibrate_cli_forwards_the_calibration(monkeypatch, capsys, tmp_path):
+    from antares import server
+
+    seen = {}
+    result = type("R", (), {"to_dict": lambda self: {
+        "per_joint_before": {j: 4.0 for j in JOINTS}, "per_joint_after": {j: 1.0 for j in JOINTS},
+        "baseline_eval_score": 4.0, "eval_score": 0.75, "params": {"kp": 1.0},
+        "n_evaluations": 10, "elapsed_s": 1.0,
+    }})()
+    lock = {"name": "unit-c", "calibration": {"source": "/x/arm.json", "robot_id": "arm",
+                                              "unit_map_disagreement_deg": {"wrist_roll": 8.79, "gripper": 0.0}}}
+
+    def fake_run(ds, **kw):
+        seen.update(kw)
+        return result, lock, "locks/unit-c.lock.json"
+
+    monkeypatch.setattr(server, "_DATASETS", {"fake/robot": _dataset()})
+    monkeypatch.setattr(server, "run_calibration", fake_run)
+    assert cli.main(["calibrate", "fake/robot", "--calibration", "/x/arm.json"]) == 0
+    out = capsys.readouterr().out
+    assert seen["calibration_path"] == "/x/arm.json" and seen["robot_id"] is None
+    assert seen["robot_type"] == "so101_follower"
+    assert "unit map from the arm's LeRobot calibration" in out
+    assert "unit map from LeRobot calibration /x/arm.json (robot id arm)" in out and "wrist_roll=8.79" in out
+    assert cli.main(["calibrate", "fake/robot", "--robot-id", "arm", "--robot-type", "so100_follower"]) == 0
+    assert seen["calibration_path"] is None and seen["robot_id"] == "arm" and seen["robot_type"] == "so100_follower"
+
+
+# --------------------------------------------------------------------------
+# robots: the registry, and @<robot> wherever a lock is accepted
+# --------------------------------------------------------------------------
+
+
+def _write_lock_file(tmp_path, name, eval_score=1.0, created_at="2026-10-01T00:00:00Z", pinned=None, **params):
+    from antares import server
+
+    d = server.LOCK_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    p = {"kp": 100.0, "kv": 1.0, "damping": 0.1, "armature": 0.01, "frictionloss": 0.1, "latency_frames": 2, **params}
+    result = {"eval_score": eval_score, "baseline_eval_score": 4.0, "params": p, "per_joint_after": {j: 1.0 for j in JOINTS}}
+    if pinned is not None:
+        result["seeds"] = {"pinned": list(pinned), "spread": {}}
+    body = {"name": name, "dataset": "org/arm_a_daily", "robot_type": "so101_follower", "created_at": created_at,
+            "params": p, "result": result}
+    (d / f"{name}.lock.json").write_text(json.dumps(body))
+    return body
+
+
+def test_robots_in_help(capsys):
+    with pytest.raises(SystemExit) as e:
+        cli.main(["--help"])
+    assert e.value.code == 0 and "robots" in capsys.readouterr().out
+    with pytest.raises(SystemExit) as e:
+        cli.main(["robots", "--help"])
+    assert e.value.code == 0
+    out = capsys.readouterr().out
+    for sub in ("list", "show", "register", "activate", "rollback", "remove"):
+        assert sub in out
+
+
+def test_robots_register_list_show_rollback_remove(tmp_path, capsys):
+    from antares import server
+
+    assert cli.main(["robots"]) == 0
+    assert "no robots registered" in capsys.readouterr().out
+
+    _write_lock_file(tmp_path, "v1", eval_score=1.0)
+    _write_lock_file(tmp_path, "v2", eval_score=0.9, created_at="2026-10-08T00:00:00Z", latency_frames=3)
+    _write_lock_file(tmp_path, "v3", eval_score=1.5, created_at="2026-10-15T00:00:00Z", pinned=["kp", "latency_frames"], kp=130.0)
+
+    assert cli.main(["robots", "register", "arm_a", "--lock", "v1", "--note", "first fit"]) == 0
+    assert capsys.readouterr().out.strip() == "registered lock v1 as v1 of 1 for robot arm_a; now active (first lock of this robot)"
+    assert cli.main(["robots", "register", "arm_a", "--lock", "v2"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("registered lock v2 as v2 of 2 for robot arm_a; now active (held-out 0.900 deg vs 1.000 for v1")
+    assert cli.main(["robots", "register", "arm_a", "--lock", "v3"]) == 0
+    out = capsys.readouterr().out
+    assert "not activated: held-out 1.500 deg is 67% worse than v2's 0.900 (limit 10%)" in out
+    assert out.rstrip().endswith("v2 stays active")
+
+    raw = json.loads((server.LOCK_DIR / "registry.json").read_text())
+    assert raw["robots"]["arm_a"]["active"] == "v2"
+    assert [l["name"] for l in raw["robots"]["arm_a"]["locks"]] == ["v1", "v2", "v3"]
+    assert raw["robots"]["arm_a"]["locks"][0]["note"] == "first fit"
+
+    assert cli.main(["robots"]) == 0
+    out = capsys.readouterr().out
+    head, _, row = out.splitlines()[:3]
+    assert head.split()[:2] == ["robot", "active"] and "last check" in head
+    assert row.split()[:2] == ["arm_a", "v2"] and "v2 of 3" in row and "0.900" in row and "2026-10-15" in row
+    assert row.rstrip().endswith("never")
+
+    assert cli.main(["robots", "--json"]) == 0
+    d = json.loads(capsys.readouterr().out)
+    assert d["robots"][0]["robot_id"] == "arm_a" and d["robots"][0]["n_versions"] == 3
+
+    assert cli.main(["robots", "show", "arm_a"]) == 0
+    out = capsys.readouterr().out
+    assert out.splitlines()[0] == "robot arm_a (so101_follower): 3 locks, active v2 (v2 of 3)"
+    assert "v2*" in out and "v1 " in out and "4.000 -> 0.900" in out and "first fit" in out
+    assert "parameter drift across versions" in out
+    # latency is pinned in every version: comparable; kp only in v3: not comparable
+    drift_row = next(l for l in out.splitlines() if l.startswith("latency_frames"))
+    assert drift_row.split() == ["latency_frames", "2", "3", "2", "unchanged"]
+    assert "not comparable across fits" in out and "kp (v1, v2)" in out
+
+    assert cli.main(["robots", "show", "arm_a", "--json"]) == 0
+    d = json.loads(capsys.readouterr().out)
+    assert [r["version"] for r in d["lineage"]] == [1, 2, 3] and d["lineage"][1]["is_active"]
+    assert d["lineage"][2]["pinned"] == ["kp", "latency_frames"] and d["lineage"][0]["pinned"] == ["latency_frames"]
+    assert d["param_drift"]["comparable"]["latency_frames"]["values"] == [2, 3, 2]
+    assert d["param_drift"]["not_comparable"]["kp"] == [1, 2]
+
+    assert cli.main(["robots", "rollback", "arm_a"]) == 0
+    assert capsys.readouterr().out.strip() == "robot arm_a: rolled back v2 -> v1 (v1 of 3)"
+    assert cli.main(["robots", "rollback", "arm_a"]) == 2
+    assert "nothing to roll back to" in capsys.readouterr().err
+    assert cli.main(["robots", "activate", "arm_a", "v3"]) == 0
+    assert capsys.readouterr().out.strip() == "robot arm_a: active lock v3 (v3 of 3) (was v1)"
+    assert cli.main(["robots", "activate", "arm_a", "nope"]) == 2
+    assert "not in this robot's lineage" in capsys.readouterr().err
+
+    assert cli.main(["robots", "remove", "arm_a"]) == 0
+    assert "its 3 lock file(s) stay: v1, v2, v3" in capsys.readouterr().out
+    assert (server.LOCK_DIR / "v1.lock.json").is_file()
+    assert cli.main(["robots", "remove", "arm_a"]) == 2
+    assert "unknown robot 'arm_a'" in capsys.readouterr().err
+
+
+def test_robots_register_errors(tmp_path, capsys):
+    assert cli.main(["robots", "register", "arm_a", "--lock", "ghost"]) == 2
+    assert "no lock named 'ghost'" in capsys.readouterr().err
+    _write_lock_file(tmp_path, "v1")
+    assert cli.main(["robots", "register", "bad/id", "--lock", "v1"]) == 2
+    assert "invalid robot id" in capsys.readouterr().err
+    assert cli.main(["robots", "register", "arm_a", "--lock", "v1", "--max-regression", "-1"]) == 2
+    assert cli.main(["robots", "show", "ghost"]) == 2
+    assert "unknown robot 'ghost'" in capsys.readouterr().err
+
+
+def test_robots_register_activate_flag_and_max_regression(tmp_path, capsys):
+    _write_lock_file(tmp_path, "v1", eval_score=1.0)
+    _write_lock_file(tmp_path, "v2", eval_score=1.5)
+    assert cli.main(["robots", "register", "arm_a", "--lock", "v1"]) == 0
+    assert cli.main(["robots", "register", "arm_a", "--lock", "v2", "--max-regression", "0.6"]) == 0
+    assert "now active" in capsys.readouterr().out
+    assert cli.main(["robots", "rollback", "arm_a"]) == 0
+    capsys.readouterr()
+    assert cli.main(["robots", "register", "arm_a", "--lock", "v2", "--activate"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("re-registered lock v2 as v2 of 2") and "now active (activation forced)" in out
+
+
+def test_check_resolves_a_robot_reference_to_its_active_lock(monkeypatch, tmp_path, capsys):
+    from antares import server
+
+    _write_lock_file(tmp_path, "unit-a")
+    assert cli.main(["robots", "register", "arm_a", "--lock", "unit-a"]) == 0
+    capsys.readouterr()
+    calls = []
+    _patch_check(monkeypatch, _check_result(1.2), calls)
+    assert cli.main(["check", "fake/robot", "--lock", "@arm_a"]) == 0
+    out = capsys.readouterr().out
+    (_, lock, _), = calls
+    assert lock == "unit-a"  # the resolved name reaches run_check
+    assert "fake/robot vs lock unit-a" in out
+    # ...and the history lands under the lock's own name, not the reference
+    assert (server.LOCK_DIR / "unit-a.history.jsonl").is_file()
+    assert not (server.LOCK_DIR / "@arm_a.history.jsonl").exists()
+
+    assert cli.main(["check", "fake/robot", "--lock", "@ghost"]) == 2
+    assert "unknown robot 'ghost'" in capsys.readouterr().err
+    # after a recalibration the same reference follows the new active lock
+    _write_lock_file(tmp_path, "unit-b", eval_score=0.8)
+    assert cli.main(["robots", "register", "arm_a", "--lock", "unit-b"]) == 0
+    capsys.readouterr()
+    assert cli.main(["check", "fake/robot", "--lock", "@arm_a"]) == 0
+    assert calls[-1][1] == "unit-b"
+
+
+def test_history_accepts_a_robot_reference_and_concatenates_a_lineage(tmp_path, capsys):
+    _write_lock_file(tmp_path, "v1", eval_score=1.0)
+    _write_lock_file(tmp_path, "v2", eval_score=1.0, created_at="2026-10-08T00:00:00Z")
+    assert cli.main(["robots", "register", "arm_a", "--lock", "v1"]) == 0
+    assert cli.main(["robots", "register", "arm_a", "--lock", "v2"]) == 0
+    _seed_history(tmp_path, "v1", lock_file=False)
+    _seed_history(tmp_path, "v2", lock_file=False)
+    capsys.readouterr()
+
+    assert cli.main(["history", "@arm_a"]) == 0  # the active lock only
+    out = capsys.readouterr().out
+    assert out.count("fake/robot") == 3 and out.rstrip().splitlines()[-1].startswith("history: 3 checks")
+
+    assert cli.main(["history", "--robot", "arm_a"]) == 0
+    out = capsys.readouterr().out
+    lines = out.rstrip().splitlines()
+    assert lines[0].split()[:4] == ["date", "(utc)", "lock", "dataset"]
+    body = lines[2:-1]
+    assert len(body) == 6 and all(("v1" in l) or ("v2 *" in l) for l in body)
+    assert [l.split()[0] for l in body] == sorted(l.split()[0] for l in body)  # time order across locks
+    assert lines[-1].startswith("history: 6 checks since 2026-09-30") and "across 2 locks of robot arm_a" in lines[-1]
+
+    assert cli.main(["history", "--robot", "arm_a", "--json", "--last", "2"]) == 0
+    d = json.loads(capsys.readouterr().out)
+    assert d["robot"] == "arm_a" and d["locks"] == ["v1", "v2"] and d["active"] == "v2"
+    assert len(d["entries"]) == 2 and d["trend"]["n"] == 6
+
+    assert cli.main(["history"]) == 2
+    assert "give a lock" in capsys.readouterr().err
+    assert cli.main(["history", "--robot", "ghost"]) == 2
+    assert "unknown robot 'ghost'" in capsys.readouterr().err
+    assert cli.main(["history", "@ghost"]) == 2
+
+
+def test_record_check_lock_defaults_to_the_robots_active_lock(monkeypatch, tmp_path, capsys):
+    from antares import recordcheck as rc
+
+    monkeypatch.setattr(rc.shutil, "which", lambda name: None)
+    base = ["record-check", "--robot-port", "/dev/ttyA", "--robot-id", "arm_a", "--teleop-port", "/dev/ttyB", "--dry-run"]
+    assert cli.main(base) == 2
+    err = capsys.readouterr().err
+    assert "unknown robot 'arm_a'" in err and "pass --lock" in err
+
+    _write_lock_file(tmp_path, "unit-a")
+    assert cli.main(["robots", "register", "arm_a", "--lock", "unit-a"]) == 0
+    capsys.readouterr()
+    assert cli.main(base) == 0
+    out = capsys.readouterr().out
+    assert "antares check" in out and "--lock unit-a" in out
+    assert cli.main(base + ["--lock", "@arm_a"]) == 0
+    assert "--lock unit-a" in capsys.readouterr().out
+
+
+def test_calibrate_robot_id_registers_the_saved_lock(monkeypatch, capsys, tmp_path):
+    from antares import server
+
+    scalar = {"kp": 100.0, "kv": 1.0, "damping": 0.1, "armature": 0.01, "frictionloss": 0.01, "latency_frames": 2}
+    stages = [{"name": "shared", "n_evaluations": 5, "train_score": 1.2, "params": scalar}]
+
+    def fake_run(ds, **kw):
+        lock = {"name": kw.get("name") or "x", "dataset": ds.repo_id, "robot_type": "so101_follower",
+                "created_at": "2026-10-17T00:00:00Z", "params": scalar, "result": _result_dict(scalar, stages)}
+        return _Result(_result_dict(scalar, stages)), lock, tmp_path / "x.lock.json"
+
+    monkeypatch.setattr(server, "_DATASETS", {"fake/robot": _dataset()})
+    monkeypatch.setattr(server, "run_calibration", fake_run)
+    assert cli.main(["calibrate", "fake/robot", "--name", "x", "--robot-id", "arm_a"]) == 0
+    out = capsys.readouterr().out.rstrip().splitlines()
+    assert out[-2].startswith("saved lock x -> ")
+    assert out[-1] == "registered lock x as v1 of 1 for robot arm_a; now active (first lock of this robot)"
+    assert json.loads((server.LOCK_DIR / "registry.json").read_text())["robots"]["arm_a"]["active"] == "x"
+
+    # a worse second fit is registered but not activated; --activate forces it
+    def worse(ds, **kw):
+        r, lock, p = fake_run(ds, **kw)
+        lock["result"] = {**lock["result"], "eval_score": 2.0}
+        return r, lock, p
+
+    monkeypatch.setattr(server, "run_calibration", worse)
+    assert cli.main(["calibrate", "fake/robot", "--name", "y", "--robot-id", "arm_a"]) == 0
+    assert "not activated: held-out 2.000 deg is 100% worse than x's 1.000" in capsys.readouterr().out
+    assert cli.main(["calibrate", "fake/robot", "--name", "y", "--robot-id", "arm_a", "--activate"]) == 0
+    assert "now active (activation forced)" in capsys.readouterr().out
+    # without --robot-id nothing is registered
+    assert cli.main(["calibrate", "fake/robot", "--name", "z"]) == 0
+    assert "registered" not in capsys.readouterr().out
+    assert "z" not in [l["name"] for l in json.loads((server.LOCK_DIR / "registry.json").read_text())["robots"]["arm_a"]["locks"]]

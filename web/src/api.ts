@@ -13,6 +13,11 @@ export type Params = {
   latency_frames: ParamValue;
   // Actuator force limit; searched by the per-joint stage only.
   forcerange?: ParamValue;
+  // Gravity load (fraction of the MJCF's link weights; 1 is the stock model)
+  // and servo deadband (rad). Fitted with fit_gravity / fit_deadband and
+  // omitted at their defaults, so older locks have neither.
+  gravity_scale?: ParamValue;
+  deadband?: ParamValue;
 };
 
 // Where a dataset came from: pinned demo, any Hub id, a zip/parquet upload,
@@ -199,6 +204,90 @@ export type CrossMatrix = {
   per_joint: Record<string, number>[][];
 };
 
+// One `antares check` run as the history store records it; `verdict` is the
+// gate's outcome and `score` the fresh episodes' RMS error against `limit`.
+export type CheckVerdict = "ok" | "drifted" | "insufficient_data";
+
+export type HistoryEntry = {
+  at: string;
+  lock: string;
+  dataset: string;
+  verdict: CheckVerdict;
+  passed: boolean;
+  score: number | null;
+  reference: number | null;
+  limit: number | null;
+  n_episodes: number;
+  episodes: number[];
+  worst_joint: string | null;
+  per_joint: Record<string, number | null>;
+  antares_version: string;
+};
+
+// Least-squares line through a lock's check scores over time.
+export type HistoryTrend = {
+  n: number;
+  first: string | null;
+  last: string | null;
+  slope_deg_per_day: number | null;
+  r2: number | null;
+  latest_verdict: CheckVerdict | string | null;
+  n_drifted: number;
+};
+
+// GET /api/history/{lock}: every check of one lock, oldest first.
+export type LockHistory = {
+  lock: string;
+  entries: HistoryEntry[];
+  trend: HistoryTrend | null;
+};
+
+// GET /api/dashboard: one row per saved lock, with what the fleet view needs
+// joined in (drift scan, fleet membership, latest check and trend).
+export type DashboardRobot = {
+  name: string;
+  dataset: string | null;
+  robot_type: string | null;
+  robot: string;
+  created_at: string | null;
+  space: "shared" | "per_joint" | string;
+  baseline_eval_score: number | null;
+  eval_score: number | null;
+  improvement: number | null;
+  per_joint_after: Record<string, number | null> | null;
+  worst_joint: string | null;
+  worst_joint_deg: number | null;
+  latency_frames: ParamValue | null;
+  // The dataset's frame rate when the server knows it (fleet report or a
+  // loaded dataset); turns latency frames into milliseconds.
+  fps: number | null;
+  drift: { exists: boolean; verdict: string | null };
+  in_fleet: boolean;
+  // Parameters a seeded calibration held fixed, when the lock records them.
+  pinned: string[] | null;
+  history: { latest: HistoryEntry | null; trend: HistoryTrend | null };
+  // Registry (locks/registry.json): the physical robot this lock belongs to
+  // and its place in that robot's lineage; all null when unregistered.
+  robot_id: string | null;
+  is_active: boolean | null;
+  version: number | null;
+  n_versions: number | null;
+};
+
+export type FleetSummary = {
+  n_robots: number;
+  median_improvement?: number | null;
+  created_at?: string | null;
+  locks?: string[];
+  [k: string]: unknown;
+};
+
+export type Dashboard = {
+  robots: DashboardRobot[];
+  fleet: FleetSummary | null;
+  generated_at: string;
+};
+
 export type JobEvent =
   | ProgressEvent
   | { type: "done"; lock: { name: string; params: Params }; result: CalibrationResult }
@@ -297,6 +386,321 @@ export type CameraOverlay = {
   iou: number | null;
 };
 
+// ---- scene (antares.scene): table, workspace and backdrops from the logs ----
+
+export type SceneTable = {
+  z: number; // m, at the arm's base
+  normal: number[];
+  tilt_deg: number;
+  horizontal: boolean;
+  n_grasps: number;
+  n_on_table: number;
+  z_grasp: number;
+  object_half_height: number;
+  fingertip_z: Record<string, number>;
+  jaw_low_z: Record<string, number>;
+  episode_min_z: Record<string, number>;
+  min_fingertip_z: number;
+};
+
+export type SceneWorkspace = { min: number[]; max: number[]; size: number[]; hull_xy: number[][]; n_frames: number };
+
+// One camera's backdrop and how the projected table plane sits in its image.
+export type SceneBackdrop = {
+  camera: string;
+  path: string;
+  width: number;
+  height: number;
+  plane_polygon: number[][]; // pixels
+  plane_frac: number;
+  region_frac: number;
+  plane_in_region: number; // share of the projected plane on the dominant colour region
+  region_in_plane: number;
+  iou: number;
+  table_rgb: number[];
+};
+
+// GET /api/scene?lock=: locks/<lock>.scene.json.
+export type SceneFit = {
+  lock: string;
+  dataset: string;
+  robot: string;
+  table: SceneTable;
+  workspace: SceneWorkspace;
+  grasp_points: number[][];
+  release_points: number[][];
+  backdrops: Record<string, SceneBackdrop>;
+  n_episodes: number;
+  n_frames: number;
+  created_at: string;
+};
+
+// GET /api/scene/view: the real frame and the sim's view of the same instant
+// from the same camera (backdrop + table + flat-shaded arm).
+export type SceneView = {
+  dataset: string;
+  camera: string;
+  episode: number;
+  frame: number;
+  lock: string;
+  width: number;
+  height: number;
+  real_image: string; // data: URL (JPEG)
+  sim_image: string;
+  iou: number;
+  table_polygon: number[][];
+  table_z: number;
+  n_geoms: number;
+};
+
+// ---- policy (antares.policy / shadow / closedloop): a learned policy in the loop ----
+
+export type PolicyMode = "shadow" | "closedloop";
+
+// Chunk-prediction errors of a predictor on one split (antares.policy.action_errors).
+export type PolicyErrors = {
+  mse_units: number;
+  rmse_units: number;
+  rmse_deg: number; // RMS over the body joints, whole chunk
+  first_rmse_deg: number; // first action of the chunk only
+  gripper_rmse_units: number;
+  per_joint_deg: Record<string, number>;
+  n_windows: number;
+};
+
+export type PolicyMetrics = {
+  policy: { train: PolicyErrors; eval: PolicyErrors };
+  baselines: Record<"hold_state" | "repeat_command", { train: PolicyErrors; eval: PolicyErrors }>;
+  best_epoch: number;
+  epochs_run: number;
+  beats_hold_state: boolean;
+  beats_repeat_command: boolean;
+};
+
+// locks/<name>.policy.json: a saved policy and how it trained.
+export type PolicyInfo = {
+  name: string;
+  lock?: string;
+  dataset?: string;
+  k: number;
+  h: number;
+  features: { goal: boolean; time: boolean };
+  n_params: number;
+  train_episodes: number[];
+  eval_episodes: number[];
+  metrics: PolicyMetrics;
+  elapsed_s: number;
+  created_at: string;
+  exists: boolean;
+};
+
+export type PolicyTrainProgress = {
+  type: "progress";
+  epoch: number;
+  epochs: number;
+  train_mse: number; // normalized units
+  eval_mse: number;
+  best_eval_mse: number;
+  best_epoch: number;
+  elapsed_s: number;
+};
+
+export type PolicyTrainEvent = PolicyTrainProgress | { type: "done"; policy: PolicyInfo } | { type: "error"; message: string };
+
+export type ShadowVariantSummary = {
+  sim_vs_real_deg: number;
+  replay_vs_real_deg: number;
+  grasp_error_cm: number | null;
+  n_grasps: number;
+  // Only for the non-baseline sims: how far they are from the default sim's trajectory.
+  divergence_deg?: number;
+  grasp_divergence_cm?: number | null;
+  worst_frames?: { episode: number; frame: number; deg: number }[];
+};
+
+export type ShadowResult = {
+  mode: "shadow";
+  baseline: string;
+  lock: string;
+  policy: string;
+  variants: { name: string; label: string; lock: string | null }[];
+  summary: {
+    n_episodes: number;
+    n_frames: number;
+    action_error_deg: number;
+    variants: Record<string, ShadowVariantSummary>;
+  };
+  episodes: { episode: number; n_frames: number; action_error_deg: number; sim_vs_real_deg: Record<string, number>; divergence_deg: Record<string, number> }[];
+  episodes_evaluated: number[];
+  created_at: string;
+};
+
+export type ClosedLoopVariantSummary = {
+  trajectory_rms_deg: number;
+  approach_rms_deg: number | null;
+  grasp_error_cm: number | null;
+  min_tip_distance_cm: number | null;
+  close_frame_offset: number | null;
+  n_judged: number;
+  n_closed: number;
+  n_success: number;
+  success_rate: number | null;
+};
+
+export type ClosedLoopRun = {
+  variant: string;
+  episode: number;
+  trajectory_rms_deg: number;
+  approach_rms_deg: number | null;
+  grasp_error_cm: number | null;
+  success: boolean | null;
+  close_frame: number | null;
+  real_grasp_frame: number | null;
+};
+
+export type ClosedLoopResult = {
+  mode: "closedloop";
+  lock: string;
+  policy: string;
+  success_cm: number;
+  run_names: string[];
+  variants: { name: string; label: string; lock: string | null }[];
+  summary: { n_episodes: number; variants: Record<string, ClosedLoopVariantSummary> };
+  runs: ClosedLoopRun[];
+  episodes_evaluated: number[];
+  created_at: string;
+};
+
+// GET /api/policy/results?lock=: the saved evaluations of a lock's policy.
+export type PolicyResults = { lock: string; shadow: ShadowResult | null; closedloop: ClosedLoopResult | null };
+
+export type PolicyEvalEvent =
+  | { type: "progress"; mode: PolicyMode; i: number; n: number; episode: number }
+  | { type: "done"; mode: PolicyMode; lock: string; policy: string }
+  | { type: "error"; message: string };
+
+// GET /api/policy/viewer: one held-out episode under the policy in each sim,
+// with body poses for the viewer's ghosts (like /api/replay).
+export type PolicySim = {
+  q: number[][];
+  poses: number[][][];
+  sim_vs_real_deg?: number;
+  divergence_deg?: number;
+  trajectory_rms_deg?: number;
+  grasp_error_cm?: number | null;
+  success?: boolean | null;
+  close_frame?: number | null;
+};
+
+export type PolicyViewer = {
+  dataset: string;
+  lock: string;
+  policy: string;
+  mode: PolicyMode;
+  episode: number;
+  fps: number;
+  body_names: string[];
+  goal: number[] | null;
+  real_q: number[][];
+  real_poses: number[][][];
+  sims: Record<string, PolicySim>;
+  variants: { name: string; label: string }[];
+};
+
+
+// ---- objects (antares.objects / antares.payload): the manipulated object ----
+
+type Quartiles = { n: number; median: number; q1: number; q3: number; iqr: number; max?: number; std?: number };
+
+// One episode's summary as saved in locks/<lock>.objects.json.
+export type ObjectTrackSummary = {
+  episode: number;
+  camera: string;
+  n_frames: number;
+  n_visible: number;
+  picks: number[][]; // [[grasp, release], ...] held windows
+  start_pose: number[] | null;
+  end_pose: number[] | null;
+  end_source: "vision" | "fk" | "none";
+  footprint_m: number[] | null;
+  fk_grasp: number[] | null;
+  fk_release: number[] | null;
+  vision_vs_fk_m: number | null;
+  end_vs_fk_m: number | null;
+  note: string;
+};
+
+export type ObjectCloud = { n: number; mean: number[]; std: number[]; min: number[]; max: number[]; points: number[][] };
+
+// The residual-based mass estimate; `verdict` says whether it is a measurement.
+export type PayloadEstimate = {
+  kp: Record<string, number>;
+  mass_kg: number | null;
+  mass_iqr_kg: number | null;
+  mass: Quartiles | null;
+  mass_by_joint: Record<string, Quartiles | null>;
+  payload_deg: Record<string, Quartiles | null>;
+  motion_deg: Record<string, Quartiles | null>;
+  mass_per_step_kg: Record<string, number | null>;
+  mass_noise_floor_kg: Record<string, number | null>;
+  n_ok: number;
+  n_episodes: number;
+  verdict: string;
+  assumptions: string[];
+};
+
+// GET /api/objects?lock=: locks/<lock>.objects.json.
+export type ObjectsFit = {
+  lock: string;
+  dataset: string;
+  camera: string;
+  robot: string;
+  table_z: number;
+  object_half_height: number;
+  prior: { lab: number[]; spread: number[]; area_px: number; rgb: number[]; n_samples: number };
+  description: string;
+  tracks: ObjectTrackSummary[];
+  start: ObjectCloud | null;
+  end: ObjectCloud | null;
+  footprint_m: { long: Quartiles | null; short: Quartiles | null } | null;
+  vision_vs_fk_m: Quartiles | null;
+  end_vs_fk_m: Quartiles | null;
+  vision_vs_fk_offset_m: number[] | null;
+  vision_vs_fk_centred_m: Quartiles | null;
+  cross_camera: Record<string, unknown> | null;
+  payload: PayloadEstimate | null;
+  n_episodes: number;
+  n_tracked: number;
+  elapsed_s: number;
+  created_at: string;
+};
+
+// GET /api/objects/track: one episode frame by frame. `source` says where
+// each position comes from; `centroid`/`bbox` are pixels in the fit's camera.
+export type ObjectTrack = ObjectTrackSummary & {
+  dataset: string;
+  lock: string;
+  rgb: number[];
+  half_height: number;
+  frames: number[];
+  xyz: number[][]; // (T, 3) base frame, m
+  visible: boolean[];
+  source: ("vision" | "held" | "hidden")[];
+  centroid: (number[] | null)[];
+  bbox: (number[] | null)[]; // [x, y, w, h]
+};
+
+export type ObjectsProgressEvent =
+  | { type: "progress"; stage: "prior"; i: number; n: number; elapsed_s: number; prior: ObjectsFit["prior"] }
+  | { type: "progress"; stage: "track"; episode: number; i: number; n: number; elapsed_s: number; track: ObjectTrackSummary }
+  | { type: "progress"; stage: "cross"; cross_camera: Record<string, unknown> }
+  | { type: "progress"; stage: "payload"; episode: number; i: number; n: number; mass_kg: number | null };
+
+export type ObjectsJobEvent =
+  | ObjectsProgressEvent
+  | { type: "done"; fit: ObjectsFit & { path: string } }
+  | { type: "error"; message: string };
+
 async function json<T>(r: Response): Promise<T> {
   if (!r.ok) {
     let body: unknown = null;
@@ -369,13 +773,15 @@ export const api = {
       body: JSON.stringify({ dataset, episode, params }),
     }).then((r) => json<Replay>(r)),
   // `perJoint` adds the per-joint refinement stage after the shared fit.
-  // `factors` (null: the defaults) picks what the shared fit accounts for.
+  // `factors` (null: the defaults) picks what the shared fit accounts for;
+  // `terms` adds the optional gravity load and servo deadband parameters.
   calibrate: (
     dataset: string,
     name: string,
     maxEvaluations: number,
     perJoint?: { maxEvaluations: number },
     factors?: string[] | null,
+    terms?: { fitGravity?: boolean; fitDeadband?: boolean },
   ) =>
     fetch("/api/calibrate", {
       method: "POST",
@@ -386,6 +792,8 @@ export const api = {
         max_evaluations: maxEvaluations,
         ...(perJoint ? { per_joint: true, per_joint_max_evaluations: perJoint.maxEvaluations } : {}),
         ...(factors ? { factors } : {}),
+        ...(terms?.fitGravity ? { fit_gravity: true } : {}),
+        ...(terms?.fitDeadband ? { fit_deadband: true } : {}),
       }),
     }).then((r) => json<{ job_id: string }>(r)),
   factors: () => fetch("/api/factors").then((r) => json<FactorRegistry>(r)),
@@ -403,6 +811,13 @@ export const api = {
     fetch(
       `/api/cross?${q({ datasets: datasets.join(","), locks: locks.join(","), n_train: nTrain, n_eval: nEval })}`,
     ).then((r) => json<CrossMatrix>(r)),
+  dashboard: () => fetch("/api/dashboard").then((r) => json<Dashboard>(r)),
+  // A lock that was never checked (or a server without the history store)
+  // answers 404; the fleet view shows that as an empty history.
+  history: (lock: string) =>
+    fetch(`/api/history/${encodeURIComponent(lock)}`).then((r) =>
+      r.status === 404 ? ({ lock, entries: [], trend: null } satisfies LockHistory) : json<LockHistory>(r),
+    ),
   // Zip of the lock as a standalone MJCF (model, sidecar, scene, meshes).
   exportZipUrl: (lock: string) => `/api/locks/${encodeURIComponent(lock)}/export.zip`,
   // ---- cameras ----
@@ -419,8 +834,48 @@ export const api = {
     fetch(
       `/api/camera/overlay?${q(lock ? { dataset, camera, episode, frame, lock } : { dataset, camera, episode, frame })}`,
     ).then((r) => json<CameraOverlay>(r)),
+  // ---- scene ----
+  scene: (lock: string) =>
+    fetch(`/api/scene?${q({ lock })}`).then((r) => json<{ lock: string; scene: SceneFit | null }>(r)),
+  sceneFit: (dataset: string, lock: string) =>
+    fetch("/api/scene/fit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dataset, lock }),
+    }).then((r) => json<SceneFit & { path: string }>(r)),
+  sceneView: (dataset: string, camera: string, episode: number, frame: number, lock: string) =>
+    fetch(`/api/scene/view?${q({ dataset, camera, episode, frame, lock })}`).then((r) => json<SceneView>(r)),
+  // ---- objects ----
+  objects: (lock: string) =>
+    fetch(`/api/objects?${q({ lock })}`).then((r) => json<{ lock: string; objects: ObjectsFit | null }>(r)),
+  objectsFit: (dataset: string, lock: string, camera?: string) =>
+    fetch("/api/objects/fit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(camera ? { dataset, lock, camera } : { dataset, lock }),
+    }).then((r) => json<{ job_id: string }>(r)),
+  objectsTrack: (dataset: string, episode: number, lock: string) =>
+    fetch(`/api/objects/track?${q({ dataset, episode, lock })}`).then((r) => json<ObjectTrack>(r)),
   jobEvents: (jobId: string) => new EventSource(`/api/jobs/${jobId}/events`),
   cancelJob: (jobId: string) => fetch(`/api/jobs/${jobId}/cancel`, { method: "POST" }).then((r) => json(r)),
+  // ---- policy ----
+  policies: (lock: string) =>
+    fetch(`/api/policy?${q({ lock })}`).then((r) => json<{ lock: string; policies: PolicyInfo[] }>(r)),
+  policyTrain: (dataset: string, lock: string, epochs = 200) =>
+    fetch("/api/policy/train", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dataset, lock, epochs }),
+    }).then((r) => json<{ job_id: string }>(r)),
+  policyEvaluate: (dataset: string, lock: string, mode: PolicyMode, robots?: string[]) =>
+    fetch("/api/policy/evaluate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dataset, lock, mode, ...(robots ? { robots } : {}) }),
+    }).then((r) => json<{ job_id: string }>(r)),
+  policyResults: (lock: string) => fetch(`/api/policy/results?${q({ lock })}`).then((r) => json<PolicyResults>(r)),
+  policyViewer: (dataset: string, lock: string, episode: number, mode: PolicyMode, robots = "default,lock") =>
+    fetch(`/api/policy/viewer?${q({ dataset, lock, episode, mode, robots })}`).then((r) => json<PolicyViewer>(r)),
 };
 
 // antares.lock.slug(dataset) plus a timestamp, so a run from the UI never

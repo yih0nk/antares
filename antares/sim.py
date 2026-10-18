@@ -36,6 +36,9 @@ GRIPPER_INDEX = JOINTS.index("gripper")
 
 MODEL_PATH: Path = Path(__file__).resolve().parent / "assets" / "so101" / "so101.xml"
 
+#: |gravity| in the stock MJCF (m/s^2); ``gravity_scale`` multiplies it.
+STANDARD_GRAVITY = 9.81
+
 # Physics step the MJCF was tuned for; replay picks a substep count so the
 # effective timestep stays close to this.
 BASE_TIMESTEP = 0.005
@@ -100,6 +103,20 @@ class SimParams:
     frictionloss: ParamValue = 0.052
     latency_frames: ParamValue = 0  # command delay in dataset frames (>= 0)
     forcerange: ParamValue = 2.94  # actuator force limit, symmetric (N*m)
+    #: Gravity load the servos feel, as a fraction of the MJCF's link weights.
+    #: The position servo's static error under load is about ``gravity_scale *
+    #: g(q) / kp``, so this sets how much the arm sags in a given pose
+    #: independently of how fast ``kp`` makes it track. 1.0 is the stock model.
+    #: Shared by all joints (it scales the gravity vector).
+    gravity_scale: ParamValue = 1.0
+    #: Position-error deadband of the servo (rad, >= 0): within it the servo
+    #: pushes no torque, past it the gain acts on the excess. Lumps the
+    #: STS3215's firmware deadzone and its gearbox backlash, which sit inside
+    #: the loop because the encoder reads the output shaft. A held arm then
+    #: rests at the edge of the band on the side gravity pulls it to, and a
+    #: moving one trails by it, so the error flips sign with the motion. 0 is
+    #: the stock smooth actuator.
+    deadband: ParamValue = 0.0
     extra: tuple[tuple[str, ParamValue], ...] = ()
 
     def __post_init__(self) -> None:
@@ -111,6 +128,13 @@ class SimParams:
                 raise ValueError(f"{k!r} is a built-in parameter, not an extra factor")
         if np.any(self.per_joint("latency_frames") < 0):
             raise ValueError("latency_frames must be >= 0")
+        g = self.per_joint("gravity_scale")
+        if np.any(g != g[0]):
+            raise ValueError("gravity_scale is shared by all joints; per-joint values must be equal")
+        if g[0] < 0:
+            raise ValueError("gravity_scale must be >= 0")
+        if np.any(self.per_joint("deadband") < 0):
+            raise ValueError("deadband must be >= 0")
 
     def __getattr__(self, name: str) -> Any:
         # Only reached when normal lookup fails: extra factor values read like fields.
@@ -135,9 +159,11 @@ class SimParams:
 
         Uses the first actuator and dof (the SO-101 shares one ``sts3215``
         class across all six). The model cannot carry command latency, so
-        it is passed in (default 0).
+        it is passed in (default 0). ``gravity_scale`` is the model's gravity
+        relative to :data:`STANDARD_GRAVITY`.
         """
         return cls(
+            gravity_scale=float(np.linalg.norm(model.opt.gravity)) / STANDARD_GRAVITY,
             kp=float(model.actuator_gainprm[0, 0]),
             kv=float(-model.actuator_biasprm[0, 2]),
             damping=float(model.dof_damping[0]),
@@ -193,11 +219,22 @@ class SimParams:
 
     def to_dict(self) -> dict[str, Any]:
         """Scalars stay scalars; per-joint values become lists. Extras follow
-        the built-ins under their own names."""
+        the built-ins under their own names.
+
+        ``gravity_scale`` and ``deadband`` are left out at their scalar
+        defaults (1.0 and 0), so locks fitted without them serialize exactly
+        as before; in per-joint form they are always written, so
+        :meth:`broadcast` round-trips through :meth:`from_dict`.
+        """
         out: dict[str, Any] = {}
-        for k in self.names():
-            v = getattr(self, k)
-            out[k] = list(v) if isinstance(v, tuple) else v
+        for n in self.names():
+            v = getattr(self, n)
+            if isinstance(v, tuple):
+                out[n] = list(v)
+            elif (n == "gravity_scale" and v == 1.0) or (n == "deadband" and v == 0.0):
+                continue
+            else:
+                out[n] = v
         return out
 
     @classmethod
@@ -449,6 +486,11 @@ class Arm:
         #: Original model values that added factors scale (see antares.factors).
         self._factor_base: dict[Any, np.ndarray] = {}
         self._extras_applied: set[str] = set()
+        # Unit-length-of-9.81 gravity, so gravity_scale=1 is the stock model
+        # whatever gravity an exported model was baked with.
+        g = self.model.opt.gravity.copy()
+        norm = float(np.linalg.norm(g))
+        self._base_gravity = g / norm * STANDARD_GRAVITY if norm > 0 else np.array([0.0, 0.0, -STANDARD_GRAVITY])
         self._limit_forces()
         if params is None:
             params = self.default_params(from_model=True)
@@ -580,6 +622,7 @@ class Arm:
             m.dof_damping[d] = params.per_joint("damping", n)
             m.dof_armature[d] = params.per_joint("armature", n)
             m.dof_frictionloss[d] = params.per_joint("frictionloss", n)
+        m.opt.gravity[:] = self._base_gravity * params.per_joint("gravity_scale", n)[0]
         self._apply_extras(params)
         mujoco.mj_setConst(m, self.data)  # ~20 us; uses self.data as scratch
         self.params = params
@@ -739,31 +782,54 @@ class Arm:
         try:
             mujoco.mj_resetData(m, d)
             step = mujoco.mj_step
+            a, qi = self.actuator_ids, self.qpos_ids
             if self._identity_map:
                 d.qpos[:] = q0
                 d.qvel[:] = 0.0
                 d.ctrl[:] = ctrl[0]
-                mujoco.mj_forward(m, d)
-                sim_q[0] = d.qpos
-                qpos = d.qpos
-                dctrl = d.ctrl
-                for t in range(1, T):
-                    dctrl[:] = ctrl[t]
-                    step(m, d, n_sub)
-                    sim_q[t] = qpos
             else:
-                a, qi = self.actuator_ids, self.qpos_ids
                 self._set_q(d, q0)
                 d.qvel[:] = 0.0
                 # Actuators no column drives hold their joint where it starts.
                 d.ctrl[:] = 0.0
                 d.ctrl[a] = ctrl[0]
-                mujoco.mj_forward(m, d)
-                sim_q[0] = d.qpos[qi]
+            mujoco.mj_forward(m, d)
+            qpos = d.qpos
+            dctrl = d.ctrl
+            sim_q[0] = qpos if self._identity_map else qpos[qi]
+            band = self.params.per_joint("deadband", nq)
+            if not np.any(band):
+                if self._identity_map:
+                    for t in range(1, T):
+                        dctrl[:] = ctrl[t]
+                        step(m, d, n_sub)
+                        sim_q[t] = qpos
+                else:
+                    for t in range(1, T):
+                        dctrl[a] = ctrl[t]
+                        step(m, d, n_sub)
+                        sim_q[t] = qpos[qi]
+            else:
+                # The position actuator pushes kp * (ctrl - q); feeding it
+                # q + shrink(target - q) makes that kp * shrink(error). Updated
+                # every physics substep, so the band is exact, not per frame.
+                # Only the joints with a band are touched: the others keep
+                # their exact command, as on the plain path above. This is
+                # the slow path (a Python loop per substep); a zero band
+                # everywhere, the default, takes the C-side multi-step above.
+                idx = np.flatnonzero(band > 0)
+                lo, hi, band = self._ctrl_lo[idx], self._ctrl_hi[idx], band[idx]
+                ai, qii = a[idx], qi[idx]
                 for t in range(1, T):
-                    d.ctrl[a] = ctrl[t]
-                    step(m, d, n_sub)
-                    sim_q[t] = d.qpos[qi]
+                    target = ctrl[t]
+                    dctrl[a] = target
+                    want = target[idx]
+                    for _ in range(n_sub):
+                        q = qpos[qii]
+                        e = want - q
+                        dctrl[ai] = np.clip(q + np.sign(e) * np.maximum(np.abs(e) - band, 0.0), lo, hi)
+                        step(m, d)
+                    sim_q[t] = qpos[qi]
         finally:
             m.opt.timestep = old_dt
         return sim_q

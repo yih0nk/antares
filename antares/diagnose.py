@@ -6,9 +6,17 @@ but instead of searching the parameters from scratch it searches one
 *change* per parameter on top of the lock: a factor on each of ``kp``,
 ``kv``, ``damping``, ``armature`` and ``frictionloss`` (x1/4 to x4,
 log-uniform) and a shift of whole frames on ``latency_frames``. A per-joint
-lock keeps its per-joint shape; every joint gets the same change. The search
-starts at "no change" for each of the most promising latency shifts, so a
-parameter only moves when the new data asks for it.
+lock keeps its per-joint shape; every joint gets the same change.
+
+The search prefers few, small changes. It minimizes the refit error plus a
+cost per change (:func:`complexity`), so a factor has to earn its size,
+and afterwards drops any kept change that lowers the error by less than
+:data:`STEP_GAIN_DEG`. Without that, a free search over all six can trade
+one frame of lag for a large velocity-gain swing that mimics it, or pick up
+a small gain from parameters pulling against each other on a recording
+where nothing changed. Latency is a handful of whole frames, so each shift
+is scored first and the factors are refitted by CMA-ES for the most
+promising few.
 
 The refit runs on half of the fresh episodes and both the lock and the
 refit are scored on the other half, so the gap it closes is real and not
@@ -59,6 +67,16 @@ FIELDS: tuple[str, ...] = (*FACTOR_RANGE, "latency_frames")
 #: Latency shifts (best first, by the scan with no other change) whose
 #: factors are each refitted.
 SHIFT_CANDIDATES = 3
+#: What a change costs in the search, in degrees of refit error: per unit of
+#: |ln factor| for the scaled parameters (x2 costs 0.14 deg, x3 costs 0.22),
+#: and per frame of latency shift. Lag is kept cheap on purpose: a whole
+#: frame is the most specific explanation, and on the real arm a large
+#: velocity-gain swing can otherwise stand in for it.
+COMPLEXITY_DEG = 0.2
+LATENCY_COMPLEXITY_DEG = 0.01
+#: A kept change that lowers the refit error by less than this (degrees) is
+#: dropped after the search.
+STEP_GAIN_DEG = 0.05
 #: A parameter is a cause when changing it alone recovers this share of the gap.
 CAUSE_FRACTION = 0.2
 #: A refit that improves on the lock by less than this (degrees) is noise.
@@ -66,8 +84,15 @@ MIN_GAP_DEG = 0.05
 #: Below this share of the excess error recovered, the drift is reported as
 #: something the dynamics parameters cannot explain.
 EXPLAINED_FRACTION = 0.5
-#: Smallest refit budget: the latency scan plus a few CMA-ES evaluations.
-MIN_EVALUATIONS = 10
+#: With no change kept, a lock this close to its reference (degrees, or this
+#: share of the reference) is reported as unchanged rather than unexplained.
+UNCHANGED_EXCESS_DEG = 0.1
+UNCHANGED_EXCESS_FRACTION = 0.15
+#: Evaluations held back from the CMA-ES search for the prune: one per kept
+#: change per pass, at most two passes over the six fields.
+PRUNE_RESERVE = 2 * len(FIELDS) + 1
+#: Smallest refit budget: the latency scan, the prune reserve and a little more.
+MIN_EVALUATIONS = 20
 #: A factor this close to 1 is "no change" (it would print as +0%).
 NEUTRAL_TOL = 0.005
 
@@ -127,6 +152,17 @@ def effective_shift(shift: int, params) -> int:
     """The latency shift :func:`antares.synth.worn` really applies to ``params``:
     the same on every joint, limited so none goes below zero."""
     return max(int(shift), -int(np.min(np.asarray(params.latency_frames))))
+
+
+def complexity(change: Mapping[str, float]) -> float:
+    """What ``change`` costs in the search, in degrees (see :data:`COMPLEXITY_DEG`)."""
+    cost = 0.0
+    for f, v in change.items():
+        if f == "latency_frames":
+            cost += LATENCY_COMPLEXITY_DEG * abs(int(v))
+        else:
+            cost += COMPLEXITY_DEG * abs(math.log(float(v)))
+    return cost
 
 
 # --------------------------------------------------------------------------
@@ -199,6 +235,17 @@ class Diagnosis:
         return self.stale_deg - self.reference_deg
 
     @property
+    def unchanged(self) -> bool:
+        """True when the lock is still about as good as when it was fitted
+        (within :data:`UNCHANGED_EXCESS_DEG`, or :data:`UNCHANGED_EXCESS_FRACTION`
+        of its reference) and the refit does not improve on it by more than
+        :data:`MIN_GAP_DEG` held out, whatever small changes it kept."""
+        if self.excess_deg is None or self.explained:
+            return False
+        tol = max(UNCHANGED_EXCESS_DEG, UNCHANGED_EXCESS_FRACTION * self.reference_deg)
+        return self.excess_deg <= tol and self.gap_deg <= MIN_GAP_DEG
+
+    @property
     def recovered(self) -> float | None:
         """Share of the excess error the refit removes (1.0 = all of it);
         None when the lock has no reference to measure the excess against."""
@@ -251,6 +298,12 @@ class Diagnosis:
         )
         if self.recovered is None:
             return f"{head}; the lock carries no held-out score, so the drift cannot be judged"
+        if self.unchanged:
+            return (
+                f"{head}; no change found: refitting improves the held-out error by less than "
+                f"{MIN_GAP_DEG:g} deg, and the lock is {abs(self.excess_deg):.3f} deg "
+                f"{'above' if self.excess_deg >= 0 else 'below'} its own reference"
+            )
         if not self.explained:
             return (
                 f"{head}; not explained by the sim's dynamics parameters "
@@ -282,6 +335,7 @@ class Diagnosis:
             "excess_deg": _json_float(self.excess_deg),
             "recovered": _json_float(self.recovered),
             "explained": bool(self.explained),
+            "unchanged": bool(self.unchanged),
             "causes": [c.name for c in self.causes],
             "pinned": None if self.pinned is None else [str(p) for p in self.pinned],
             "unpinned_causes": [c.name for c in self.unpinned_causes],
@@ -320,7 +374,7 @@ def diagnose(
     episodes: Sequence[Episode],
     lock: Any,
     simulate: Callable[..., Any] | None = None,
-    max_evaluations: int = 240,
+    max_evaluations: int = 300,
     sigma0: float = 0.15,
     seed: int = 0,
     dataset: str | None = None,
@@ -362,16 +416,18 @@ def diagnose(
 
     evaluations = 0
     best: dict[str, float] = neutral()
-    best_value = math.inf
+    best_value = math.inf  # error + complexity, what the search minimizes
+    best_error = math.inf  # the refit error of ``best``, in degrees
 
     def objective(change: Mapping[str, float]) -> float:
-        nonlocal evaluations, best, best_value
-        _, value = _safe_score(apply_change(params, change), refit_eps, simulate)
+        nonlocal evaluations, best, best_value, best_error
+        _, error = _safe_score(apply_change(params, change), refit_eps, simulate)
+        value = error + complexity(change)
         evaluations += 1
         if value < best_value:
-            best, best_value = dict(change), value
+            best, best_value, best_error = dict(change), value, error
         if on_progress is not None:
-            on_progress(evaluations, best_value)
+            on_progress(evaluations, best_error)
         return value
 
     # Latency is a handful of whole frames, which CMA-ES steps over poorly,
@@ -398,7 +454,7 @@ def diagnose(
     for i, start in enumerate(candidates):
         if stop():
             break
-        budget = (max_evaluations - evaluations) // (len(candidates) - i)
+        budget = (max_evaluations - PRUNE_RESERVE - evaluations) // (len(candidates) - i)
         if budget < 1:
             continue
         shift = start["latency_frames"]
@@ -429,6 +485,34 @@ def diagnose(
             if len(values) != len(xs):
                 break
             es.tell(xs, values)
+
+    # Prune: drop a kept change while the unpenalized refit error rises by
+    # less than STEP_GAIN_DEG without it, smallest cost first. What is left
+    # is the fewest changes that still explain the recording. A factor
+    # within NEUTRAL_TOL of 1 is snapped to exactly 1. The prune spends the
+    # evaluations held back from the search (counted, reported, cancellable)
+    # and stops when the budget is used up.
+    best = {f: (neutral()[f] if _is_neutral(f, v) else v) for f, v in best.items()}
+    kept_error = best_error
+    while not stop() and evaluations < max_evaluations:
+        costs = []
+        for f in FIELDS:
+            if _is_neutral(f, best[f]):
+                continue
+            if stop() or evaluations >= max_evaluations:
+                break
+            trial = {**best, f: neutral()[f]}
+            _, trial_error = _safe_score(apply_change(params, trial), refit_eps, simulate)
+            evaluations += 1
+            if on_progress is not None:
+                on_progress(evaluations, kept_error)
+            costs.append((trial_error - kept_error, f, trial, trial_error))
+        if not costs:
+            break
+        cost, f, trial, trial_error = min(costs, key=lambda t: (t[0], t[1]))
+        if cost >= STEP_GAIN_DEG:
+            break
+        best, kept_error = trial, trial_error
 
     stale_report, stale = _safe_score(params, held_out, simulate)
     refit_params = apply_change(params, best)
@@ -465,6 +549,9 @@ def diagnose(
 
 __all__ = [
     "CAUSE_FRACTION",
+    "COMPLEXITY_DEG",
+    "LATENCY_COMPLEXITY_DEG",
+    "SHIFT_CANDIDATES",
     "EXPLAINED_FRACTION",
     "FACTOR_RANGE",
     "FIELDS",
@@ -473,7 +560,10 @@ __all__ = [
     "MIN_GAP_DEG",
     "NEUTRAL_TOL",
     "PENALTY",
-    "SHIFT_CANDIDATES",
+    "STEP_GAIN_DEG",
+    "complexity",
+    "UNCHANGED_EXCESS_DEG",
+    "UNCHANGED_EXCESS_FRACTION",
     "Diagnosis",
     "ParamChange",
     "apply_change",

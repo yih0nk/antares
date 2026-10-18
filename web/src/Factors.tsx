@@ -48,7 +48,7 @@ export function Factors({ selected, onChange, disabled = false }: Props) {
         ))}
       </ul>
       <p className="muted small">Also fitted with per-joint refinement or sensor calibration:{" "}
-        {reg.factors.filter((f) => !f.stages.includes("shared")).map((f) => f.label.toLowerCase()).join(", ")}.
+        {reg.factors.filter((f) => f.stages.length > 0 && !f.stages.includes("shared")).map((f) => f.label.toLowerCase()).join(", ")}.
       </p>
       <p className="muted small">Not modelled yet: {reg.not_modelled.map((u) => u.label.toLowerCase()).join(", ")}.
         Add your own factor with a TOML file (see <code>antares factors</code>).

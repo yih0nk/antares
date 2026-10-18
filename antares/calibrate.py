@@ -126,6 +126,17 @@ PER_JOINT_SPACE: dict[str, tuple[float, float, str]] = {
     **factors.space("per_joint", per_joint=True),
 }
 
+#: Optional shared dimension for the arm's gravity load (see
+#: :attr:`antares.sim.SimParams.gravity_scale`), searched only when
+#: ``calibrate(fit_gravity=True)``. 0 is a weightless arm, 2 a doubled load.
+GRAVITY_SPACE: dict[str, tuple[float, float, str]] = factors.space("shared", factors=("gravity_scale",))
+
+#: Optional servo deadband (rad; see :attr:`antares.sim.SimParams.deadband`),
+#: searched only when ``calibrate(fit_deadband=True)``: shared in the shared
+#: stage, per joint in the per-joint stage. 3 degrees is well past the
+#: STS3215's spec'd deadzone plus gear backlash (about 0.5 degrees).
+DEADBAND_SPACE: dict[str, tuple[float, float, str]] = factors.space("shared", factors=("deadband",))
+
 DIMS: tuple[str, ...] = tuple(SPACE)
 N_DIMS = len(DIMS)
 
@@ -272,8 +283,8 @@ def spaces_for(
     names and any bound overrides; ``fit_factors`` picks the shared stage's
     factors (default: those :mod:`antares.factors` fits by default) and
     ``per_joint_factors`` the per-joint stage's (default: the shared ones
-    plus the per-joint defaults). With nothing given these are
-    :data:`SHARED` and :data:`PER_JOINT`.
+    that can take one value per joint, plus the per-joint defaults). With
+    nothing given these are :data:`SHARED` and :data:`PER_JOINT`.
     """
     if robot is None and fit_factors is None and per_joint_factors is None:
         return SHARED, PER_JOINT
@@ -281,12 +292,43 @@ def spaces_for(
     overrides = dict(robot.bounds) if robot is not None else {}
     shared_names = tuple(fit_factors) if fit_factors is not None else factors.names("shared")
     if per_joint_factors is None:
-        per_joint_factors = shared_names + tuple(n for n in factors.names("per_joint") if n not in shared_names)
+        per_joint_factors = tuple(n for n in shared_names if factors.get(n).per_joint_ok) + tuple(
+            n for n in factors.names("per_joint") if n not in shared_names
+        )
     shared = SearchSpace(factors.space("shared", factors=shared_names, overrides=overrides), False, joints)
     per_joint = SearchSpace(
         factors.space("per_joint", per_joint=True, factors=tuple(per_joint_factors), overrides=overrides), True, joints
     )
     return shared, per_joint
+
+
+def optional_factors(
+    fit_factors: Sequence[str] | None = None,
+    per_joint_factors: Sequence[str] | None = None,
+    fit_gravity: bool = False,
+    fit_deadband: bool = False,
+) -> tuple[tuple[str, ...] | None, tuple[str, ...] | None]:
+    """Fold the ``fit_gravity`` / ``fit_deadband`` switches into a factor selection.
+
+    ``gravity_scale`` joins the shared stage only (it is one value for the
+    whole arm); ``deadband`` joins both stages. A selection left ``None``
+    stays ``None`` when neither switch is on, so the default spaces are kept.
+    """
+    add = tuple(n for n, on in (("gravity_scale", fit_gravity), ("deadband", fit_deadband)) if on)
+    if not add:
+        return (None if fit_factors is None else tuple(fit_factors),
+                None if per_joint_factors is None else tuple(per_joint_factors))
+    shared = tuple(fit_factors) if fit_factors is not None else factors.names("shared")
+    shared += tuple(n for n in add if n not in shared)
+    per_joint = None if per_joint_factors is None else tuple(per_joint_factors)
+    if per_joint is not None and fit_deadband and "deadband" not in per_joint:
+        per_joint += ("deadband",)
+    return shared, per_joint
+
+
+def spaces(fit_gravity: bool = False, fit_deadband: bool = False) -> tuple[SearchSpace, SearchSpace]:
+    """``(shared, per_joint)`` search spaces with the optional terms added."""
+    return spaces_for(None, *optional_factors(None, None, fit_gravity, fit_deadband))
 
 
 def encode(params: SimParams, space: SearchSpace = SHARED) -> np.ndarray:
@@ -536,7 +578,9 @@ def _seeds_from_dict(s: Mapping[str, Any]) -> dict:
 # --------------------------------------------------------------------------
 
 
-def default_simulate(command_map: Any | None = None, robot: str | None = None) -> SimulateFn:
+def default_simulate(
+    command_map: Any | None = None, robot: str | None = None, unit_map: Any | None = None
+) -> SimulateFn:
     """Build one MuJoCo :class:`antares.sim.Arm` and wrap it as a ``SimulateFn``.
 
     The arm is reused across calls (``apply`` is cheap); the real trajectory
@@ -544,11 +588,13 @@ def default_simulate(command_map: Any | None = None, robot: str | None = None) -
     ``command_map`` (an :class:`antares.sim.CommandMap`) corrects every
     replay's commands, e.g. a lock's sensor calibration held fixed.
     ``robot`` picks the model from :data:`antares.robots.REGISTRY` (default
-    SO-101).
+    SO-101). ``unit_map`` (an :class:`antares.sim.UnitMap`) replaces the
+    model-derived map, e.g. the arm's own LeRobot calibration
+    (:mod:`antares.lerobot_calib`).
     """
     from antares.sim import Arm
 
-    arm = Arm(command_map=command_map, robot=robot)
+    arm = Arm(command_map=command_map, robot=robot, unit_map=unit_map)
     real_cache: dict[int, tuple[Episode, np.ndarray]] = {}
 
     def simulate(params: SimParams, episode: Episode) -> tuple[np.ndarray, np.ndarray]:
@@ -773,6 +819,8 @@ def calibrate(
     seeds: Sequence[int] | None = None,
     fit_factors: Sequence[str] | None = None,
     per_joint_factors: Sequence[str] | None = None,
+    fit_gravity: bool = False,
+    fit_deadband: bool = False,
 ) -> CalibrationResult:
     """Fit :class:`SimParams` to ``train`` episodes; report on ``eval`` episodes.
 
@@ -783,6 +831,11 @@ def calibrate(
     ``per_joint_max_evaluations`` evaluations, warm-started from the shared
     optimum with step size ``per_joint_sigma0``; ``per_joint_popsize`` of
     None takes CMA-ES's default for that dimensionality.
+
+    ``fit_gravity=True`` adds ``gravity_scale`` to the shared stage (see
+    :func:`spaces`); the per-joint stage keeps the shared value.
+    ``fit_deadband=True`` adds the servo ``deadband``: one value in the
+    shared stage, one per joint in the per-joint stage.
 
     With ``n_seeds > 1`` (or an explicit ``seeds`` list) the shared stage
     runs once per seed (``seed``, ``seed + 100``, ``seed + 200``, ...), each
@@ -827,6 +880,7 @@ def calibrate(
         seed_list = [seed + 100 * i for i in range(n_seeds)]
     if simulate is None:
         simulate = default_simulate()
+    fit_factors, per_joint_factors = optional_factors(fit_factors, per_joint_factors, fit_gravity, fit_deadband)
     robot = robot_of(simulate)
     so_arm = robot is None or robot.default_params == "sts3215"
     if start is None:
@@ -967,6 +1021,10 @@ __all__ = [
     "PINNED_RATIO",
     "PINNED_LATENCY_FRAMES",
     "SearchSpace",
+    "GRAVITY_SPACE",
+    "DEADBAND_SPACE",
+    "spaces",
+    "optional_factors",
     "SHARED",
     "PER_JOINT",
     "SimulateFn",

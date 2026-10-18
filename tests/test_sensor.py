@@ -286,3 +286,20 @@ def test_per_joint_fit_is_refit_in_its_own_space(monkeypatch):
     assert [s["name"] for s in out.result.stages] == \
         ["shared", "per_joint", "command_map", "per_joint", "command_map"]
     assert [s["name"] for s in out.dynamics_only.stages] == ["shared", "per_joint", "per_joint", "per_joint"]
+
+
+def test_calibrate_with_sensor_starts_from_the_prior():
+    """A prior command map is where round 0 and the first map fit start: with
+    the true map as prior and the true dynamics, the fit has nothing left to
+    find and the recorded command_map stages start at the prior."""
+    eps = make_episodes(3, seed=2)
+    out = calibrate_with_sensor(
+        eps[:2], eps[2:], simulate=toy_simulate, start=TRUE_PARAMS, max_evaluations=4, rounds=1,
+        fair_baseline=False, prior=TRUE_MAP,
+    )
+    for j in FIT_JOINTS:
+        assert out.command_map.bias[j] == pytest.approx(TRUE_MAP.bias[j], abs=0.05)
+        assert out.command_map.gain[j] == pytest.approx(TRUE_MAP.gain[j], abs=0.005)
+    assert out.result.eval_score < 0.05
+    # the dynamics-only side is the fit under the prior, not under identity
+    assert out.dynamics_only.eval_score < 0.05

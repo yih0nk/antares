@@ -16,13 +16,10 @@ and saves them next to the lock as ``locks/<name>.dr.json``.
 
 from __future__ import annotations
 
-import json
 import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 
@@ -38,7 +35,7 @@ from antares.calibrate import (
     default_simulate,
 )
 from antares.data import Episode
-from antares.lock import LOCK_DIR, slug
+from antares.lock import JsonFile, now_iso, slug
 
 DR_SUFFIX = ".dr.json"
 
@@ -202,10 +199,6 @@ class ParamRange:
         )
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
 def _range_from_values(name: str, nominal: float, values: Sequence[float], percentiles) -> ParamRange:
     scale = SPACE[name][2]
     vals = np.asarray(values, dtype=np.float64)
@@ -220,8 +213,10 @@ def _range_from_values(name: str, nominal: float, values: Sequence[float], perce
 
 
 @dataclass(frozen=True)
-class DRRanges:
+class DRRanges(JsonFile):
     """Per-parameter randomization ranges for one robot, with provenance."""
+
+    FILE_SUFFIX: ClassVar[str] = DR_SUFFIX
 
     name: str
     nominal: SimParams
@@ -235,7 +230,7 @@ class DRRanges:
     percentiles: tuple[float, float] = PERCENTILES
     fit_train_scores: tuple[float, ...] = ()
     fit_episodes: tuple[tuple[int, ...], ...] = ()
-    created_at: str = field(default_factory=_now_iso)
+    created_at: str = field(default_factory=now_iso)
     antares_version: str = __version__
 
     @classmethod
@@ -322,19 +317,6 @@ class DRRanges:
             antares_version=str(d.get("antares_version", "")),
         )
 
-    def default_path(self, lock_dir: Path = LOCK_DIR) -> Path:
-        return Path(lock_dir) / f"{self.name}{DR_SUFFIX}"
-
-    def save(self, path: Path | None = None) -> Path:
-        path = Path(path) if path is not None else self.default_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(self.to_dict(), indent=2, sort_keys=True) + "\n")
-        return path
-
-    @classmethod
-    def load(cls, path: Path | str) -> "DRRanges":
-        return cls.from_dict(json.loads(Path(path).read_text()))
-
 
 def _json_float(v: float) -> float | None:
     v = float(v)
@@ -373,6 +355,10 @@ def sample(ranges: DRRanges, rng: np.random.Generator | int | None, n: int) -> l
     Sets are drawn one at a time, so ``sample(r, rng, n)[:k]`` equals
     ``sample(r, rng_copy, k)``: drawing in a loop or in a batch gives the
     same sequence for the same generator state.
+
+    Only :data:`DIMS` are drawn; every other field (``forcerange``,
+    ``gravity_scale``, ``deadband``) comes from ``ranges.nominal``, so a lock
+    fitted with them keeps them in every draw.
     """
     rng = np.random.default_rng(rng)
     if n < 0:
@@ -386,7 +372,7 @@ def sample(ranges: DRRanges, rng: np.random.Generator | int | None, n: int) -> l
                 kwargs[dim] = int(rng.integers(int(r.lo), int(r.hi) + 1))
             else:
                 kwargs[dim] = float(10 ** rng.uniform(math.log10(r.lo), math.log10(r.hi)))
-        out.append(SimParams(**kwargs))
+        out.append(ranges.nominal.replace(**kwargs))
     return out
 
 

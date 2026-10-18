@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import io
 import base64
+import importlib
 import json
 import os
 import re
@@ -580,21 +581,40 @@ def command_map_from_lock(lock: dict):
     return CommandMap.from_dict(d)
 
 
+def unit_map_from_lock(lock: dict):
+    """The UnitMap a lock's ``calibration`` block (the follower's LeRobot
+    calibration, :mod:`antares.lerobot_calib`) was fitted with, or None for
+    a lock on the model-derived map."""
+    rec = lock.get("calibration")
+    if not rec:
+        return None
+    from antares.lerobot_calib import unit_map_from_record
+
+    model = getattr(get_arm(check_robot(lock.get("robot"))), "model", None)
+    return unit_map_from_record(rec, model)
+
+
 @contextmanager
-def _command_map(arm, cmap):
-    """Use ``cmap`` on the shared ``arm`` for the block, then restore identity
-    so callers that never set one keep the plain mapping."""
-    if cmap is None:
+def _command_map(arm, cmap, unit_map=None):
+    """Use ``cmap`` (and ``unit_map``, a lock's calibration-derived map) on
+    the shared ``arm`` for the block, then restore identity and the arm's
+    own map so callers that never set one keep the plain mapping."""
+    if cmap is None and unit_map is None:
         yield
         return
     from antares.sim import CommandMap
 
-    arm.command_map = cmap
+    prev_unit_map = getattr(arm, "unit_map", None)
+    if cmap is not None:
+        arm.command_map = cmap
+    if unit_map is not None:
+        arm.unit_map = unit_map
     try:
         yield
     finally:
-        n = getattr(arm, "n_joints", None)
-        arm.command_map = CommandMap.identity() if n in (None, 6) else CommandMap.identity(n)
+        arm.command_map = CommandMap.identity(getattr(arm, "n_joints", None) or 6)
+        if unit_map is not None:
+            arm.unit_map = prev_unit_map
 
 
 def lock_simulate(lock: dict):
@@ -603,12 +623,13 @@ def lock_simulate(lock: dict):
     has neither. For refits warm-started from a lock: the dynamics move, the
     sensor calibration and the model do not."""
     cmap = command_map_from_lock(lock)
+    unit_map = unit_map_from_lock(lock)
     robot = check_robot(lock.get("robot"))
-    if cmap is None and robot == DEFAULT_ROBOT:
+    if cmap is None and unit_map is None and robot == DEFAULT_ROBOT:
         return None
     from antares.calibrate import default_simulate
 
-    return default_simulate(cmap, robot=robot)
+    return default_simulate(cmap, robot=robot, **({"unit_map": unit_map} if unit_map is not None else {}))
 
 
 def mesh_dir(robot: str | None = None) -> Path:
@@ -621,11 +642,15 @@ def _rounded(a: np.ndarray) -> list:
     return np.round(np.asarray(a, dtype=np.float64), ROUND).tolist()
 
 
-def replay_episode(ds: Dataset, episode: int, params=None, command_map=None, robot: str | None = None) -> dict:
+def replay_episode(
+    ds: Dataset, episode: int, params=None, command_map=None, robot: str | None = None, unit_map=None
+) -> dict:
     """Real FK + sim replay for one episode. Angles in degrees, poses (T,nbody,7).
 
     ``command_map`` (a CommandMap, or None for identity) corrects the commands.
     ``robot`` overrides the model (default: the one for the dataset's family).
+    ``unit_map`` (a UnitMap, or None for the model's) is a lock's
+    calibration-derived map (``unit_map_from_lock``).
     """
     from antares.gap import tracking_error
 
@@ -634,7 +659,7 @@ def replay_episode(ds: Dataset, episode: int, params=None, command_map=None, rob
     if params is None:
         params = default_params(robot)
     arm = get_arm(robot)
-    with arm_lock(robot), _command_map(arm, command_map):
+    with arm_lock(robot), _command_map(arm, command_map, unit_map):
         arm.apply(params)
         real_q = np.asarray(arm.real_q(ep))
         sim_q = np.asarray(arm.replay(ep))
@@ -651,6 +676,7 @@ def replay_episode(ds: Dataset, episode: int, params=None, command_map=None, rob
         "body_names": body_names,
         "params": params.to_dict(),
         "command_map": None if command_map is None else command_map.to_dict(),
+        "unit_map": None if unit_map is None else unit_map.to_dict(),
         "real_q": _rounded(np.degrees(real_q)),
         "sim_q": _rounded(np.degrees(sim_q)),
         "real_poses": _rounded(real_poses),
@@ -845,10 +871,77 @@ def list_lock_dicts() -> list[dict]:
 
 
 def load_lock_dict(name: str, lock_dir: Path | str | None = None) -> dict:
+    name = resolve_lock_ref(name, lock_dir)  # @<robot> -> its active lock
     p = _lock_path(name, lock_dir)
     if not p.is_file():
         raise HTTPException(status_code=404, detail=f"no lock named {name!r}")
     return json.loads(p.read_text())
+
+
+# Robot registry (``LOCK_DIR/registry.json``): one id per physical robot, a
+# lineage of its locks and the active one. ``@<robot>`` stands for the
+# active lock wherever a lock name is accepted; every read goes through
+# ``resolve_lock_ref`` so an unregistered lock name passes through unchanged.
+
+
+def registry_path(lock_dir: Path | str | None = None) -> Path:
+    from antares.registry import registry_path as _rp
+
+    return _rp(lock_dir if lock_dir is not None else LOCK_DIR)
+
+
+def load_registry(lock_dir: Path | str | None = None):
+    """The registry in ``lock_dir`` (default LOCK_DIR); a missing file is empty."""
+    from antares.registry import Registry, RegistryError
+
+    try:
+        return Registry.load(registry_path(lock_dir))
+    except RegistryError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def resolve_lock_ref(ref: str, lock_dir: Path | str | None = None) -> str:
+    """A lock name (or path) passes through; ``@<robot>`` becomes the robot's
+    active lock name, 404 when the robot is unknown or has no active lock."""
+    from antares.registry import RegistryError, UnknownRobot, is_robot_ref
+
+    if not is_robot_ref(ref):
+        return ref
+    try:
+        return load_registry(lock_dir).resolve(ref)
+    except UnknownRobot as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RegistryError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+def register_lock(
+    robot_id: str,
+    lock: Any,
+    *,
+    activate: bool | None = None,
+    note: str | None = None,
+    max_regression: float | None = None,
+) -> dict:
+    """Register ``lock`` (a name, dict or RobotLock) for ``robot_id`` in
+    LOCK_DIR's registry, save, and return the ``RegistrationResult`` dict."""
+    from antares.registry import DEFAULT_MAX_REGRESSION, RegistryError
+
+    reg = load_registry()
+    try:
+        res = reg.register(
+            robot_id,
+            lock,
+            activate=activate,
+            note=note,
+            max_regression=DEFAULT_MAX_REGRESSION if max_regression is None else max_regression,
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RegistryError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    reg.save()
+    return res.to_dict()
 
 
 def save_lock(lock) -> Path:
@@ -875,11 +968,38 @@ def export_lock_xml(name: str) -> bytes:
         return export_mjcf(lock, Path(tmp) / f"{lock.name}.xml", bundle_assets=False).read_bytes()
 
 
-def export_lock_zip(name: str) -> bytes:
-    """``<name>/`` with the MJCF, sidecar, scene.xml and STL meshes, zipped."""
+def export_lock_zip(name: str, targets: list[str] | tuple[str, ...] = (), fps: float | None = None) -> bytes:
+    """``<name>/`` with the MJCF, sidecar, scene.xml and STL meshes, zipped,
+    plus each extra export target's files (``antares.export_targets.TARGETS``)."""
     from antares.export import export_zip
 
-    return export_zip(load_lock(name))
+    return export_zip(load_lock(name), targets=targets, fps=fps, lock_dir=LOCK_DIR)
+
+
+def export_lock_target(name: str, target: str, fps: float | None = None):
+    """One non-MJCF export target rendered for ``name`` (a ``TargetExport``);
+    DR ranges are read from ``LOCK_DIR/<name>.dr.json`` when present."""
+    from antares.export_targets import TargetExportError, render
+
+    try:
+        return render(load_lock(name), target, fps=fps, lock_dir=LOCK_DIR)
+    except TargetExportError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+def parse_export_targets(targets: str | None) -> list[str]:
+    """``?targets=`` of the zip route: ``all``, a comma list of targets, or empty."""
+    from antares.export_targets import TARGETS
+
+    if not targets:
+        return []
+    if targets == "all":
+        return list(TARGETS)
+    wanted = [t.strip() for t in targets.split(",") if t.strip()]
+    unknown = [t for t in wanted if t not in TARGETS]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"unknown export targets {unknown}; known: {list(TARGETS)} or all")
+    return wanted
 
 
 def lock_summary(lock: dict) -> dict:
@@ -988,6 +1108,7 @@ def run_drift(
     """Sliding-window refits of ``lock_name`` over ``ds``; saves and returns (DriftScan, path)."""
     from antares.drift import drift_scan
 
+    lock_name = resolve_lock_ref(lock_name)
     lock = load_lock(lock_name)
     path = _drift_path(lock_name)
     sim = simulate_for(dataset_robot(ds))
@@ -1166,6 +1287,8 @@ def job_status_dict(job: Job) -> dict:
             out["lock"] = job.lock
         if job.error is not None:
             out["error"] = job.error
+        if getattr(job, "registration", None) is not None:  # calibrate with robot_id
+            out["registration"] = job.registration
     return out
 
 
@@ -1186,6 +1309,8 @@ def run_calibration(
     per_joint: bool = False,
     per_joint_max_evaluations: int = 600,
     per_joint_sigma0: float | None = None,
+    fit_gravity: bool = False,
+    fit_deadband: bool = False,
     robot: str | None = None,
     on_progress: Callable[[Any], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
@@ -1194,6 +1319,9 @@ def run_calibration(
     n_seeds: int = 1,
     factors: list[str] | None = None,
     per_joint_factors: list[str] | None = None,
+    calibration_path: str | Path | None = None,
+    robot_id: str | None = None,
+    robot_type: str = "so101_follower",
 ) -> tuple[Any, dict, Path]:
     """Calibrate on ``ds``, save a lock, return (CalibrationResult, lock dict, path).
 
@@ -1213,6 +1341,14 @@ def run_calibration(
     ``factors``/``per_joint_factors`` choose which registered factors the
     shared and per-joint stages fit (see :mod:`antares.factors`); ``None``
     keeps the built-in lists.
+    ``fit_gravity`` adds ``gravity_scale`` to the shared stage and
+    ``fit_deadband`` the servo ``deadband`` to both stages.
+    ``calibration_path`` (a LeRobot calibration file) or ``robot_id`` (the
+    ``--robot.id`` LeRobot saved it under, with ``robot_type``) replaces the
+    model-derived unit map with the follower's own tick-to-angle map for
+    the replay and records it in the lock's ``calibration`` block
+    (:mod:`antares.lerobot_calib`). With ``fit_sensor`` the map fit starts
+    from that calibration's prior.
     """
     from antares.calibrate import calibrate, split_episodes
 
@@ -1221,12 +1357,27 @@ def run_calibration(
     if name is not None:
         _lock_path(name)  # validate the name before spending minutes fitting
     robot = check_robot(robot or dataset_robot(ds))
+    unit_map = cal_record = cal_prior = None
+    # An explicit file must exist; a bare robot id is looked up opportunistically.
+    calib = resolve_calibration(calibration_path, robot_id, robot_type, strict=calibration_path is not None)
+    if calib is not None:
+        from antares.lerobot_calib import calibration_record, command_map_prior, unit_map_from_calibration
+
+        calib_d, cal_path = calib
+        model = get_arm(robot).model
+        unit_map = unit_map_from_calibration(calib_d, model)
+        cal_prior = command_map_prior(calib_d, model)
+        cal_record = calibration_record(calib_d, model, path=cal_path, robot_id=robot_id, robot_type=robot_type)
     train, eval_ = split_episodes(ds.episodes, n_train, n_eval, seed=seed)
     extra: dict[str, Any] = {}
     if per_joint:
         extra = {"per_joint": True, "per_joint_max_evaluations": int(per_joint_max_evaluations)}
         if per_joint_sigma0 is not None:
             extra["per_joint_sigma0"] = float(per_joint_sigma0)
+    if fit_gravity:
+        extra["fit_gravity"] = True
+    if fit_deadband:
+        extra["fit_deadband"] = True
     if n_seeds > 1:
         extra["n_seeds"] = int(n_seeds)
     try:
@@ -1239,12 +1390,14 @@ def run_calibration(
     if fit_sensor:
         from antares.sensor import calibrate_with_sensor
 
-        if robot != DEFAULT_ROBOT:
+        if robot != DEFAULT_ROBOT or unit_map is not None:
             # The sensor fitter builds its own SO-101 arm by default; give it
-            # one of this model instead.
+            # one of this model (and of this arm's unit map) instead.
             from antares.sensor import sensor_simulate
 
-            extra["simulate"] = sensor_simulate(robot)
+            extra["simulate"] = sensor_simulate(robot, unit_map=unit_map)
+        if cal_prior is not None:
+            extra["prior"] = cal_prior
         out = calibrate_with_sensor(
             train,
             eval_,
@@ -1261,9 +1414,14 @@ def run_calibration(
             robot=robot,
             command_map={**out.command_map.to_dict(), "mode": sensor_mode},
             dynamics_only=out.dynamics_only.to_dict(),
+            **({"calibration": cal_record} if cal_record is not None else {}),
         )
         return out.result, lock.to_dict(), save_lock(lock)
     sim = simulate_for(robot)
+    if unit_map is not None:
+        from antares.calibrate import default_simulate
+
+        sim = default_simulate(robot=robot, unit_map=unit_map)
     if sim is not None:
         extra["simulate"] = sim
     result = calibrate(
@@ -1276,7 +1434,8 @@ def run_calibration(
         should_stop=should_stop,
         **extra,
     )
-    lock = build_lock(ds, train, result, name, robot=robot)
+    lock = build_lock(ds, train, result, name, robot=robot,
+                      **({"calibration": cal_record} if cal_record is not None else {}))
     path = save_lock(lock)
     return result, lock.to_dict(), path
 
@@ -1288,6 +1447,41 @@ def _factor_names(selection: list[str], stage: str) -> list[str] | None:
 
     out = factors.parse_selection(",".join(selection), stage)
     return None if out is None else list(out)
+def resolve_calibration(
+    calibration_path, robot_id: str | None, robot_type: str = "so101_follower", *, strict: bool = True
+):
+    """``(calibration, path)`` from an explicit LeRobot calibration file or from
+    the robot id LeRobot saved it under; None when neither is given. 404 when
+    the id has no file, 400 when the file does not parse.
+
+    With ``strict=False`` an id without a file is not an error: None comes
+    back and the caller proceeds on the model's unit map. ``calibrate`` uses
+    that, because ``robot_id`` also names the robot in the registry and a
+    registered robot need not have a LeRobot calibration on this machine."""
+    if calibration_path is None and not robot_id:
+        return None
+    from antares.lerobot_calib import calibration_dirs, find_calibration, load_calibration
+
+    path = Path(calibration_path) if calibration_path is not None else None
+    if path is None:
+        try:
+            path = find_calibration(robot_id, robot_type)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        if path is None and not strict:
+            return None
+        if path is None:
+            looked = ", ".join(str(d) for d in calibration_dirs(robot_type))
+            raise HTTPException(
+                status_code=404,
+                detail=f"no LeRobot calibration named {robot_id!r} for {robot_type} (looked in {looked})",
+            )
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail=f"no calibration file {path}")
+    try:
+        return load_calibration(path), path
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"{path}: {e}")
 
 
 def _job_worker(job: Job, req: "CalibrateRequest") -> None:
@@ -1314,10 +1508,18 @@ def _job_worker(job: Job, req: "CalibrateRequest") -> None:
             n_seeds=req.n_seeds,
             factors=req.factors,
             per_joint_factors=req.per_joint_factors,
+            fit_gravity=req.fit_gravity,
+            fit_deadband=req.fit_deadband,
+            calibration_path=req.calibration_path,
+            robot_id=req.robot_id,
+            robot_type=req.robot_type,
         )
         result_d = result.to_dict()
-        job.push({"type": "done", "lock": lock, "result": result_d})
-        job.finish("done", result=result_d, lock=lock)
+        extra: dict[str, Any] = {}
+        if req.robot_id:
+            extra["registration"] = register_lock(req.robot_id, lock, activate=req.activate)
+        job.push({"type": "done", "lock": lock, "result": result_d, **extra})
+        job.finish("done", result=result_d, lock=lock, **extra)
     except Exception as e:  # noqa: BLE001 - report to the client
         job_fail(job, e)
 
@@ -1347,6 +1549,7 @@ def run_dr(
         raise HTTPException(status_code=400, detail="n_fits must be >= 1")
     if n_train < 1:
         raise HTTPException(status_code=400, detail="n_train must be >= 1")
+    lock_name = resolve_lock_ref(lock_name)
     name = name or lock_name
     _dr_path(name)  # validate the name before spending time fitting
     lock = load_lock_dict(lock_name)
@@ -1492,7 +1695,7 @@ def run_check(
         return np.asarray(arm.real_q(ep)), np.asarray(arm.replay(ep))
 
     try:
-        with arm_lock(robot), _command_map(arm, command_map_from_lock(lock_d)):
+        with arm_lock(robot), _command_map(arm, command_map_from_lock(lock_d), unit_map_from_lock(lock_d)):
             return check(
                 ds.episodes,
                 lock_d,
@@ -1512,7 +1715,7 @@ def run_diagnose(
     lock: str | dict,
     *,
     last: int | None = None,
-    max_evaluations: int = 240,
+    max_evaluations: int = 300,
     seed: int = 0,
     should_stop: Callable[[], bool] | None = None,
     on_progress: Callable[[int, float], None] | None = None,
@@ -1711,6 +1914,31 @@ def datasets_validate(dataset: str = Query(...)) -> dict:
     }
 
 
+@app.get("/api/datasets/calibration-check")
+def datasets_calibration_check(
+    dataset: str = Query(...),
+    calibration_path: str | None = Query(None, description="a LeRobot calibration file"),
+    robot_id: str | None = Query(None, description="the --robot.id LeRobot saved the calibration under"),
+    robot_type: str = Query("so101_follower"),
+    robot: str | None = Query(None, description="override the sim model (default: the dataset's family)"),
+) -> dict:
+    """The model's assumed unit map against this arm's LeRobot calibration,
+    joint by joint (degrees at -100/0/+100, flagged over 2 deg). 400 when
+    neither ``calibration_path`` nor ``robot_id`` is given."""
+    from antares.lerobot_calib import calibration_check, file_sha256
+
+    calib = resolve_calibration(calibration_path, robot_id, robot_type)
+    if calib is None:
+        raise HTTPException(status_code=400, detail="give calibration_path or robot_id")
+    calib_d, path = calib
+    ds = get_dataset(dataset)
+    robot = check_robot(robot or dataset_robot(ds))
+    out = calibration_check(calib_d, get_arm(robot).model)
+    out.update(dataset=ds.repo_id, robot=robot, source=str(path), sha256=file_sha256(path),
+               robot_id=robot_id, robot_type=robot_type)
+    return out
+
+
 @app.post("/api/datasets/upload")
 def datasets_upload(
     file: UploadFile = File(..., description="a .zip of a LeRobot dataset directory, or one .parquet"),
@@ -1821,12 +2049,13 @@ def replay(
     robot: str | None = Query(None, description="override the sim model (default: the dataset's family)"),
 ) -> dict:
     ds = get_dataset(dataset)
-    params = cmap = None
+    params = cmap = unit_map = None
     if lock and not baseline:
         lock_d = load_lock_dict(lock)
         params = params_from_dict(lock_d["params"])
         cmap = command_map_from_lock(lock_d)
-    out = replay_episode(ds, episode, params, cmap, robot=robot)
+        unit_map = unit_map_from_lock(lock_d)
+    out = replay_episode(ds, episode, params, cmap, robot=robot, unit_map=unit_map)
     out["lock"] = lock if (lock and not baseline) else None
     return out
 
@@ -1924,18 +2153,39 @@ class CalibrateRequest(BaseModel):
     per_joint_max_evaluations: int = Field(600, ge=1)
     fit_sensor: bool = False
     sensor_mode: Literal["sim", "kinematic"] = "sim"
+    # Optional terms: the arm's gravity load (shared stage) and the servo
+    # deadband (both stages); see run_calibration.
+    fit_gravity: bool = False
+    fit_deadband: bool = False
     # Sim model override (registry name); default: the dataset's family.
     robot: str | None = None
     # Factors to fit (names, or "+x"/"-y" edits of the defaults); see
     # GET /api/factors. None keeps the built-in lists.
     factors: list[str] | None = None
     per_joint_factors: list[str] | None = None
+    # The physical robot's id (LeRobot's --robot.id, e.g. "arm_a"). Two effects:
+    # the follower's LeRobot calibration saved under it is used as the unit map
+    # when such a file exists, and the saved lock is registered for it in
+    # locks/registry.json and activated by the registry's rule.
+    robot_id: str | None = None
+    # A calibration file given explicitly (takes precedence over the lookup).
+    calibration_path: str | None = None
+    robot_type: str = "so101_follower"
+    # With robot_id: None applies the registry rule, True/False forces it.
+    activate: bool | None = None
 
 
 @app.post("/api/calibrate")
 def calibrate_start(req: CalibrateRequest) -> dict:
     if req.name is not None:
         _lock_path(req.name)  # validate early
+    if req.robot_id is not None:
+        from antares.registry import RegistryError, validate_robot_id
+
+        try:
+            validate_robot_id(req.robot_id)
+        except RegistryError as e:
+            raise HTTPException(status_code=400, detail=str(e))
     check_robot(req.robot)
     job = start_job("calibrate", req.dataset, _job_worker, req)
     return {"job_id": job.id}
@@ -1988,7 +2238,7 @@ class DRRequest(BaseModel):
 
 @app.post("/api/dr")
 def dr_start(req: DRRequest) -> dict:
-    lock_name = req.lock or _slug(req.dataset)
+    lock_name = resolve_lock_ref(req.lock or _slug(req.dataset))
     load_lock_dict(lock_name)  # 404 now rather than as a job error
     _dr_path(req.name or lock_name)
     job = Job(id=uuid.uuid4().hex[:12], dataset=req.dataset, kind="dr")
@@ -2027,22 +2277,44 @@ def _attachment(filename: str) -> dict[str, str]:
 
 
 @app.get("/api/locks/{name}/export")
-def lock_export(name: str) -> Response:
-    """Calibrated MJCF as a download. ``meshdir`` is the absolute package
-    assets dir; use ``export.zip`` for a self-contained bundle."""
+def lock_export(
+    name: str,
+    format: Literal["mjcf", "isaaclab", "maniskill", "mjlab", "json"] = Query("mjcf"),
+    fps: float | None = Query(None, gt=0, description="dataset fps for latency seconds"),
+) -> Response:
+    """Calibrated MJCF as a download (``format=mjcf``, the default; ``meshdir``
+    is the absolute package assets dir; use ``export.zip`` for a self-contained
+    bundle), or the main file of another export target: the Isaac Lab /
+    ManiSkill / mjlab Python config or the neutral ``.params.json``."""
+    name = resolve_lock_ref(name)
+    if format == "mjcf":
+        return Response(
+            export_lock_xml(name),
+            media_type="application/xml",
+            headers=_attachment(f"{name}.xml"),
+        )
+    from antares.export_targets import media_type
+
+    export = export_lock_target(name, format, fps=fps)
     return Response(
-        export_lock_xml(name),
-        media_type="application/xml",
-        headers=_attachment(f"{name}.xml"),
+        export.files[export.main],
+        media_type=media_type(export.main),
+        headers=_attachment(export.main),
     )
 
 
 @app.get("/api/locks/{name}/export.zip")
-def lock_export_zip(name: str) -> Response:
+def lock_export_zip(
+    name: str,
+    targets: str | None = Query(None, description="all, or a comma list of isaaclab,maniskill,mjlab,json"),
+    fps: float | None = Query(None, gt=0),
+) -> Response:
     """Zip of ``<name>/<name>.xml``, ``<name>.antares.json``, ``scene.xml``
-    and ``assets/*.stl``."""
+    and ``assets/*.stl``; with ``?targets=all`` also every other export
+    target's files."""
+    name = resolve_lock_ref(name)
     return Response(
-        export_lock_zip(name),
+        export_lock_zip(name, targets=parse_export_targets(targets), fps=fps),
         media_type="application/zip",
         headers=_attachment(f"{name}.zip"),
     )
@@ -2107,6 +2379,214 @@ def fleet_cross() -> dict:
     return cross
 
 
+# --------------------------------------------------------------------------
+# Fleet dashboard: one row per lock in LOCK_DIR, with its check history
+# --------------------------------------------------------------------------
+
+# Joints that count for "worst joint": the gripper is a different mechanism
+# and is excluded from the tracking score too.
+_DASHBOARD_BODY_JOINTS_EXCLUDE = ("gripper",)
+
+
+def _finite(v: Any) -> float | None:
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if np.isfinite(f) else None
+
+
+def _worst_body_joint(per_joint: dict | None) -> tuple[str | None, float | None]:
+    """``(joint, deg)`` with the largest error among the body joints."""
+    worst: tuple[str, float] | None = None
+    for k, v in (per_joint or {}).items():
+        if k in _DASHBOARD_BODY_JOINTS_EXCLUDE:
+            continue
+        f = _finite(v)
+        if f is None:
+            continue
+        if worst is None or f > worst[1]:
+            worst = (str(k), f)
+    return worst if worst is not None else (None, None)
+
+
+def _drift_verdicts() -> dict[str, str | None]:
+    """lock name -> verdict for every ``<lock>.drift.json`` in LOCK_DIR.
+
+    The saved scan carries its verdict; when it does not, the drift module
+    (imported lazily, tolerated missing) recomputes it from the dict.
+    """
+    d = Path(LOCK_DIR)
+    if not d.is_dir():
+        return {}
+    out: dict[str, str | None] = {}
+    for p in sorted(d.glob(f"*{DRIFT_SUFFIX}")):
+        name = p.name[: -len(DRIFT_SUFFIX)]
+        verdict: str | None = None
+        try:
+            scan = json.loads(p.read_text())
+        except (OSError, ValueError):
+            out[name] = None
+            continue
+        if isinstance(scan.get("verdict"), str):
+            verdict = scan["verdict"]
+        else:
+            try:
+                from antares.drift import DriftScan
+
+                verdict = str(DriftScan.from_dict(scan).verdict())
+            except Exception:
+                verdict = None
+        out[name] = verdict
+    return out
+
+
+def _history_index() -> dict[str, dict]:
+    """lock name -> ``{"latest": entry | None, "trend": dict | None}``.
+
+    ``antares.history`` (the check-history store) is optional. When it is
+    importable it is asked for the ``GET /api/history`` shape
+    (``{"locks": [{"lock", "trend", "latest"}, ...]}``) through the first
+    callable it exposes under one of the names below; anything else degrades
+    to "never checked".
+    """
+    try:
+        # import_module (not ``from antares import history``) so a stubbed or
+        # missing ``sys.modules["antares.history"]`` is honored.
+        _history = importlib.import_module("antares.history")
+    except ImportError:
+        return {}
+    for fn_name in ("summary_all", "history_index", "dashboard_index", "summary", "index", "list_history", "load_all"):
+        fn = getattr(_history, fn_name, None)
+        if not callable(fn):
+            continue
+        try:
+            try:
+                data = fn(Path(LOCK_DIR))
+            except TypeError:
+                data = fn()
+        except Exception:
+            continue
+        rows = data.get("locks") if isinstance(data, dict) else data
+        if not isinstance(rows, list):
+            continue
+        out: dict[str, dict] = {}
+        for row in rows:
+            if isinstance(row, dict) and row.get("lock"):
+                out[str(row["lock"])] = {"latest": row.get("latest"), "trend": row.get("trend")}
+        return out
+    return {}
+
+
+def _fleet_index() -> tuple[dict | None, dict[str, dict]]:
+    """``(fleet summary or None, lock name -> fleet robot entry)``."""
+    try:
+        report = load_fleet_dict()
+    except HTTPException:
+        return None, {}
+    robots = [r for r in (report.get("robots") or []) if isinstance(r, dict)]
+    by_lock = {str(r["lock"]): r for r in robots if r.get("lock")}
+    summary = dict(report.get("summary") or {})
+    summary.setdefault("n_robots", len(robots))
+    summary["created_at"] = report.get("created_at")
+    summary["locks"] = sorted(by_lock)
+    return summary, by_lock
+
+
+def _dataset_fps(dataset: str | None, fleet_robot: dict | None) -> float | None:
+    if fleet_robot is not None and _finite(fleet_robot.get("fps")) is not None:
+        return _finite(fleet_robot.get("fps"))
+    if dataset:
+        with _DATASETS_LOCK:
+            ds = _DATASETS.get(dataset)
+        if ds is not None:
+            return _finite(getattr(ds, "fps", None))
+    return None
+
+
+def _registry_index() -> dict[str, dict]:
+    """lock name -> ``{"robot_id", "is_active", "version", "n_versions"}`` from
+    the registry; empty (never an error) when there is none or it is unreadable."""
+    try:
+        return load_registry().index_by_lock()
+    except Exception:  # noqa: BLE001 - a broken registry must not take the dashboard down
+        return {}
+
+
+def dashboard_robot(
+    lock: dict,
+    *,
+    drift: dict[str, str | None],
+    history: dict[str, dict],
+    fleet_by_lock: dict[str, dict],
+    registry: dict[str, dict] | None = None,
+) -> dict:
+    """One dashboard row for a lock dict."""
+    name = str(lock.get("name") or "")
+    res = lock.get("result") or {}
+    params = lock.get("params") or res.get("params") or {}
+    before = _finite(res.get("baseline_eval_score"))
+    after = _finite(res.get("eval_score"))
+    improvement = _finite(res.get("improvement"))
+    if improvement is None and before is not None and after is not None and before > 0:
+        improvement = 1.0 - after / before
+    worst_joint, worst_deg = _worst_body_joint(res.get("per_joint_after"))
+    seeds = lock.get("seeds") if isinstance(lock.get("seeds"), dict) else None
+    pinned = seeds.get("pinned") if seeds else None
+    hist = history.get(name) or {}
+    fleet_robot = fleet_by_lock.get(name)
+    reg = (registry or {}).get(name) or {}
+    return {
+        "name": name,
+        # registry: which physical robot this lock belongs to, and where it
+        # sits in that robot's lineage (all null/None when unregistered)
+        "robot_id": reg.get("robot_id"),
+        "is_active": reg.get("is_active"),
+        "version": reg.get("version"),
+        "n_versions": reg.get("n_versions"),
+        "dataset": lock.get("dataset"),
+        "robot_type": lock.get("robot_type"),
+        "robot": lock.get("robot") or DEFAULT_ROBOT,
+        "created_at": lock.get("created_at"),
+        "space": res.get("space", "shared"),
+        "baseline_eval_score": before,
+        "eval_score": after,
+        "improvement": improvement,
+        "per_joint_after": res.get("per_joint_after"),
+        "worst_joint": worst_joint,
+        "worst_joint_deg": worst_deg,
+        "latency_frames": params.get("latency_frames"),
+        "fps": _dataset_fps(lock.get("dataset"), fleet_robot),
+        "drift": {"exists": name in drift, "verdict": drift.get(name)},
+        "in_fleet": fleet_robot is not None,
+        "pinned": list(pinned) if isinstance(pinned, (list, tuple)) else None,
+        "history": {"latest": hist.get("latest"), "trend": hist.get("trend")},
+    }
+
+
+def dashboard() -> dict:
+    """Every lock in LOCK_DIR as a dashboard row plus the fleet summary."""
+    drift = _drift_verdicts()
+    history = _history_index()
+    fleet, fleet_by_lock = _fleet_index()
+    registry = _registry_index()
+    robots = [
+        dashboard_robot(l, drift=drift, history=history, fleet_by_lock=fleet_by_lock, registry=registry)
+        for l in list_lock_dicts()
+        if l.get("name")
+    ]
+    return {
+        "robots": robots,
+        "fleet": fleet,
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+    }
+
+
+@app.get("/api/dashboard")
+def dashboard_get() -> dict:
+    return dashboard()
+
+
 def _csv(s: str | None) -> list[str]:
     return [x.strip() for x in (s or "").split(",") if x.strip()]
 
@@ -2133,7 +2613,7 @@ class CheckRequest(BaseModel):
     last: int | None = Field(None, ge=1)
     min_episodes: int = Field(5, ge=1)
     explain: bool = False
-    explain_evaluations: int = Field(240, ge=10, le=2000)
+    explain_evaluations: int = Field(300, ge=20, le=2000)
     notify_url: str | None = None
     notify_when: Literal["drifted", "failure", "always"] = "drifted"
     notify_format: Literal["auto", "slack", "json"] = "auto"
@@ -2155,11 +2635,12 @@ def check_drift(req: CheckRequest) -> dict:
     Unless ``record`` is false the result (insufficient data included) is
     appended to ``LOCK_DIR/<lock>.history.jsonl``; see ``GET /api/history``.
     """
-    _lock_path(req.lock)  # validate the name before loading a dataset
+    lock_name = resolve_lock_ref(req.lock)  # @<robot> -> its active lock
+    _lock_path(lock_name)  # validate the name before loading a dataset
     ds = get_dataset(req.dataset)
     result = run_check(
         ds,
-        req.lock,
+        lock_name,
         threshold_deg=req.threshold_deg,
         ratio=req.ratio,
         last=req.last,
@@ -2170,13 +2651,13 @@ def check_drift(req: CheckRequest) -> dict:
         from antares import history
 
         try:
-            history.append(result, LOCK_DIR, name=req.lock)
+            history.append(result, LOCK_DIR, name=lock_name)
         except OSError as e:  # the verdict stands; say why it was not recorded
             out["history_error"] = str(e)
     if req.explain and result.verdict == "drifted":
         try:
             out["diagnosis"] = run_diagnose(
-                ds, req.lock, last=req.last, max_evaluations=req.explain_evaluations
+                ds, lock_name, last=req.last, max_evaluations=req.explain_evaluations
             ).to_dict()
         except HTTPException as e:  # the verdict stands; say why it has no diagnosis
             out["diagnosis"] = None
@@ -2213,16 +2694,125 @@ def history_get(lock: str) -> dict:
     """
     from antares import history
 
+    lock = resolve_lock_ref(lock)
     if not _lock_path(lock).is_file():  # 400 on a bad name
         raise HTTPException(status_code=404, detail=f"no lock named {lock!r}")
     return history.report(lock, LOCK_DIR)
+
+
+# --------------------------------------------------------------------------
+# Robot registry routes (see antares.registry)
+# --------------------------------------------------------------------------
+
+
+def registry_robot(reg, robot_id: str) -> dict:
+    """``GET /api/registry/{robot_id}``: the summary plus the lineage with pinned flags."""
+    from antares.registry import UnknownRobot, param_drift
+
+    try:
+        out = reg.summary(robot_id)
+        lineage = reg.lineage(robot_id)
+    except UnknownRobot as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    out["lineage"] = lineage
+    out["param_drift"] = param_drift(lineage)
+    return out
+
+
+@app.get("/api/registry")
+def registry_list() -> dict:
+    """Every registered robot: active lock, version, held-out score, lineage entries."""
+    reg = load_registry()
+    return {
+        "version": reg.version,
+        "path": str(reg.path),
+        "robots": [reg.summary(rid) for rid in reg.robots()],
+    }
+
+
+@app.get("/api/registry/{robot_id}")
+def registry_get(robot_id: str) -> dict:
+    return registry_robot(load_registry(), robot_id)
+
+
+class RegisterRequest(BaseModel):
+    lock: str
+    activate: bool | None = None
+    note: str | None = None
+    max_regression: float | None = Field(None, ge=0)
+
+
+@app.post("/api/registry/{robot_id}/register")
+def registry_register(robot_id: str, req: RegisterRequest) -> dict:
+    """Add a saved lock to the robot's lineage; the activation rule decides
+    whether it becomes active (see ``registration.reason``)."""
+    registration = register_lock(
+        robot_id, req.lock, activate=req.activate, note=req.note, max_regression=req.max_regression
+    )
+    out = registry_robot(load_registry(), robot_id)
+    out["registration"] = registration
+    return out
+
+
+class ActivateRequest(BaseModel):
+    lock: str
+
+
+@app.post("/api/registry/{robot_id}/activate")
+def registry_activate(robot_id: str, req: ActivateRequest) -> dict:
+    from antares.registry import RegistryError, UnknownRobot
+
+    reg = load_registry()
+    try:
+        previous = reg.activate(robot_id, req.lock)
+    except UnknownRobot as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RegistryError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    reg.save()
+    out = registry_robot(reg, robot_id)
+    out["previous_active"] = previous
+    return out
+
+
+@app.post("/api/registry/{robot_id}/rollback")
+def registry_rollback(robot_id: str) -> dict:
+    from antares.registry import RegistryError, UnknownRobot
+
+    reg = load_registry()
+    try:
+        previous, _ = reg.rollback(robot_id)
+    except UnknownRobot as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RegistryError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    reg.save()
+    out = registry_robot(reg, robot_id)
+    out["previous_active"] = previous
+    return out
+
+
+@app.delete("/api/registry/{robot_id}")
+def registry_delete(robot_id: str) -> dict:
+    """Forget the robot; its lock files stay."""
+    from antares.registry import RegistryError, UnknownRobot
+
+    reg = load_registry()
+    try:
+        entry = reg.remove(robot_id)
+    except UnknownRobot as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RegistryError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    reg.save()
+    return {"removed": robot_id, "locks": entry.names}
 
 
 class DiagnoseRequest(BaseModel):
     dataset: str
     lock: str
     last: int | None = Field(None, ge=1)
-    max_evaluations: int = Field(240, ge=10, le=2000)
+    max_evaluations: int = Field(300, ge=20, le=2000)
     seed: int = 0
 
 
@@ -2313,6 +2903,7 @@ def load_camera_fit_dicts(lock_name: str) -> dict[str, dict]:
     """Camera fits for a lock from ``<lock>.camera.json`` (falls back to the lock's ``cameras``)."""
     from antares.camera import load_camera_fits
 
+    lock_name = resolve_lock_ref(lock_name)
     _lock_path(lock_name)  # validates the name
     fits = {name: f.to_dict() for name, f in load_camera_fits(lock_name, LOCK_DIR).items()}
     if not fits:
@@ -2338,6 +2929,7 @@ def run_camera_fit(
     from antares.camera import fit_camera, save_camera_fit
     from antares.sim import Arm
 
+    lock_name = resolve_lock_ref(lock_name)
     _lock_path(lock_name)
     # A fit runs for a minute; it gets its own Arm so overlay requests
     # (which share ``_camera_arm``) are not blocked behind it.
@@ -2448,7 +3040,7 @@ def camera_cameras(dataset: str = Query(...)) -> list[dict]:
 
 @app.post("/api/camera/fit")
 def camera_fit_start(req: CameraFitRequest) -> dict:
-    _lock_path(req.lock)  # validate early
+    _lock_path(resolve_lock_ref(req.lock))  # validate early
     job = start_job("camera", req.dataset, _camera_job_worker, req)
     return {"job_id": job.id}
 
@@ -2474,6 +3066,714 @@ def camera_overlay_get(
     except HTTPException:
         raise
     except Exception as e:  # noqa: BLE001 - decoding / segmentation errors
+        raise _video_error(e)
+
+
+# ==========================================================================
+# Scene (antares.scene)
+#
+# The static scene recovered from the logs: table height from the fingertips
+# at grasp instants, workspace, grasp/release points, and per fitted camera
+# the clean background with the table plane checked against it. The sim view
+# composites what that camera would see in the sim, without OpenGL.
+# ==========================================================================
+
+
+def load_scene_dict(lock_name: str) -> dict | None:
+    """``<lock>.scene.json`` for a lock, or None when no scene was fitted."""
+    from antares.scene import load_scene_fit
+
+    _lock_path(lock_name)  # validates the name
+    fit = load_scene_fit(lock_name, LOCK_DIR)
+    return fit.to_dict() if fit is not None else None
+
+
+def run_scene_fit(ds: Dataset, lock_name: str, cameras: list[str] | None = None):
+    """Fit the scene for ``lock_name`` from ``ds`` and save it (JSON, backdrops,
+    the lock's ``scene`` field). Returns ``(fit, path)``.
+
+    The arm carries the lock's parameters and robot; the cameras are the
+    lock's fitted ones (or ``cameras``, a subset by name), each with the
+    background model the overlay already uses.
+    """
+    from antares.project import Camera
+    from antares.scene import fit_scene, save_scene_fit
+    from antares.sim import Arm
+
+    lock = load_lock(lock_name)
+    arm = Arm(lock.params, robot=lock.robot)
+    fits = load_camera_fit_dicts(lock_name)
+    names = [c for c in (cameras or sorted(fits)) if c in fits]
+    cams = {name: Camera.from_dict(fits[name]) for name in names}
+    backgrounds = {}
+    for name in names:
+        try:
+            backgrounds[name] = camera_background(ds, name).bg
+        except Exception as e:  # noqa: BLE001 - a camera without video still leaves the table fit
+            raise _video_error(e)
+    fit = fit_scene(ds, arm, lock_name, cams, backgrounds)
+    path = save_scene_fit(fit, lock_name, LOCK_DIR, backgrounds)
+    return fit, path
+
+
+def scene_view(ds: Dataset, camera: str, episode: int, frame: int, lock_name: str) -> dict:
+    """Real frame | sim view of the same instant from the same camera."""
+    from antares import video
+    from antares.project import Camera, iou, rasterize
+    from antares.scene import load_backdrop, load_scene_fit, sim_view
+
+    ep = find_episode(ds, episode)
+    if not 0 <= frame < len(ep):
+        raise HTTPException(status_code=404, detail=f"frame {frame} not in episode {episode} ({len(ep)} frames)")
+    name = video.camera_name(camera)
+    fits = load_camera_fit_dicts(lock_name)
+    fit = fits.get(name)
+    if fit is None:
+        raise HTTPException(status_code=404, detail=f"lock {lock_name!r} has no camera fit for {name!r}")
+    scene = load_scene_fit(lock_name, LOCK_DIR)
+    if scene is None:
+        raise HTTPException(status_code=404, detail=f"lock {lock_name!r} has no scene fit; run scene-fit first")
+    backdrop = scene.backdrops.get(name)
+    if backdrop is None:
+        raise HTTPException(status_code=404, detail=f"the scene fit of {lock_name!r} has no backdrop for {name!r}")
+    try:
+        rgb = video.frames(ds.repo_id, camera, ep.index, [frame], ds)[0]
+        bg = load_backdrop(backdrop, LOCK_DIR)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:  # noqa: BLE001
+        raise _video_error(e)
+    cam = Camera.from_dict(fit)
+    arm, hulls = _camera_arm()
+    with _CAM_LOCK:
+        poses = arm.fk(arm.unit_map.to_rad(ep.state[frame]))
+    dark = int((fit.get("appearance") or {}).get("sign", -1)) < 0
+    table_poly = np.asarray(backdrop.plane_polygon, dtype=np.float64)
+    image, polys = sim_view(bg, cam, hulls, poses, table_poly, dark_arm=dark)
+    real_mask = camera_background(ds, camera).mask(rgb)
+    sim_mask = rasterize(polys, cam.width, cam.height)
+    return {
+        "dataset": ds.repo_id,
+        "camera": name,
+        "episode": ep.index,
+        "frame": frame,
+        "lock": lock_name,
+        "width": int(cam.width),
+        "height": int(cam.height),
+        "real_image": "data:image/jpeg;base64," + base64.b64encode(video.frame_jpeg(rgb)).decode(),
+        "sim_image": "data:image/jpeg;base64," + base64.b64encode(video.frame_jpeg(image)).decode(),
+        "iou": iou(sim_mask, real_mask),
+        "table_polygon": [list(p) for p in backdrop.plane_polygon],
+        "table_z": scene.table.z,
+        "n_geoms": len(polys),
+    }
+
+
+class SceneFitRequest(BaseModel):
+    dataset: str
+    lock: str
+    cameras: list[str] | None = None
+
+
+@app.post("/api/scene/fit")
+def scene_fit_post(req: SceneFitRequest) -> dict:
+    """Fit and save the scene for a lock (synchronous: FK over the grasp
+    instants plus the cameras' background models, a few seconds)."""
+    _lock_path(req.lock)
+    ds = get_dataset(req.dataset)
+    try:
+        fit, path = run_scene_fit(ds, req.lock, req.cameras)
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {**fit.to_dict(), "path": str(path)}
+
+
+@app.get("/api/scene")
+def scene_get(lock: str = Query(...)) -> dict:
+    return {"lock": lock, "scene": load_scene_dict(lock)}
+
+
+@app.get("/api/scene/view")
+def scene_view_get(
+    dataset: str = Query(...),
+    camera: str = Query(...),
+    episode: int = Query(...),
+    frame: int = Query(0, ge=0),
+    lock: str = Query(...),
+) -> dict:
+    ds = get_dataset(dataset)
+    try:
+        return scene_view(ds, camera, episode, frame, lock)
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001 - decoding / segmentation errors
+        raise _video_error(e)
+
+
+# ==========================================================================
+# Policy (antares.policy, antares.shadow, antares.closedloop)
+#
+# A state-based chunked policy trained on the lock's training episodes, then
+# judged on its held-out ones in the default sim and in the calibrated one:
+# open-loop "shadow" (the policy's commands on the real observations, rolled
+# through each sim) and closed-loop (the policy drives each sim). The gap
+# between the two sims' verdicts is how much the stock sim misjudges the
+# policy. Everything is sim-only; torch is the ``[policy]`` extra.
+# ==========================================================================
+
+POLICY_MODES = ("shadow", "closedloop")
+#: Keywords ``robots`` accepts besides saved lock names.
+POLICY_ROBOT_KEYS = ("default", "lock", "perjoint")
+POLICY_RESULT_SUFFIX = ".policy.{mode}.json"
+
+
+def _policy_error(e: Exception) -> HTTPException:
+    if isinstance(e, HTTPException):
+        return e
+    if isinstance(e, ImportError):
+        return HTTPException(status_code=501, detail=str(e))
+    if isinstance(e, FileNotFoundError):
+        return HTTPException(status_code=404, detail=str(e))
+    return HTTPException(status_code=400, detail=f"{type(e).__name__}: {e}")
+
+
+def _check_policy_mode(mode: str) -> str:
+    if mode not in POLICY_MODES:
+        raise HTTPException(status_code=400, detail=f"mode must be one of {list(POLICY_MODES)}, got {mode!r}")
+    return mode
+
+
+def policy_results_path(lock_name: str, mode: str) -> Path:
+    _lock_path(lock_name)  # validates the name
+    return Path(LOCK_DIR) / f"{lock_name}{POLICY_RESULT_SUFFIX.format(mode=_check_policy_mode(mode))}"
+
+
+def list_policy_dicts(lock: str | None = None) -> list[dict]:
+    """Saved policies' sidecars (``locks/*.policy.json``), newest first."""
+    from antares.policy import list_policies
+
+    if lock is not None:
+        _lock_path(lock)
+    return list_policies(LOCK_DIR, lock)
+
+
+def load_policy_results(lock_name: str, mode: str) -> dict | None:
+    p = policy_results_path(lock_name, mode)
+    if not p.is_file():
+        return None
+    try:
+        return json.loads(p.read_text())
+    except ValueError:
+        return None
+
+
+def policy_split(ds: Dataset, lock_dict: dict) -> tuple[list[Episode], list[Episode]]:
+    """The lock's train / held-out episodes of ``ds`` (400 when the lock has no split)."""
+    from antares.compensate import held_out_episodes
+
+    result = lock_dict.get("result") or {}
+    train_idx, eval_idx = result.get("train_episodes") or [], result.get("eval_episodes") or []
+    if not train_idx or not eval_idx:
+        raise HTTPException(status_code=400, detail="lock records no train/held-out split to train and evaluate on")
+    try:
+        return held_out_episodes(ds, train_idx), held_out_episodes(ds, eval_idx)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+def grasp_context_for(ds: Dataset, lock_dict: dict | None = None):
+    """Gripper thresholds, empty-jaw level and fingertip FK for ``ds`` on the lock's model."""
+    from antares.policy import GraspContext
+
+    robot = check_robot((lock_dict or {}).get("robot") or dataset_robot(ds))
+    return GraspContext.for_dataset(ds.episodes, robot)
+
+
+def run_policy_training(
+    ds: Dataset,
+    lock_dict: dict,
+    epochs: int = 200,
+    name: str | None = None,
+    seed: int = 0,
+    on_progress: Callable[[Any], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
+) -> dict:
+    """Train the chunked policy on the lock's training split, early-stop on its
+    held-out split, save it as ``locks/<name>.policy.pt`` (default: the lock's
+    name). Returns the policy's metadata (metrics included) plus the path."""
+    from antares.policy import save_policy, train_policy
+
+    train, eval = policy_split(ds, lock_dict)
+    name = name or str(lock_dict["name"])
+    _lock_path(name)  # same naming rules as locks
+    ctx = grasp_context_for(ds, lock_dict)
+    res = train_policy(
+        train,
+        eval,
+        epochs=epochs,
+        seed=seed,
+        ctx=ctx,
+        on_progress=on_progress,
+        should_stop=should_stop,
+        meta={"dataset": ds.repo_id, "lock": str(lock_dict["name"]), "robot": check_robot(lock_dict.get("robot"))},
+    )
+    path = save_policy(res.policy, name, LOCK_DIR)
+    return {**res.policy.meta, "path": str(path)}
+
+
+def _policy_train_worker(job: Job, req: "PolicyTrainRequest") -> None:
+    try:
+        ds = get_dataset(req.dataset)
+        lock_dict = load_lock_dict(req.lock)
+        summary = run_policy_training(
+            ds, lock_dict, epochs=req.epochs, name=req.name, seed=req.seed,
+            on_progress=lambda p: job.push(p.to_dict()), should_stop=job.stop.is_set,
+        )
+        job.push({"type": "done", "policy": summary})
+        job.finish("done", result=summary)
+    except Exception as e:  # noqa: BLE001 - reported through the job
+        job_fail(job, _policy_error(e))
+
+
+def resolve_policy_variants(lock_dict: dict, robots: Sequence[str] | None = None) -> tuple[list, list[str]]:
+    """The sims to judge the policy in. ``robots`` entries are ``default``,
+    ``lock`` (this lock), ``perjoint`` (``<lock>_perjoint`` when saved) or any
+    saved lock's name. Returns ``(variants, missing)``; a ``perjoint`` with
+    no such lock is reported in ``missing`` rather than failing."""
+    from antares.shadow import default_variant, variant_from_lock
+
+    robots = list(robots) if robots else list(POLICY_ROBOT_KEYS)
+    robot = check_robot(lock_dict.get("robot"))
+    variants, missing, seen = [], [], set()
+    for key in robots:
+        if key in seen:
+            continue
+        seen.add(key)
+        if key == "default":
+            variants.append(default_variant(robot))
+        elif key == "lock":
+            variants.append(variant_from_lock(lock_dict, "lock"))
+        elif key == "perjoint":
+            name = f"{lock_dict['name']}_perjoint"
+            if lock_dict.get("result", {}).get("space") == "per_joint":
+                continue  # the lock itself is per-joint; "lock" already covers it
+            if not _lock_path(name).is_file():
+                missing.append(name)
+                continue
+            variants.append(variant_from_lock(load_lock_dict(name), "perjoint"))
+        else:
+            variants.append(variant_from_lock(load_lock_dict(key), key))
+    if not variants:
+        raise HTTPException(status_code=400, detail="no sim variants to evaluate in")
+    return variants, missing
+
+
+def _policy_eval_episodes(ds: Dataset, lock_dict: dict, policy_meta: dict | None, episode: int | None = None) -> list[Episode]:
+    """The held-out episodes the policy never trained on: the lock's eval
+    split, narrowed to the policy's own if it records one; or one episode."""
+    from antares.compensate import held_out_episodes
+
+    _, eval = policy_split(ds, lock_dict)
+    pol_eval = set((policy_meta or {}).get("eval_episodes") or [])
+    if pol_eval:
+        eval = [e for e in eval if e.index in pol_eval] or eval
+    if episode is not None:
+        if episode not in {e.index for e in eval}:
+            raise HTTPException(status_code=400, detail=f"episode {episode} is not a held-out episode of {lock_dict['name']}")
+        return held_out_episodes(ds, [episode])
+    return eval
+
+
+def run_policy_evaluation(
+    ds: Dataset,
+    lock_dict: dict,
+    policy_name: str | None,
+    mode: str,
+    robots: Sequence[str] | None = None,
+    on_progress: Callable[[dict], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
+    save: bool = True,
+) -> dict:
+    """Shadow or closed-loop evaluation of a saved policy on the lock's held-out
+    episodes in every requested sim; saved as ``locks/<lock>.policy.<mode>.json``.
+    Per-episode tables, no trajectories (``policy_viewer`` renders those)."""
+    from antares.closedloop import closed_loop_episodes
+    from antares.lock import now_iso
+    from antares.policy import load_policy
+    from antares.shadow import shadow_episodes
+
+    _check_policy_mode(mode)
+    policy_name = policy_name or str(lock_dict["name"])
+    _lock_path(policy_name)
+    try:
+        policy = load_policy(policy_name, LOCK_DIR)
+    except (ImportError, FileNotFoundError) as e:
+        raise _policy_error(e)
+    episodes = _policy_eval_episodes(ds, lock_dict, policy.meta)
+    variants, missing = resolve_policy_variants(lock_dict, robots)
+    ctx = grasp_context_for(ds, lock_dict)
+    if mode == "shadow":
+        summary = shadow_episodes(
+            policy, episodes, variants, ctx,
+            on_progress=lambda i, n, se: on_progress and on_progress(
+                {"type": "progress", "mode": mode, "i": i, "n": n, "episode": se.episode, "row": se.to_dict()}
+            ),
+            should_stop=should_stop,
+        )
+    else:
+        summary = closed_loop_episodes(
+            policy, episodes, variants, ctx,
+            on_progress=lambda i, n, batch: on_progress and on_progress(
+                {"type": "progress", "mode": mode, "i": i, "n": n, "episode": batch[0].episode,
+                 "rows": [r.to_dict() for r in batch]}
+            ),
+            should_stop=should_stop,
+        )
+    out = summary.to_dict(include_arrays=False)
+    out.update(
+        dataset=ds.repo_id,
+        lock=str(lock_dict["name"]),
+        policy=policy_name,
+        policy_meta={k: policy.meta.get(k) for k in ("k", "h", "features", "created_at", "eval_episodes", "metrics")},
+        robots=list(robots) if robots else list(POLICY_ROBOT_KEYS),
+        missing_locks=missing,
+        episodes_evaluated=[e.index for e in episodes],
+        created_at=now_iso(),
+    )
+    if save:
+        p = policy_results_path(str(lock_dict["name"]), mode)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(out, indent=2, sort_keys=True) + "\n")
+        out["path"] = str(p)
+    return out
+
+
+def _policy_eval_worker(job: Job, req: "PolicyEvaluateRequest") -> None:
+    try:
+        ds = get_dataset(req.dataset)
+        lock_dict = load_lock_dict(req.lock)
+        out = run_policy_evaluation(
+            ds, lock_dict, req.policy, req.mode, req.robots, on_progress=job.push, should_stop=job.stop.is_set,
+        )
+        job.push({"type": "done", "mode": req.mode, "summary": out["summary"], "lock": out["lock"], "policy": out["policy"]})
+        job.finish("done", result=out)
+    except Exception as e:  # noqa: BLE001
+        job_fail(job, _policy_error(e))
+
+
+def policy_viewer(
+    ds: Dataset, lock_dict: dict, policy_name: str | None, mode: str, episode: int, robots: Sequence[str] | None = None
+) -> dict:
+    """One held-out episode under the policy in every sim, with body poses
+    ``(T,nbody,7)`` per sim for the viewer's ghosts (like ``/api/replay``).
+    Recomputed on request (a fraction of a second), so result files stay small."""
+    from antares.closedloop import closed_loop_episodes
+    from antares.policy import load_policy
+    from antares.shadow import shadow_episodes
+
+    _check_policy_mode(mode)
+    policy_name = policy_name or str(lock_dict["name"])
+    _lock_path(policy_name)
+    try:
+        policy = load_policy(policy_name, LOCK_DIR)
+    except (ImportError, FileNotFoundError) as e:
+        raise _policy_error(e)
+    eps = _policy_eval_episodes(ds, lock_dict, policy.meta, episode)
+    variants, missing = resolve_policy_variants(lock_dict, robots)
+    ctx = grasp_context_for(ds, lock_dict)
+    arm = variants[0].arm()
+    sims: dict[str, dict] = {}
+    try:
+        if mode == "shadow":
+            s = shadow_episodes(policy, eps, variants, ctx)
+            if not s.episodes:
+                raise HTTPException(status_code=400, detail=f"episode {episode} has no grasp point for the policy")
+            se = s.episodes[0]
+            real_q = se.real_q[se.baseline]
+            rows = {n: (se.sim_q[n], {"sim_vs_real_deg": float(se.gaps[n].overall_deg),
+                                      **({"divergence_deg": float(se.divergence[n].overall_deg)} if n in se.divergence else {})})
+                    for n in se.sim_q}
+            table = se.to_dict()
+            goal = se.goal
+        else:
+            s = closed_loop_episodes(policy, eps, variants, ctx)
+            if not s.runs:
+                raise HTTPException(status_code=400, detail=f"episode {episode} has no grasp point for the policy")
+            real_q = arm.real_q(eps[0])
+            rows = {r.variant: (r.sim_q, {k: v for k, v in r.to_dict().items() if k not in ("variant", "episode")}) for r in s.runs}
+            table = {"runs": [r.to_dict() for r in s.runs]}
+            goal = None if s.runs[0].real_grasp_xyz is None else np.asarray(s.runs[0].real_grasp_xyz)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    for name, (q, metrics) in rows.items():
+        sims[name] = {"q": _rounded(np.degrees(q)), "poses": _rounded(arm.fk(q)), **metrics}
+    return {
+        "dataset": ds.repo_id,
+        "lock": str(lock_dict["name"]),
+        "policy": policy_name,
+        "mode": mode,
+        "episode": int(eps[0].index),
+        "fps": float(eps[0].fps),
+        "robot": arm.robot_name,
+        "joints": list(arm.robot.canonical_joints),
+        "body_names": list(arm.body_names),
+        "goal": None if goal is None else [float(v) for v in goal],
+        "real_q": _rounded(np.degrees(real_q)),
+        "real_poses": _rounded(arm.fk(real_q)),
+        "sims": sims,
+        "variants": [v.to_dict() for v in variants],
+        "missing_locks": missing,
+        "table": table,
+        "validation": "sim-only",
+    }
+
+
+class PolicyTrainRequest(BaseModel):
+    dataset: str
+    lock: str
+    epochs: int = Field(200, ge=1, le=5000)
+    seed: int = 0
+    # Saved as locks/<name>.policy.pt; default: the lock's name.
+    name: str | None = None
+
+
+class PolicyEvaluateRequest(BaseModel):
+    dataset: str
+    lock: str
+    policy: str | None = None  # default: the policy named after the lock
+    mode: Literal["shadow", "closedloop"] = "shadow"
+    # "default", "lock", "perjoint" (= <lock>_perjoint when saved) or saved lock names.
+    robots: list[str] | None = None
+
+
+@app.post("/api/policy/train")
+def policy_train_start(req: PolicyTrainRequest) -> dict:
+    load_lock_dict(req.lock)  # 404 early
+    if req.name is not None:
+        _lock_path(req.name)
+    job = start_job("policy_train", req.dataset, _policy_train_worker, req)
+    return {"job_id": job.id}
+
+
+@app.get("/api/policy")
+def policy_list(lock: str | None = Query(None)) -> dict:
+    return {"lock": lock, "policies": list_policy_dicts(lock)}
+
+
+@app.post("/api/policy/evaluate")
+def policy_evaluate_start(req: PolicyEvaluateRequest) -> dict:
+    lock_dict = load_lock_dict(req.lock)
+    resolve_policy_variants(lock_dict, req.robots)  # unknown lock names fail now, not in the job
+    job = start_job("policy_eval", req.dataset, _policy_eval_worker, req)
+    return {"job_id": job.id}
+
+
+@app.get("/api/policy/results")
+def policy_results(lock: str = Query(...), mode: str | None = Query(None)) -> dict:
+    modes = [_check_policy_mode(mode)] if mode else list(POLICY_MODES)
+    return {"lock": lock, **{m: load_policy_results(lock, m) for m in modes}}
+
+
+@app.get("/api/policy/viewer")
+def policy_viewer_get(
+    dataset: str = Query(...),
+    lock: str = Query(...),
+    episode: int = Query(...),
+    mode: str = Query("shadow"),
+    policy: str | None = Query(None),
+    robots: str | None = Query(None, description="comma-separated: default,lock,perjoint or lock names"),
+) -> dict:
+    ds = get_dataset(dataset)
+    lock_dict = load_lock_dict(lock)
+    return policy_viewer(ds, lock_dict, policy, _check_policy_mode(mode), episode, _csv(robots) or None)
+
+
+# Objects (antares.objects / antares.payload)
+#
+# The manipulated object found in the video, tracked through every episode
+# (vision on the table plane, FK while held), its start/end pose
+# distribution against the task's FK picks, and the payload mass estimated
+# from the residual while it is carried. The fit is a job (progress per
+# episode); the per-frame track of one episode feeds the overlay and the
+# 3D viewer.
+# ==========================================================================
+
+_TRACKS: dict[tuple[str, str, int], Any] = {}
+_TRACKS_LOCK = threading.Lock()
+
+
+def load_objects_dict(lock_name: str) -> dict | None:
+    """``<lock>.objects.json`` for a lock, or None when no objects fit was run."""
+    from antares.objects import load_object_fit
+
+    _lock_path(lock_name)  # validates the name
+    fit = load_object_fit(lock_name, LOCK_DIR)
+    return fit.to_dict() if fit is not None else None
+
+
+def _objects_camera(lock_name: str, camera: str | None) -> tuple[str, dict]:
+    """The camera to track in: the one asked for, else the lock's best-fitted one."""
+    fits = load_camera_fit_dicts(lock_name)
+    if not fits:
+        raise HTTPException(status_code=400, detail=f"lock {lock_name!r} has no camera fit; run camera-fit first")
+    if camera is not None:
+        name = camera.removeprefix("observation.images.")
+        if name not in fits:
+            raise HTTPException(status_code=404, detail=f"lock {lock_name!r} has no camera fit for {name!r}; fitted: {sorted(fits)}")
+        return name, fits
+    best = max(fits, key=lambda n: float(fits[n].get("fit_iou") or 0.0))
+    return best, fits
+
+
+def run_objects_fit(
+    ds: Dataset,
+    lock_name: str,
+    camera: str | None = None,
+    *,
+    episodes: list[int] | None = None,
+    payload: bool = True,
+    on_progress: Callable[[dict], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
+):
+    """Track the object in ``ds`` for ``lock_name`` and save the fit (JSON,
+    tracks ``.npz``, the lock's ``objects`` field). Returns ``(fit, tracks, path)``.
+
+    Needs the lock's camera fit and scene fit (the table plane). With two
+    fitted cameras the cross-camera triangulation check runs too; with
+    ``payload`` the residual-based mass estimate is attached.
+    """
+    from antares.objects import cross_camera_check, fit_objects, save_object_fit
+    from antares.payload import estimate_payload
+    from antares.project import Camera
+    from antares.scene import load_scene_fit
+    from antares.sim import Arm
+
+    lock_name = resolve_lock_ref(lock_name)
+    lock = load_lock(lock_name)
+    scene = load_scene_fit(lock_name, LOCK_DIR)
+    if scene is None:
+        raise HTTPException(status_code=400, detail=f"lock {lock_name!r} has no scene fit (the table plane); run scene-fit first")
+    name, fits = _objects_camera(lock_name, camera)
+    cam = Camera.from_dict(fits[name])
+    try:
+        bgm = camera_background(ds, name)
+    except Exception as e:  # noqa: BLE001
+        raise _video_error(e)
+    arm = Arm(lock.params, robot=lock.robot)
+    bd = scene.backdrops.get(name)
+    fit, tracks = fit_objects(
+        ds, arm, lock_name, name, cam, bgm, scene.table.z,
+        object_half_height=scene.table.object_half_height,
+        table_rgb=bd.table_rgb if bd is not None else None,
+        episodes=episodes,
+        on_progress=on_progress,
+        should_stop=should_stop,
+    )
+    others = [n for n in fits if n != name]
+    if others and not (should_stop and should_stop()):
+        try:
+            cams = {n: Camera.from_dict(fits[n]) for n in (name, others[0])}
+            bgs = {n: camera_background(ds, n) for n in cams}
+            fit.cross_camera = cross_camera_check(ds, arm, cams, bgs, scene.table.z + scene.table.object_half_height, name)
+        except Exception as e:  # noqa: BLE001 - the check is optional
+            fit.cross_camera = {"n": 0, "note": f"{type(e).__name__}: {e}"}
+        if on_progress is not None:
+            on_progress({"stage": "cross", "cross_camera": fit.cross_camera})
+    if payload and not (should_stop and should_stop()):
+        picks = {t.episode: [(g, r) for g, r in t.picks if r < len(t.frames)] for t in tracks}
+        est = estimate_payload(ds, arm, lock_name, picks=picks, episodes=[t.episode for t in tracks], on_progress=on_progress, should_stop=should_stop)
+        fit.payload = est.to_dict()
+    path = save_object_fit(fit, lock_name, LOCK_DIR, tracks)
+    with _TRACKS_LOCK:
+        for t in tracks:
+            _TRACKS[(ds.repo_id, lock_name, t.episode)] = t
+    return fit, tracks, path
+
+
+def _objects_job_worker(job: Job, req: "ObjectsFitRequest") -> None:
+    try:
+        ds = get_dataset(req.dataset)
+
+        def on_progress(ev: dict) -> None:
+            job.push({"type": "progress", **ev})
+
+        fit, tracks, path = run_objects_fit(
+            ds, req.lock, req.camera, episodes=req.episodes, payload=req.payload,
+            on_progress=on_progress, should_stop=job.stop.is_set,
+        )
+        summary = {**{k: v for k, v in fit.to_dict().items() if k != "tracks"}, "path": str(path)}
+        job.push({"type": "done", "fit": summary})
+        job.finish("done", result=summary)
+    except Exception as e:  # noqa: BLE001 - report to the client
+        job_fail(job, e)
+
+
+def objects_track(ds: Dataset, episode: int, lock_name: str) -> dict:
+    """The per-frame object track of one episode: from the saved ``.npz``,
+    else tracked now (a few seconds) and kept in memory."""
+    from antares.objects import load_object_fit, load_track
+
+    lock_name = resolve_lock_ref(lock_name)
+    ep = find_episode(ds, episode)
+    fit = load_object_fit(lock_name, LOCK_DIR)
+    if fit is None:
+        raise HTTPException(status_code=404, detail=f"lock {lock_name!r} has no objects fit; run objects-fit first")
+    key = (ds.repo_id, lock_name, ep.index)
+    with _TRACKS_LOCK:
+        track = _TRACKS.get(key)
+    if track is None:
+        track = load_track(fit, ep.index, LOCK_DIR)
+    if track is None:
+        _, tracks, _ = run_objects_fit(ds, lock_name, fit.camera, episodes=[ep.index], payload=False)
+        track = next((t for t in tracks if t.episode == ep.index), None)
+        if track is None:
+            raise HTTPException(status_code=404, detail=f"episode {episode} could not be tracked")
+    with _TRACKS_LOCK:
+        _TRACKS[key] = track
+    return {
+        "dataset": ds.repo_id,
+        "lock": lock_name,
+        "camera": fit.camera,
+        "rgb": list(fit.prior.rgb),
+        "footprint_m": None if fit.footprint is None else list(fit.footprint),
+        "half_height": fit.object_half_height,
+        **track.to_dict(),
+    }
+
+
+class ObjectsFitRequest(BaseModel):
+    dataset: str
+    lock: str
+    camera: str | None = None
+    episodes: list[int] | None = None
+    payload: bool = True
+
+
+@app.post("/api/objects/fit")
+def objects_fit_start(req: ObjectsFitRequest) -> dict:
+    _lock_path(resolve_lock_ref(req.lock))  # validate early
+    job = start_job("objects", req.dataset, _objects_job_worker, req)
+    return {"job_id": job.id}
+
+
+@app.get("/api/objects")
+def objects_get(lock: str = Query(...)) -> dict:
+    d = load_objects_dict(lock)
+    if d is not None:
+        d = {k: v for k, v in d.items() if k != "tracks"} | {"tracks": [t for t in d["tracks"]]}
+    return {"lock": lock, "objects": d}
+
+
+@app.get("/api/objects/track")
+def objects_track_get(dataset: str = Query(...), episode: int = Query(...), lock: str = Query(...)) -> dict:
+    ds = get_dataset(dataset)
+    try:
+        return objects_track(ds, episode, lock)
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001 - decoding / tracking errors
         raise _video_error(e)
 
 

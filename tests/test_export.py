@@ -171,7 +171,8 @@ def test_export_mjcf_bundled(tmp_path):
     # header with the lock facts, right inside the root element
     head = xml.split("<option", 1)[0]
     assert head.startswith('<mujoco model="so101">\n  <!--')
-    for s in ("unit_a", "lerobot/svla_so101_pickplace", "2026-10-17T20:35:05Z", "6.007", "1.054", "latency_frames: 4"):
+    for s in ("unit_a", "lerobot/svla_so101_pickplace", "2026-10-17T20:35:05Z", "6.007", "1.054", "latency_frames: 4",
+              "gravity_scale=1.0", "Base model: MuJoCo Menagerie"):
         assert s in head, s
     assert "--" not in head.split("<!--", 1)[1].rsplit("-->", 1)[0]
 
@@ -306,6 +307,42 @@ def test_exported_model_replays_identically_real_dataset(tmp_path):
     np.testing.assert_allclose(got, ref, rtol=0, atol=1e-9)
 
 
+def test_gravity_scale_is_baked_into_option_and_replays_identically(tmp_path):
+    xml = MODEL_PATH.read_text()
+    assert bake_params(xml, {"kp": 50.0}).count("gravity=") == xml.count("gravity=")
+    baked = bake_params(xml, {"gravity_scale": 0.4})
+    assert re.search(r'<option\b[^>]*gravity="0 0 -3\.924', baked)
+    with pytest.raises(ExportError):
+        bake_params(xml, {"gravity_scale": [0.4, 1, 1, 1, 1, 1]})
+
+    lock = make_lock(params=FITTED.replace(gravity_scale=0.4))
+    out = export_mjcf(lock, tmp_path / "g.xml")
+    ep = synthetic_episode()
+    arm = load_exported_arm(out)
+    assert arm.params.gravity_scale == pytest.approx(0.4)
+    assert "gravity_scale=0.4 (scales option gravity)" in out.read_text().split("<option", 1)[0]
+    assert "gravity_scale" in read_sidecar(out)["baked_params"]
+    ref = Arm(params=lock.params).replay(ep)
+    np.testing.assert_allclose(arm.replay(ep), ref, rtol=0, atol=1e-9)
+    assert not np.allclose(Arm(params=FITTED).replay(ep), ref, atol=1e-4)
+
+
+def test_deadband_travels_in_the_sidecar(tmp_path):
+    lock = make_lock(params=FITTED.replace(deadband=[0.0, 0.0, 0.01, 0.0, 0.0, 0.0]))
+    out = export_mjcf(lock, tmp_path / "d.xml")
+    arm = load_exported_arm(out)
+    assert arm.params.per_joint("deadband").tolist() == [0.0, 0.0, 0.01, 0.0, 0.0, 0.0]
+    sc = read_sidecar(out)
+    assert "deadband" in sc["sidecar_params"] and "deadband" not in sc["baked_params"]
+    assert sc["params"]["deadband"] == [0.0, 0.0, 0.01, 0.0, 0.0, 0.0] and "deadband_note" in sc
+    head = out.read_text().split("<option", 1)[0]
+    assert "deadband: 0.0 0.0 0.01 0.0 0.0 0.0 rad" in head
+    assert "deadband" not in export_mjcf(make_lock(), tmp_path / "p.xml").read_text().split("<option", 1)[0]
+    assert bake_params(STOCK_XML, {"deadband": 0.01, "latency_frames": 3}) == STOCK_XML
+    ep = synthetic_episode()
+    np.testing.assert_allclose(arm.replay(ep), Arm(params=lock.params).replay(ep), rtol=0, atol=1e-9)
+
+
 def test_export_carries_the_command_map(tmp_path):
     from dataclasses import replace
 
@@ -322,3 +359,41 @@ def test_export_carries_the_command_map(tmp_path):
     # a lock without one exports identity
     plain = read_sidecar(export_mjcf(make_lock(), tmp_path / "b.xml", bundle_assets=False))
     assert CommandMap.from_dict(plain["command_map"]).is_identity()
+
+
+def test_export_scene_with_task(tmp_path):
+    from test_task import pick_place_episode
+
+    from antares.task import OBJECT_BODY, OBJECT_JOINT, PLACE_SITE, TaskDistribution, set_task
+
+    td = TaskDistribution.from_episodes([pick_place_episode(0), pick_place_episode(1)], name="toy")
+    scene = export_scene(make_lock(), tmp_path / "out", task=td, object_size=0.04)
+    assert (tmp_path / "out" / "task.json").is_file()
+    m = mujoco.MjModel.from_xml_path(str(scene))
+    assert m.nq == 6 + 7  # arm first, then the cube's free joint
+    body = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, OBJECT_BODY)
+    site = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_SITE, PLACE_SITE)
+    assert body >= 0 and site >= 0
+    np.testing.assert_allclose(m.body_pos[body][:2], td.picks.mean(axis=0)[:2], atol=1e-5)
+    np.testing.assert_allclose(m.site_pos[site], td.places.mean(axis=0), atol=1e-5)
+
+    d = mujoco.MjData(m)
+    inst = {"pick": [0.25, 0.05, 0.0], "place": [0.2, -0.1, 0.02], "start_q": td.start_q[0].tolist()}
+    set_task(m, d, inst, size=0.04)
+    a = m.jnt_qposadr[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, OBJECT_JOINT)]
+    np.testing.assert_allclose(d.qpos[a : a + 3], [0.25, 0.05, 0.02])  # lifted to rest on the floor
+    np.testing.assert_allclose(d.qpos[:6], td.start_q[0])
+    np.testing.assert_allclose(m.site_pos[site], inst["place"])
+    for _ in range(200):
+        mujoco.mj_step(m, d)
+    assert d.qpos[a + 2] == pytest.approx(0.02, abs=2e-3)  # sits on the floor, does not fall through
+
+
+def test_scene_xml_needs_a_held_grasp():
+    from test_task import SHUT, pick_place_episode
+
+    from antares.task import TaskDistribution, scene_xml
+
+    td = TaskDistribution.from_episodes([pick_place_episode(0, held_jaw=SHUT)], name="toy")
+    with pytest.raises(ValueError):
+        scene_xml(td)
