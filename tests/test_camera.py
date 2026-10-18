@@ -439,3 +439,43 @@ def test_fit_camera_rejects_wrist_cameras(monkeypatch):
     monkeypatch.setattr(video, "find_camera", lambda repo, camera: info)
     with pytest.raises(ValueError, match="wrist"):
         fit_camera(ds, "wrist")
+
+
+def test_space_with_a_fov_band_keeps_the_fov_inside_it():
+    centre = np.array([0.05, 0.0, 0.12])
+    ref = Camera.look_at([0.5, 0.4, 0.5], [0, 0, 0.1], 43.0, 64, 48)
+    space = Space(ref=ref, centre=centre, fovy_lo=42.0, fovy_hi=44.0)
+    assert space.decode(space.encode(ref)).fovy == pytest.approx(43.0)
+    assert {space.decode(np.full(8, v)).fovy for v in (0.0, 1.0)} == {42.0, 44.0}
+    wide = Camera.look_at([0.5, 0.4, 0.5], [0, 0, 0.1], 25.0, 64, 48)
+    assert space.decode(space.encode(wide)).fovy == pytest.approx(42.0)
+
+
+def test_fit_camera_holds_the_fov_in_a_band(monkeypatch):
+    """With the lens known, the fit keeps the field of view inside the band."""
+    from antares.sim import Arm
+
+    ds = _dataset(np.random.default_rng(3))
+    arm = Arm()
+    hulls = arm_hulls(arm.model)
+    W, H = 128, 96
+    truth = Camera.look_at([0.55, 0.35, 0.45], [0.0, 0.05, 0.12], 55.0, W, H)
+
+    def render(ep, f):
+        mask, _ = silhouette(hulls, posed_points(arm, hulls, ds, [(ep, f)])[0], truth)
+        rgb = np.full((H, W, 3), 230, np.uint8)
+        rgb[mask.astype(bool)] = 20
+        return rgb
+
+    cam_info = video.CameraInfo(name="up", key="observation.images.up", width=W, height=H, fps=30.0, fixed=True)
+    monkeypatch.setattr(video, "find_camera", lambda repo, camera: cam_info)
+    monkeypatch.setattr(video, "frames", lambda repo, camera, ep, idx, ds=None, cache=True: np.stack([render(ep, i) for i in idx]))
+
+    fit = fit_camera(
+        ds, "up", n_frames=12, n_episodes=3, n_heldout=4, n_starts=3, n_samples=800,
+        start_evaluations=150, refine_evaluations=250, seed=0, arm=arm, fovy_range=(54.0, 56.0),
+    )
+    assert 54.0 <= fit.fovy <= 56.0
+    assert fit.heldout_iou > 0.7, fit.heldout_iou
+    with pytest.raises(ValueError, match="fovy_range"):
+        fit_camera(ds, "up", fovy_range=(60.0, 50.0), arm=arm)
