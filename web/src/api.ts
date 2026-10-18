@@ -846,6 +846,12 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ dataset, camera, lock, n_frames: nFrames, n_episodes: nEpisodes }),
     }).then((r) => json<{ job_id: string }>(r)),
+  // One episode of a camera as a clip whose frame 0 is the episode's frame 0:
+  // H.264 mp4, or VP9 webm for a browser without H.264.
+  cameraClipUrl: (dataset: string, camera: string, episode: number) => {
+    const format = document.createElement("video").canPlayType('video/mp4; codecs="avc1.42E01E"') ? "mp4" : "webm";
+    return `/api/camera/clip?${q({ dataset, camera, episode, format })}`;
+  },
   cameraOverlay: (dataset: string, camera: string, episode: number, frame: number, lock: string | null) =>
     fetch(
       `/api/camera/overlay?${q(lock ? { dataset, camera, episode, frame, lock } : { dataset, camera, episode, frame })}`,
