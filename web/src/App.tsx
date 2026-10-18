@@ -1848,7 +1848,7 @@ export default function App() {
             {(frame / fps).toFixed(2)}s / {(frames / fps).toFixed(2)}s
           </span>
           <span className="muted small trace-label">
-            {joint}: <i className="swatch real" /> real <i className="swatch sim" /> sim
+            {jointNames[jIndex] ?? joint}: <i className="swatch real" /> real <i className="swatch sim" /> sim
           </span>
           <span className="muted small trace-label">
             |real − sim| <i className="swatch contact" /> contact <i className="swatch anomaly" /> anomaly{" "}
