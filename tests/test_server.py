@@ -345,7 +345,8 @@ def fakes(monkeypatch, tmp_path):
 
     cal = _module("antares.calibrate", calibrate=fake_calibrate, split_episodes=fake_split, PENALTY=1e3,
                   default_simulate=lambda command_map=None, robot=None: (lambda params, ep: (ep.state, ep.action)),
-                  scoring_names=scoring_names)
+                  scoring_names=scoring_names,
+                  describe_simulate=lambda simulate, arm: simulate)  # FakeArm has no robot model
     lock = _module("antares.lock", RobotLock=FakeLock, dataset_digest=lambda eps: "deadbeef",
                    slug=lambda r: r.replace("/", "__"), LOCK_DIR=tmp_path / "locks",
                    LOCK_SUFFIX=LOCK_SUFFIX,

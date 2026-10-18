@@ -1702,6 +1702,7 @@ def run_check(
 ):
     """Score ``lock`` (a name in LOCK_DIR, or a lock dict) on ``ds`` with the
     shared Arm and return an :class:`antares.check.CheckResult`."""
+    from antares.calibrate import describe_simulate
     from antares.check import check
 
     lock_d = lock if isinstance(lock, dict) else load_lock_dict(lock)
@@ -1712,6 +1713,8 @@ def run_check(
         arm.apply(params)
         return np.asarray(arm.real_q(ep)), np.asarray(arm.replay(ep))
 
+    # Tagged with the robot so scoring uses its joints, not the SO arms' six.
+    describe_simulate(simulate, arm)
     try:
         with arm_lock(robot), _command_map(arm, command_map_from_lock(lock_d), unit_map_from_lock(lock_d)):
             return check(
