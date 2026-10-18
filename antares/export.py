@@ -393,13 +393,18 @@ def export_scene(lock: RobotLock, out_dir: Path, bundle_assets: bool = True) -> 
     return scene_path
 
 
-def export_zip(lock: RobotLock) -> bytes:
+def export_zip(lock: RobotLock, targets: Sequence[str] = (), fps: float | None = None) -> bytes:
     """Zip of ``export_scene(lock, bundle_assets=True)``: ``<name>/`` holding
-    the arm XML, sidecar, ``scene.xml`` and ``assets/*.stl``."""
+    the arm XML, sidecar, ``scene.xml`` and ``assets/*.stl``, plus the files
+    of each extra export target (:data:`antares.export_targets.TARGETS`)."""
     buf = io.BytesIO()
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp) / lock.name
         export_scene(lock, root, bundle_assets=True)
+        if targets:
+            from antares.export_targets import export_targets
+
+            export_targets(lock, root, targets, fps=fps)
         with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             for p in sorted(root.rglob("*")):
                 if p.is_file():
