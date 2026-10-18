@@ -847,11 +847,38 @@ def export_lock_xml(name: str) -> bytes:
         return export_mjcf(lock, Path(tmp) / f"{lock.name}.xml", bundle_assets=False).read_bytes()
 
 
-def export_lock_zip(name: str) -> bytes:
-    """``<name>/`` with the MJCF, sidecar, scene.xml and STL meshes, zipped."""
+def export_lock_zip(name: str, targets: list[str] | tuple[str, ...] = (), fps: float | None = None) -> bytes:
+    """``<name>/`` with the MJCF, sidecar, scene.xml and STL meshes, zipped,
+    plus each extra export target's files (``antares.export_targets.TARGETS``)."""
     from antares.export import export_zip
 
-    return export_zip(load_lock(name))
+    return export_zip(load_lock(name), targets=targets, fps=fps)
+
+
+def export_lock_target(name: str, target: str, fps: float | None = None):
+    """One non-MJCF export target rendered for ``name`` (a ``TargetExport``);
+    DR ranges are read from ``LOCK_DIR/<name>.dr.json`` when present."""
+    from antares.export_targets import TargetExportError, render
+
+    try:
+        return render(load_lock(name), target, fps=fps, lock_dir=LOCK_DIR)
+    except TargetExportError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+def parse_export_targets(targets: str | None) -> list[str]:
+    """``?targets=`` of the zip route: ``all``, a comma list of targets, or empty."""
+    from antares.export_targets import TARGETS
+
+    if not targets:
+        return []
+    if targets == "all":
+        return list(TARGETS)
+    wanted = [t.strip() for t in targets.split(",") if t.strip()]
+    unknown = [t for t in wanted if t not in TARGETS]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"unknown export targets {unknown}; known: {list(TARGETS)} or all")
+    return wanted
 
 
 def lock_summary(lock: dict) -> dict:
@@ -1930,22 +1957,42 @@ def _attachment(filename: str) -> dict[str, str]:
 
 
 @app.get("/api/locks/{name}/export")
-def lock_export(name: str) -> Response:
-    """Calibrated MJCF as a download. ``meshdir`` is the absolute package
-    assets dir; use ``export.zip`` for a self-contained bundle."""
+def lock_export(
+    name: str,
+    format: Literal["mjcf", "isaaclab", "maniskill", "mjlab", "json"] = Query("mjcf"),
+    fps: float | None = Query(None, gt=0, description="dataset fps for latency seconds"),
+) -> Response:
+    """Calibrated MJCF as a download (``format=mjcf``, the default; ``meshdir``
+    is the absolute package assets dir; use ``export.zip`` for a self-contained
+    bundle), or the main file of another export target: the Isaac Lab /
+    ManiSkill / mjlab Python config or the neutral ``.params.json``."""
+    if format == "mjcf":
+        return Response(
+            export_lock_xml(name),
+            media_type="application/xml",
+            headers=_attachment(f"{name}.xml"),
+        )
+    from antares.export_targets import media_type
+
+    export = export_lock_target(name, format, fps=fps)
     return Response(
-        export_lock_xml(name),
-        media_type="application/xml",
-        headers=_attachment(f"{name}.xml"),
+        export.files[export.main],
+        media_type=media_type(export.main),
+        headers=_attachment(export.main),
     )
 
 
 @app.get("/api/locks/{name}/export.zip")
-def lock_export_zip(name: str) -> Response:
+def lock_export_zip(
+    name: str,
+    targets: str | None = Query(None, description="all, or a comma list of isaaclab,maniskill,mjlab,json"),
+    fps: float | None = Query(None, gt=0),
+) -> Response:
     """Zip of ``<name>/<name>.xml``, ``<name>.antares.json``, ``scene.xml``
-    and ``assets/*.stl``."""
+    and ``assets/*.stl``; with ``?targets=all`` also every other export
+    target's files."""
     return Response(
-        export_lock_zip(name),
+        export_lock_zip(name, targets=parse_export_targets(targets), fps=fps),
         media_type="application/zip",
         headers=_attachment(f"{name}.zip"),
     )
