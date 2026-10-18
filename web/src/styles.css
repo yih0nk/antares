@@ -711,3 +711,159 @@ body {
     overflow: visible;
   }
 }
+
+/* ---- bring your own dataset ---- */
+
+.chip {
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  background: var(--surface);
+  white-space: nowrap;
+  cursor: help;
+}
+
+.chip.upload {
+  border-color: #2f6b5a;
+  color: var(--comp);
+}
+
+.chip.hub {
+  border-color: #2b4dbf;
+  color: var(--sim);
+}
+
+.chip.warn {
+  border-color: #7a5a1e;
+  color: var(--anomaly);
+}
+
+.add-dataset {
+  position: relative;
+}
+
+.add-btn {
+  background: transparent;
+  color: var(--text);
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.add-btn:hover {
+  border-color: var(--accent);
+}
+
+.add-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.popover {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  width: min(460px, calc(100vw - 32px));
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  z-index: 20;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+}
+
+.hub-row {
+  display: flex;
+  gap: 6px;
+}
+
+.hub-id {
+  flex: 1;
+  min-width: 0;
+  font-family: "JetBrains Mono", monospace;
+}
+
+.small-cta {
+  padding: 6px 10px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.verdict {
+  margin: 6px 0 0;
+  padding-left: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.verdict .warn {
+  color: var(--anomaly);
+}
+
+.verdict .good {
+  color: #9fd8a8;
+}
+
+.dropzone {
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  padding: 18px 14px;
+  text-align: center;
+  font-size: 13px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.dropzone:hover,
+.dropzone.over {
+  border-color: var(--accent);
+  background: #161a27;
+}
+
+.dropzone.busy {
+  cursor: progress;
+}
+
+.upload-state {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  text-align: left;
+}
+
+.progress {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.progress span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
+
+@media (max-width: 800px) {
+  .popover {
+    position: fixed;
+    left: 16px;
+    right: 16px;
+    top: 64px;
+    width: auto;
+  }
+}

@@ -36,7 +36,10 @@ const easeOut = (t: number) => 1 - Math.pow(1 - t, 3);
 
 export function Arm({ geometry, poses, clip, playhead, material, snapSeconds = 0.6, hotSpans = null }: Props) {
   const files = useMemo(() => [...new Set(geometry.geoms.map((g) => g.mesh))], [geometry]);
-  const loaded = useLoader(STLLoader, files.map(api.meshUrl));
+  const loaded = useLoader(
+    STLLoader,
+    files.map((f) => api.meshUrl(f, geometry.robot)),
+  );
   const meshes = useMemo(() => new Map(files.map((f, i) => [f, loaded[i]])), [files, loaded]);
 
   const bodyRefs = useRef<(THREE.Group | null)[]>([]);

@@ -15,18 +15,49 @@ export type Params = {
   forcerange?: ParamValue;
 };
 
+// Where a dataset came from: pinned demo, any Hub id, a zip/parquet upload,
+// or a directory on the server's disk.
+export type DatasetSource = "demo" | "hub" | "upload" | "local";
+
 export type DatasetInfo = {
   id: string;
   loaded: boolean;
+  source: DatasetSource;
+  // Validation warnings (few episodes, odd units, a name that smells like a sim).
+  warnings: string[];
+  // What the dataset was recorded on, and which registry model simulates it.
+  robot_family: "so100" | "so101" | null;
+  robot: string;
   robot_type?: string;
   fps?: number;
   n_episodes?: number;
   joints?: string[];
 };
 
+// GET /api/datasets/validate: can the sim replay this dataset? Decided from
+// meta/info.json alone, before anything is downloaded.
+export type Verdict = {
+  ok: boolean;
+  robot_type: string;
+  robot_family: "so100" | "so101" | null;
+  reasons: string[];
+  warnings: string[];
+  fps: number;
+  n_episodes: number;
+  n_frames: number;
+  joint_names: string[];
+  codebase_version: string;
+};
+
+export type ValidateResponse = Verdict & { dataset: string; loaded: boolean; source: DatasetSource; robot: string };
+
+// POST /api/datasets/upload: the dataset summary plus the verdict it passed.
+export type UploadResponse = DatasetInfo & { verdict: Verdict };
+
 export type EpisodeInfo = { index: number; frames: number; duration_s: number };
 
 export type Geometry = {
+  robot: string;
   bodies: { id: number; name: string; parent: number }[];
   geoms: { body: number; mesh: string; pos: number[]; quat: number[]; rgba: number[] }[];
   joints: { name: string; body: number; axis: number[]; range: number[] }[];
@@ -43,6 +74,8 @@ export type Replay = {
   dataset: string;
   episode: number;
   fps: number;
+  // Registry name of the MuJoCo model that produced the ghost.
+  robot: string;
   joints: string[];
   body_names: string[];
   params: Params;
@@ -152,16 +185,36 @@ export type JobEvent =
   | { type: "done"; lock: { name: string; params: Params }; result: CalibrationResult }
   | { type: "error"; message: string };
 
+// A failed request. `detail` is the API's error body: a string, or for a
+// rejected dataset `{ message, verdict }` so the UI can list the reasons.
+export class ApiError extends Error {
+  status: number;
+  detail: unknown;
+  constructor(status: number, detail: unknown) {
+    super(typeof detail === "string" ? detail : ((detail as { message?: string })?.message ?? `${status}`));
+    this.status = status;
+    this.detail = detail;
+  }
+  get verdict(): Verdict | null {
+    const d = this.detail as { verdict?: Verdict } | null;
+    return d && typeof d === "object" && d.verdict ? d.verdict : null;
+  }
+}
+
+function parseDetail(status: number, statusText: string, body: unknown): ApiError {
+  const detail = (body as { detail?: unknown } | null)?.detail;
+  return new ApiError(status, detail ?? `${status} ${statusText}`);
+}
+
 async function json<T>(r: Response): Promise<T> {
   if (!r.ok) {
-    let detail = `${r.status} ${r.statusText}`;
+    let body: unknown = null;
     try {
-      const body = await r.json();
-      if (body?.detail) detail = String(body.detail);
+      body = await r.json();
     } catch {
       // not JSON
     }
-    throw new Error(detail);
+    throw parseDetail(r.status, r.statusText, body);
   }
   return r.json() as Promise<T>;
 }
@@ -169,13 +222,50 @@ async function json<T>(r: Response): Promise<T> {
 const q = (o: Record<string, string | number>) =>
   new URLSearchParams(Object.entries(o).map(([k, v]) => [k, String(v)])).toString();
 
+// Multipart upload with progress; fetch() cannot report upload progress.
+function uploadWithProgress<T>(url: string, form: FormData, onProgress: (fraction: number) => void): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    xhr.upload.onprogress = (ev) => {
+      if (ev.lengthComputable) onProgress(ev.loaded / ev.total);
+    };
+    xhr.onerror = () => reject(new ApiError(0, "network error during upload"));
+    xhr.onload = () => {
+      let body: unknown = null;
+      try {
+        body = JSON.parse(xhr.responseText);
+      } catch {
+        // not JSON
+      }
+      if (xhr.status >= 200 && xhr.status < 300) resolve(body as T);
+      else reject(parseDetail(xhr.status, xhr.statusText, body));
+    };
+    xhr.send(form);
+  });
+}
+
 export const api = {
   datasets: () => fetch("/api/datasets").then((r) => json<DatasetInfo[]>(r)),
   loadDataset: (dataset: string) =>
     fetch(`/api/datasets/load?${q({ dataset })}`, { method: "POST" }).then((r) => json<DatasetInfo>(r)),
+  // Cheap pre-check of a Hub id (meta/info.json only).
+  validateDataset: (dataset: string) =>
+    fetch(`/api/datasets/validate?${q({ dataset })}`).then((r) => json<ValidateResponse>(r)),
+  // A .zip of a LeRobot dataset directory; `name` defaults to the file name.
+  uploadDataset: (file: File, onProgress: (fraction: number) => void, name?: string) => {
+    const form = new FormData();
+    form.append("file", file, file.name);
+    if (name) form.append("name", name);
+    return uploadWithProgress<UploadResponse>("/api/datasets/upload", form, onProgress);
+  },
+  deleteDataset: (dataset: string) =>
+    fetch(`/api/datasets?${q({ dataset })}`, { method: "DELETE" }).then((r) => json<{ deleted: string }>(r)),
   episodes: (dataset: string) => fetch(`/api/episodes?${q({ dataset })}`).then((r) => json<EpisodeInfo[]>(r)),
-  model: () => fetch("/api/model").then((r) => json<Geometry>(r)),
-  meshUrl: (file: string) => `/api/model/mesh/${encodeURIComponent(file)}`,
+  // Geometry of one registry model (default so101); meshes are fetched per robot too.
+  model: (robot?: string) => fetch(robot ? `/api/model?${q({ robot })}` : "/api/model").then((r) => json<Geometry>(r)),
+  meshUrl: (file: string, robot?: string) =>
+    `/api/model/mesh/${encodeURIComponent(file)}${robot ? `?${q({ robot })}` : ""}`,
   locks: () => fetch("/api/locks").then((r) => json<LockSummary[]>(r)),
   replay: (dataset: string, episode: number, lock: string | null) =>
     fetch(`/api/replay?${q(lock ? { dataset, episode, lock } : { dataset, episode })}`).then((r) =>
