@@ -307,6 +307,35 @@ export type JobEvent =
   | { type: "done"; lock: { name: string; params: Params }; result: CalibrationResult }
   | { type: "error"; message: string };
 
+// GET /api/jobs/{id}: where a background job stands, for a client that lost
+// its event stream. `lock` is the saved lock dict of a finished calibration.
+export type JobStatus = {
+  job_id: string;
+  kind: string;
+  dataset: string;
+  status: "running" | "done" | "error";
+  cancelled: boolean;
+  result?: unknown;
+  lock?: { name: string; params: Params };
+  error?: string;
+};
+
+// Deliver a job's events once each. The server replays every buffered event
+// on each connection, so after EventSource reconnects the ones this client
+// already handled are skipped; every stream consumer goes through here.
+export function followJob<T>(src: EventSource, onEvent: (ev: T) => void): void {
+  let handled = 0;
+  let seenThisConnection = 0;
+  src.onopen = () => {
+    seenThisConnection = 0;
+  };
+  src.onmessage = (msg) => {
+    if (++seenThisConnection <= handled) return;
+    handled++;
+    onEvent(JSON.parse(msg.data) as T);
+  };
+}
+
 // A failed request. `detail` is the API's error body: a string, or for a
 // rejected dataset `{ message, verdict }` so the UI can list the reasons.
 export class ApiError extends Error {
@@ -881,6 +910,7 @@ export const api = {
   objectsTrack: (dataset: string, episode: number, lock: string) =>
     fetch(`/api/objects/track?${q({ dataset, episode, lock })}`).then((r) => json<ObjectTrack>(r)),
   jobEvents: (jobId: string) => new EventSource(`/api/jobs/${jobId}/events`),
+  jobStatus: (jobId: string) => fetch(`/api/jobs/${jobId}`).then((r) => json<JobStatus>(r)),
   cancelJob: (jobId: string) => fetch(`/api/jobs/${jobId}/cancel`, { method: "POST" }).then((r) => json(r)),
   // ---- policy ----
   policies: (lock: string) =>

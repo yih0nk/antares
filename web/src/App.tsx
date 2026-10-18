@@ -3,6 +3,7 @@ import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Grid, OrbitControls } from "@react-three/drei";
 import {
   api,
+  followJob,
   lockNameFor,
   type CalibrationResult,
   type Compensation,
@@ -746,9 +747,13 @@ export default function App() {
   // ---- calibration -----------------------------------------------------------
   const sourceRef = useRef<EventSource | null>(null);
   useEffect(() => () => sourceRef.current?.close(), []);
+  // Set while the start request is in flight, so a double click cannot start
+  // two jobs under the same (to-the-second) lock name.
+  const starting = useRef(false);
 
   const startCalibration = async () => {
-    if (!dataset) return;
+    if (!dataset || starting.current) return;
+    starting.current = true;
     setError(null);
     const name = lockNameFor(dataset);
     let jobId: string;
@@ -765,6 +770,8 @@ export default function App() {
     } catch (e) {
       setError(`Could not start calibration: ${(e as Error).message}`);
       return;
+    } finally {
+      starting.current = false;
     }
     setCalib({ jobId, name, total, perJoint, status: "running", progress: [], best: [] });
     liveWanted.current = null;
@@ -776,8 +783,16 @@ export default function App() {
     const src = api.events(jobId);
     sourceRef.current = src;
     let lastBest = Infinity;
-    src.onmessage = (msg) => {
-      const ev = JSON.parse(msg.data) as JobEvent;
+    const finishWithLock = (name: string) => {
+      api.locks().then(
+        (ls) => {
+          setLocks(ls);
+          setGhost(name);
+        },
+        (e) => setError(`Saved ${name}, but could not reload the lock list: ${(e as Error).message}`),
+      );
+    };
+    followJob<JobEvent>(src, (ev) => {
       if (ev.type === "progress") {
         setCalib((c) =>
           c && c.jobId === jobId
@@ -792,28 +807,52 @@ export default function App() {
       } else if (ev.type === "done") {
         src.close();
         setCalib((c) => (c && c.jobId === jobId ? { ...c, status: "done", result: ev.result } : c));
-        api.locks().then((ls) => {
-          setLocks(ls);
-          setGhost(ev.lock.name);
-        });
+        finishWithLock(ev.lock.name);
       } else if (ev.type === "error") {
         src.close();
         setCalib((c) => (c && c.jobId === jobId ? { ...c, status: "error", error: ev.message } : c));
       }
-    };
+    });
     src.onerror = () => {
       // EventSource reconnects on its own; a closed stream after "done" is fine.
-      if (src.readyState === EventSource.CLOSED) {
-        setCalib((c) =>
-          c && c.jobId === jobId && c.status === "running" ? { ...c, status: "error", error: "lost the progress stream" } : c,
-        );
-      }
+      // A stream lost while the job runs (or after Stop, while the worker
+      // still finishes the generation and saves the best fit) is not the
+      // job's fate: ask the server where it stands and finish from that.
+      if (src.readyState !== EventSource.CLOSED) return;
+      api.jobStatus(jobId).then(
+        (st) => {
+          if (st.status === "done") {
+            setCalib((c) => (c && c.jobId === jobId ? { ...c, status: "done", result: st.result as CalibrationResult } : c));
+            if (st.lock) finishWithLock(st.lock.name);
+          } else if (st.status === "error") {
+            setCalib((c) => (c && c.jobId === jobId ? { ...c, status: "error", error: st.error ?? "the fit failed" } : c));
+          } else {
+            setCalib((c) =>
+              c && c.jobId === jobId && (c.status === "running" || c.status === "cancelled")
+                ? { ...c, status: "error", error: "lost the progress stream while the fit is still running; reload to see its lock" }
+                : c,
+            );
+          }
+        },
+        () =>
+          setCalib((c) =>
+            c && c.jobId === jobId && (c.status === "running" || c.status === "cancelled")
+              ? { ...c, status: "error", error: "lost the progress stream" }
+              : c,
+          ),
+      );
     };
   };
 
   const stopCalibration = async () => {
     if (!calib) return;
-    await api.cancel(calib.jobId).catch(() => {});
+    try {
+      await api.cancel(calib.jobId);
+    } catch (e) {
+      // The job keeps running and Stop stays enabled, so the user can retry.
+      setError(`Could not stop the calibration: ${(e as Error).message}`);
+      return;
+    }
     setCalib((c) => (c ? { ...c, status: c.status === "running" ? "cancelled" : c.status } : c));
     // The worker still finishes its current generation and saves the best fit;
     // the stream's "done" event then selects that lock.
@@ -951,8 +990,7 @@ export default function App() {
     policySource.current?.close();
     const src = api.jobEvents(jobId);
     policySource.current = src;
-    src.onmessage = (msg) => {
-      const ev = JSON.parse(msg.data) as PolicyTrainEvent | PolicyEvalEvent;
+    followJob<PolicyTrainEvent | PolicyEvalEvent>(src, (ev) => {
       if (ev.type === "progress") {
         setPolJob((j) =>
           j && j.jobId === jobId
@@ -970,7 +1008,7 @@ export default function App() {
         src.close();
         setPolJob((j) => (j && j.jobId === jobId ? { ...j, status: "error", error: ev.message } : j));
       }
-    };
+    });
     src.onerror = () => {
       if (src.readyState === EventSource.CLOSED) {
         setPolJob((j) => (j && j.jobId === jobId && j.status === "running" ? { ...j, status: "error", error: "lost the progress stream" } : j));
