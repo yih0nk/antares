@@ -138,10 +138,12 @@ def test_weaker_gain_is_named():
     d = diagnose(eps, lock_of(), simulate=toy_simulate, max_evaluations=120)
     assert d.explained
     # in the toy servo kp, kv and damping only enter through (kv+damping)/kp,
-    # so any of them can carry the change; it must be named and alone suffice
-    top = d.causes[0]
-    assert top.name in ("kp", "kv", "damping")
-    assert top.recovers_deg > 0.5 * d.gap_deg
+    # so the change can be split between them in any proportion (and CMA-ES
+    # splits it differently across platforms); a gain must lead the causes
+    # and the refit must close the gap
+    assert d.causes[0].name in ("kp", "kv", "damping")
+    assert d.causes[0].recovers_deg > 0.3 * d.gap_deg
+    assert d.refit_deg < 0.1 * d.stale_deg
 
 
 def test_unchanged_arm_names_nothing():
