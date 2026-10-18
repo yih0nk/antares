@@ -45,10 +45,12 @@ import numpy as np
 from antares import __version__
 from antares.lock import RobotLock
 from antares.sim import JOINTS, MESH_DIR, MODEL_PATH, Arm, CommandMap, SimParams, UnitMap
+from antares.task import OBJECT_SIZE, TaskDistribution, scene_xml
 
 SCENE_PATH: Path = MODEL_PATH.parent / "scene.xml"
 SIDECAR_SUFFIX = ".antares.json"
 SCENE_FILENAME = "scene.xml"
+TASK_FILENAME = "task.json"
 ASSETS_DIRNAME = "assets"
 EXPORT_FORMAT = "antares.export/1"
 
@@ -359,11 +361,23 @@ def export_mjcf(lock: RobotLock, out_path: Path, bundle_assets: bool = True) -> 
     return out_path
 
 
-def export_scene(lock: RobotLock, out_dir: Path, bundle_assets: bool = True) -> Path:
+def export_scene(
+    lock: RobotLock,
+    out_dir: Path,
+    bundle_assets: bool = True,
+    task: TaskDistribution | None = None,
+    object_size: float = OBJECT_SIZE,
+) -> Path:
     """Export the arm into ``out_dir`` plus a ``scene.xml`` (floor, light,
     skybox from the Menagerie scene) that includes it, so
     ``python -m mujoco.viewer --mjcf <out_dir>/scene.xml`` works. Returns the
-    scene path; the arm is at ``<out_dir>/<lock.name>.xml``."""
+    scene path; the arm is at ``<out_dir>/<lock.name>.xml``.
+
+    With a ``task`` (see :mod:`antares.task`) the scene also gets a free cube
+    at the logged mean pick position and a marker at the mean place, and the
+    task is copied next to it as ``task.json`` for
+    :meth:`~antares.task.TaskDistribution.sample` and
+    :func:`~antares.task.set_task`."""
     out_dir = Path(out_dir)
     arm_path = export_mjcf(lock, out_dir / f"{lock.name}.xml", bundle_assets=bundle_assets)
 
@@ -371,6 +385,11 @@ def export_scene(lock: RobotLock, out_dir: Path, bundle_assets: bool = True) -> 
     scene, n = re.subn(r'<include file="[^"]+"/>', f'<include file="{arm_path.name}"/>', scene, count=1)
     if n == 0:
         raise ExportError("scene.xml has no <include>")
+    if task is not None:
+        if scene.count("</worldbody>") != 1:
+            raise ExportError("scene.xml needs exactly one </worldbody>")
+        scene = scene.replace("</worldbody>", scene_xml(task, object_size) + "  </worldbody>")
+        task.save(out_dir / TASK_FILENAME)
     scene = insert_header(
         scene,
         _comment(

@@ -41,6 +41,15 @@ from antares.sim import GRIPPER_INDEX, UnitMap, load_model
 
 TASK_SUFFIX = ".task.json"
 
+#: Names of what :func:`scene_xml` adds to an exported scene.
+OBJECT_BODY = "antares_object"
+OBJECT_JOINT = "antares_object_free"
+PLACE_SITE = "antares_place"
+
+#: Default object: a cube this wide (m) and this heavy (kg).
+OBJECT_SIZE = 0.03
+OBJECT_MASS = 0.03
+
 #: MJCF site at the gripper tip, between the jaws.
 TIP_SITE = "gripperframe"
 
@@ -341,3 +350,66 @@ class TaskDistribution:
     @classmethod
     def load(cls, path: Path | str) -> TaskDistribution:
         return cls.from_dict(json.loads(Path(path).read_text()))
+
+
+# --------------------------------------------------------------------------
+# scene
+# --------------------------------------------------------------------------
+
+
+def _resting(xyz: Sequence[float], size: float) -> np.ndarray:
+    """``xyz`` with z raised so a cube of ``size`` centred there is not below the floor."""
+    p = np.asarray(xyz, dtype=np.float64).copy()
+    p[2] = max(p[2], size / 2.0)
+    return p
+
+
+def scene_xml(td: TaskDistribution, size: float = OBJECT_SIZE, mass: float = OBJECT_MASS) -> str:
+    """``<worldbody>`` children for a free cube at the mean pick and a marker at the mean place.
+
+    The arm's base frame is the scene's world frame, so logged positions go
+    in unchanged. Use :func:`set_task` to move both to a sampled instance.
+    """
+    picks, places = td.picks, td.places
+    if len(picks) == 0:
+        raise ValueError("no held grasps: nothing to place in the scene")
+    pick = _resting(picks.mean(axis=0), size)
+    place = places.mean(axis=0) if len(places) else pick
+    h = size / 2.0
+    f = lambda v: " ".join(f"{x:.6g}" for x in v)  # noqa: E731
+    return (
+        f'    <body name="{OBJECT_BODY}" pos="{f(pick)}">\n'
+        f'      <freejoint name="{OBJECT_JOINT}"/>\n'
+        f'      <geom type="box" size="{h:.6g} {h:.6g} {h:.6g}" mass="{mass:.6g}" '
+        f'friction="1 5e-3 1e-4" rgba="0.85 0.25 0.2 1"/>\n'
+        f"    </body>\n"
+        f'    <site name="{PLACE_SITE}" pos="{f(place)}" size="{h:.6g}" type="sphere" rgba="0.2 0.8 0.3 0.4"/>\n'
+    )
+
+
+def set_task(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    instance: dict[str, Any],
+    unit_map: UnitMap | None = None,
+    size: float = OBJECT_SIZE,
+) -> None:
+    """Reset a scene with :func:`scene_xml` objects to one :meth:`TaskDistribution.sample` draw.
+
+    Moves the cube (upright, at rest) to ``instance["pick"]``, the place
+    marker to ``instance["place"]`` (left where it is when None) and the arm
+    to ``instance["start_q"]``, then runs ``mj_forward``.
+    """
+    jnt = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, OBJECT_JOINT)
+    site = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, PLACE_SITE)
+    if jnt < 0 or site < 0:
+        raise ValueError("model has no antares task objects; export it with a task")
+    a = model.jnt_qposadr[jnt]
+    data.qpos[a : a + 3] = _resting(instance["pick"], size)
+    data.qpos[a + 3 : a + 7] = (1.0, 0.0, 0.0, 0.0)
+    data.qvel[model.jnt_dofadr[jnt] : model.jnt_dofadr[jnt] + 6] = 0.0
+    if instance.get("place") is not None:
+        model.site_pos[site] = instance["place"]
+    data.qpos[:6] = instance["start_q"]
+    data.qvel[:6] = 0.0
+    mujoco.mj_forward(model, data)
