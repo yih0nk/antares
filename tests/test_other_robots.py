@@ -400,3 +400,21 @@ def test_check_and_drift_run_on_piper(tmp_path, monkeypatch):
     assert np.isfinite(result.score) and set(result.per_joint) <= set(arm.robot.joints)
     scan, path = server.run_drift(ds, "piper_unit", window=3, step=3, max_evaluations=4)
     assert path.is_file() and len(scan.windows) == 2
+
+
+def test_so100_lock_exports_the_so100_model(tmp_path):
+    """A lock on the SO-ARM100 model exports that model, not the SO-101 file,
+    and the exported arm replays like the sim it was fitted in."""
+    from antares.export import export_mjcf, load_exported_arm
+    from tests.test_export import make_lock
+
+    arm = Arm(robot="so100")
+    p = SimParams(kp=40.0, latency_frames=2)
+    lock = dataclasses.replace(make_lock(p), robot="so100")
+    out = export_mjcf(lock, tmp_path / "so100.xml")
+    exported = load_exported_arm(out)
+    assert exported.robot.name == "so100"
+    assert "shoulder_pan" not in out.read_text()
+    ep = _episodes(arm, p, n=1, T=40)[0]
+    arm.apply(p)
+    np.testing.assert_allclose(exported.replay(ep), arm.replay(ep), atol=1e-6)
