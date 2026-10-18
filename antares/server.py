@@ -3053,9 +3053,8 @@ def diagnose_start(req: DiagnoseRequest) -> dict:
 
 CAMERA_SUFFIX = ".camera.json"
 
-_cam_arm = None
-_cam_hulls = None
-_CAM_LOCK = threading.Lock()  # the camera Arm and hull cache are shared across requests
+_cam_arms: dict[str, tuple[Any, Any]] = {}
+_CAM_LOCK = threading.Lock()  # the camera Arms and hull caches are shared across requests
 _BACKGROUNDS: dict[tuple[str, str], Any] = {}
 _BACKGROUNDS_LOCK = threading.Lock()
 BACKGROUND_EPISODES = 6
@@ -3080,17 +3079,21 @@ def _video_error(e: Exception) -> HTTPException:
     return HTTPException(status_code=status, detail=str(e))
 
 
-def _camera_arm():
-    """An Arm (and its hulls) for silhouette work, separate from the replay Arm."""
-    global _cam_arm, _cam_hulls
+def _camera_arm(robot: str | None = None):
+    """An Arm (and its hulls) of ``robot``'s model for silhouette work, separate
+    from the replay Arm. One per model: the unit map decides where the hulls
+    land, so a degrees dataset must not be drawn with the normalized map."""
+    from antares.robots import DEFAULT_ROBOT
+
+    name = check_robot(robot) if robot else DEFAULT_ROBOT
     with _CAM_LOCK:
-        if _cam_arm is None:
+        if name not in _cam_arms:
             from antares.project import arm_hulls
             from antares.sim import Arm
 
-            _cam_arm = Arm()
-            _cam_hulls = arm_hulls(_cam_arm.model)
-        return _cam_arm, _cam_hulls
+            arm = Arm(robot=name)
+            _cam_arms[name] = (arm, arm_hulls(arm.model))
+        return _cam_arms[name]
 
 
 def camera_background(ds: Dataset, camera: str):
@@ -3168,7 +3171,7 @@ def run_camera_fit(
     _lock_path(lock_name)
     # A fit runs for a minute; it gets its own Arm so overlay requests
     # (which share ``_camera_arm``) are not blocked behind it.
-    arm = Arm()
+    arm = Arm(robot=dataset_robot(ds))
     common = dict(
         n_frames=n_frames,
         n_episodes=n_episodes,
@@ -3277,7 +3280,7 @@ def camera_overlay(ds: Dataset, camera: str, episode: int, frame: int, lock_name
         real_mask = bgm.mask(rgb)
         out["real_mask_polygon"] = mask_polygons(real_mask)
     if fit is not None:
-        arm, hulls = _camera_arm()
+        arm, hulls = _camera_arm(dataset_robot(ds))
         cam = Camera.from_dict(fit)
         with _CAM_LOCK:
             pts = hulls.world_points(arm.fk(arm.unit_map.to_rad(ep.state[frame])))
@@ -3473,7 +3476,7 @@ def scene_view(ds: Dataset, camera: str, episode: int, frame: int, lock_name: st
     except Exception as e:  # noqa: BLE001
         raise _video_error(e)
     cam = Camera.from_dict(fit)
-    arm, hulls = _camera_arm()
+    arm, hulls = _camera_arm(dataset_robot(ds))
     with _CAM_LOCK:
         poses = arm.fk(arm.unit_map.to_rad(ep.state[frame]))
     dark = int((fit.get("appearance") or {}).get("sign", -1)) < 0
