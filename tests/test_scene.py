@@ -276,3 +276,61 @@ def test_sim_view_paints_the_arm_over_the_backdrop(arm):
     away = Camera.look_at([0.45, 0.0, 0.5], [5.0, 0.0, 5.0], 50.0, 320, 240)
     img3, drawn3 = sim_view(bg, away, hulls, poses, None)
     assert drawn3 == [] and np.array_equal(img3, bg)
+
+
+# -- export ----------------------------------------------------------------------
+
+
+def test_export_scene_carries_table_and_backdrops(arm, tmp_path):
+    import cv2
+
+    from antares.export import SCENE_FILENAME, export_scene, export_zip
+    from antares.lock import RobotLock
+    from tests.test_lock import fake_result
+
+    cam = Camera.look_at([0.45, 0.0, 0.5], [0.15, 0.0, 0.0], 50.0, 320, 240)
+    entry = {**cam.to_dict(), "key": "observation.images.up", "fit_iou": 0.7, "heldout_iou": 0.65}
+    lock = RobotLock.create("fake/ds", "so101", [], fake_result(), name="unit").replace(cameras={"up": entry})
+    lock_dir = tmp_path / "locks"
+    lock.save(lock_dir / "unit.lock.json")
+    fit = fit_scene(pick_place_dataset(), arm, "unit", {"up": cam}, {"up": _cell_image()})
+    save_scene_fit(fit, "unit", lock_dir, {"up": _cell_image()})
+    lock = RobotLock.load(lock_dir / "unit.lock.json")
+
+    out = tmp_path / "out"
+    scene = export_scene(lock, out, bundle_assets=False, lock_dir=lock_dir)
+    xml = scene.read_text()
+    assert 'name="table"' in xml and 'type="plane"' in xml and 'name="floor"' not in xml
+    assert '<texture name="backdrop_up" type="2d" file="backdrops/up.png"/>' in xml
+    assert 'name="backdrop_up"' in xml and (out / "backdrops" / "up.png").is_file()
+    assert "table at z=" in xml
+    m = mujoco.MjModel.from_xml_path(str(scene))
+    tid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_GEOM, "table")
+    assert tid >= 0 and m.geom_pos[tid][2] == pytest.approx(fit.table.z, abs=1e-5)
+    bid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_GEOM, "backdrop_up")
+    assert bid >= 0
+    # the backdrop sits 3 m down the optical axis, facing the camera, filling its view
+    forward = -cam.R[:, 2]
+    assert np.allclose(m.geom_pos[bid], cam.pos + 3.0 * forward, atol=1e-3)
+    assert abs(float(np.dot(m.geom_quat[bid], cam.quat))) > 0.999
+    hw, hh = backdrop_quad(cam, 3.0)
+    assert m.geom_size[bid][0] == pytest.approx(hw, abs=1e-3) and m.geom_size[bid][1] == pytest.approx(hh, abs=1e-3)
+    assert mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_CAMERA, "up") >= 0
+    png = cv2.imread(str(out / "backdrops" / "up.png"))
+    assert png.shape == (240, 320, 3)
+    # the zip carries the same files
+    import io
+    import zipfile
+
+    names = zipfile.ZipFile(io.BytesIO(export_zip(lock, lock_dir=lock_dir))).namelist()
+    assert "unit/backdrops/up.png" in names and f"unit/{SCENE_FILENAME}" in names
+
+
+def test_export_scene_without_a_fit_keeps_the_floor(tmp_path):
+    from antares.export import export_scene
+    from antares.lock import RobotLock
+    from tests.test_lock import fake_result
+
+    lock = RobotLock.create("fake/ds", "so101", [], fake_result(), name="unit")
+    xml = export_scene(lock, tmp_path / "out", bundle_assets=False, lock_dir=tmp_path).read_text()
+    assert 'name="floor"' in xml and "backdrop" not in xml and 'name="table"' not in xml

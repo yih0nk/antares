@@ -1207,13 +1207,18 @@ def cmd_export(args: argparse.Namespace) -> int:
         print(f"error: {e.detail}", file=sys.stderr)
         return 1
     out_dir = Path(args.output) if args.output else Path("export") / lock.name
-    scene = export_scene(lock, out_dir, bundle_assets=not args.no_bundle)
+    scene = export_scene(lock, out_dir, bundle_assets=not args.no_bundle, lock_dir=server.LOCK_DIR)
     arm = out_dir / f"{lock.name}.xml"
     p = lock.params
     print(f"exported lock {lock.name} ({lock.dataset}) -> {out_dir}/")
     print(f"  {arm.name:<40} calibrated arm MJCF")
     print(f"  {sidecar_path(arm).name:<40} params incl. latency_frames={p.latency_frames}, unit map")
-    print(f"  {SCENE_FILENAME:<40} arm + floor/light")
+    if lock.scene:
+        print(f"  {SCENE_FILENAME:<40} arm + table at z={lock.scene.get('table_z', float('nan')):.3f} m + camera backdrops")
+        if (out_dir / "backdrops").is_dir():
+            print(f"  {'backdrops/':<40} camera background images (PNG textures)")
+    else:
+        print(f"  {SCENE_FILENAME:<40} arm + floor/light")
     if args.no_bundle:
         print("  meshdir points at the antares package assets (absolute path)")
     else:

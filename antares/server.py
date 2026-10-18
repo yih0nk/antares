@@ -851,7 +851,7 @@ def export_lock_zip(name: str) -> bytes:
     """``<name>/`` with the MJCF, sidecar, scene.xml and STL meshes, zipped."""
     from antares.export import export_zip
 
-    return export_zip(load_lock(name))
+    return export_zip(load_lock(name), lock_dir=LOCK_DIR)
 
 
 def lock_summary(lock: dict) -> dict:
