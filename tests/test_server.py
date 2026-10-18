@@ -331,7 +331,9 @@ def fakes(monkeypatch, tmp_path):
                   default_simulate=lambda command_map=None, robot=None: (lambda params, ep: (ep.state, ep.action)))
     lock = _module("antares.lock", RobotLock=FakeLock, dataset_digest=lambda eps: "deadbeef",
                    slug=lambda r: r.replace("/", "__"), LOCK_DIR=tmp_path / "locks",
-                   LOCK_SUFFIX=LOCK_SUFFIX)
+                   LOCK_SUFFIX=LOCK_SUFFIX,
+                   # no seed spread in the fakes: only latency is pinned, as for a real old lock
+                   pinned_params=lambda lock: ["latency_frames"], seed_info=lambda lock: None)
     comp = _module("antares.compensate", compensate_episode=fake_compensate_episode,
                    compensate_episodes=fake_compensate_episodes, held_out_episodes=fake_held_out,
                    max_joint_velocity=lambda episodes, arm: np.full(6, 100.0))
