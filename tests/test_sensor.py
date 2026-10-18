@@ -15,7 +15,7 @@ import pytest
 
 from antares.calibrate import SimParams
 from antares.data import Episode
-from antares.sensor import FIT_JOINTS, calibrate_with_sensor, fit_command_map
+from antares.sensor import FIT_JOINTS, calibrate_with_sensor, fit_command_map, prefit_command_map
 from antares.sim import GRIPPER_INDEX, JOINTS, CommandMap
 
 FPS = 30.0
@@ -138,3 +138,28 @@ def test_fit_command_map_on_real_arm_recovers_offsets():
     for j in FIT_JOINTS:
         assert fit.command_map.bias[j] == pytest.approx(hidden_map.bias[j], abs=0.3)
         assert fit.command_map.gain[j] == pytest.approx(hidden_map.gain[j], abs=0.01)
+
+
+def make_step_episodes(n: int, T: int = 240, hold: int = 40, seed: int = 0) -> list[Episode]:
+    """Piecewise-constant commands, so the arm settles between moves."""
+    rng = np.random.default_rng(seed)
+    eps = []
+    for i in range(n):
+        levels = rng.uniform(-40, 40, size=(T // hold + 1, 6))
+        action = np.repeat(levels, hold, axis=0)[:T]
+        q = toy_q(TRUE_PARAMS, TRUE_MAP, action, TRUE_MAP.apply(action[0]) * RAD_PER_UNIT)
+        eps.append(Episode(index=i, fps=FPS, joint_names=JOINTS, state=q / RAD_PER_UNIT, action=action))
+    return eps
+
+
+def test_prefit_command_map_from_still_frames():
+    cmap = prefit_command_map(make_step_episodes(3))
+    for j in FIT_JOINTS:
+        assert cmap.bias[j] == pytest.approx(TRUE_MAP.bias[j], abs=0.1)
+        assert cmap.gain[j] == pytest.approx(TRUE_MAP.gain[j], abs=0.005)
+    assert cmap.gain[GRIPPER_INDEX] == 1.0 and cmap.bias[GRIPPER_INDEX] == 0.0
+
+
+def test_prefit_keeps_identity_without_still_frames():
+    # the multi-sine episodes never hold still
+    assert prefit_command_map(make_episodes(2)).is_identity()

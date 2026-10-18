@@ -165,6 +165,63 @@ def fit_command_map(
 
 
 # --------------------------------------------------------------------------
+# Kinematic pre-fit (no sim)
+# --------------------------------------------------------------------------
+
+
+def _static_mask(x: np.ndarray, window: int, tol: float) -> np.ndarray:
+    """Frames where ``x`` (T,) moved less than ``tol`` over the last ``window``."""
+    T = len(x)
+    mask = np.zeros(T, dtype=bool)
+    for t in range(window, T):
+        seg = x[t - window : t + 1]
+        mask[t] = seg.max() - seg.min() < tol
+    return mask
+
+
+def prefit_command_map(
+    episodes: Sequence[Episode],
+    fit_gain: bool = True,
+    window: int = 10,
+    tol: float = 0.5,
+    min_frames: int = 30,
+    min_spread: float = 15.0,
+    joints: Sequence[int] = FIT_JOINTS,
+) -> CommandMap:
+    """Fit the command map from kinematics alone, without the sim.
+
+    Uses frames where both the command and the measured joint have been
+    still for ``window`` frames (moved less than ``tol`` dataset units), so
+    the servo has settled and latency and damping drop out; there the
+    servo sits where it was told, and ``state ~ gain*action + bias`` is a
+    least-squares line per joint. A joint with fewer than ``min_frames``
+    such frames keeps identity; one whose still commands span less than
+    ``min_spread`` units fits bias only.
+
+    Caveat: a still servo under gravity sags below its command by an amount
+    the sim models through kp, so this bias also absorbs that sag. Fitting
+    through the sim (:func:`fit_command_map`) does not.
+    """
+    gain, bias = np.ones(len(JOINTS)), np.zeros(len(JOINTS))
+    for j in joints:
+        a_parts, s_parts = [], []
+        for ep in episodes:
+            m = _static_mask(ep.action[:, j], window, tol) & _static_mask(ep.state[:, j], window, tol)
+            a_parts.append(ep.action[m, j])
+            s_parts.append(ep.state[m, j])
+        a, st = np.concatenate(a_parts), np.concatenate(s_parts)
+        if a.size < min_frames:
+            continue
+        if fit_gain and np.ptp(a) >= min_spread:
+            g, b = np.polyfit(a, st, 1)
+            gain[j] = float(np.clip(g, *GAIN_BOUNDS))
+            bias[j] = float(np.clip(b, -BIAS_BOUND, BIAS_BOUND))
+        else:
+            bias[j] = float(np.clip(np.mean(st - a), -BIAS_BOUND, BIAS_BOUND))
+    return CommandMap(gain=gain, bias=bias)
+
+
+# --------------------------------------------------------------------------
 # Joint fit: dynamics + command map
 # --------------------------------------------------------------------------
 
@@ -279,5 +336,6 @@ __all__ = [
     "SensorSimulateFn",
     "calibrate_with_sensor",
     "fit_command_map",
+    "prefit_command_map",
     "sensor_simulate",
 ]
