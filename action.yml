@@ -17,9 +17,20 @@ inputs:
     required: true
   lock:
     description: >-
-      Lock name under the lock dir (locks/<name>.lock.json) or a path to a
-      .lock.json file.
-    required: true
+      Lock name under the lock dir (locks/<name>.lock.json), a path to a
+      .lock.json file, or "@<robot-id>" for a registered robot's active lock
+      (quote it: YAML reserves a leading "@"). One of lock or robot is
+      required.
+    required: false
+    default: ""
+  robot:
+    description: >-
+      Robot id from locks/registry.json in the workspace (see `antares
+      robots`); the check runs against that robot's active lock, so a
+      recalibration or rollback never needs a workflow change. Equivalent to
+      lock: "@<robot>". Ignored when lock is set.
+    required: false
+    default: ""
   threshold:
     description: Absolute tracking error allowed, in degrees. Empty means none.
     required: false
@@ -128,6 +139,7 @@ runs:
       env:
         DATASET: ${{ inputs.dataset }}
         LOCK: ${{ inputs.lock }}
+        ROBOT: ${{ inputs.robot }}
         THRESHOLD: ${{ inputs.threshold }}
         RATIO: ${{ inputs.ratio }}
         LAST: ${{ inputs.last }}
@@ -140,6 +152,15 @@ runs:
         ACTION_PATH: ${{ github.action_path }}
       run: |
         set -o pipefail
+        # A robot id is handed to antares as the reference "@<robot>"; the CLI
+        # resolves it to the robot's active lock through locks/registry.json.
+        if [ -z "$LOCK" ] && [ -n "$ROBOT" ]; then
+          LOCK="@$ROBOT"
+        fi
+        if [ -z "$LOCK" ]; then
+          echo "::error::set the lock input (a lock name or .lock.json path) or the robot input (a registered robot id)"
+          exit 2
+        fi
         # A bare lock name resolves against locks/ in the workspace first,
         # then against the locks shipped with the action.
         if [ ! -f "$LOCK" ] && [ ! -f "locks/$LOCK.lock.json" ] && [ -f "$ACTION_PATH/locks/$LOCK.lock.json" ]; then
