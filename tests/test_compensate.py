@@ -72,6 +72,29 @@ def test_shift_compensate_leads_and_holds_end():
     np.testing.assert_array_equal(shift_compensate(q, 100), np.repeat(q[-1:], 10, axis=0))
 
 
+def test_shift_compensate_per_joint_latency():
+    """A per-joint lock shifts each joint by its own latency."""
+    q = np.arange(10, dtype=float)[:, None].repeat(6, axis=1)
+    out = shift_compensate(q, (0, 1, 2, 3, 4, 5))
+    for j in range(6):
+        np.testing.assert_array_equal(out[:, j], np.minimum(np.arange(10) + j, 9))
+    np.testing.assert_array_equal(shift_compensate(q, (3,) * 6), shift_compensate(q, 3))
+
+
+def test_compensate_episode_with_committed_per_joint_lock(arm):
+    from pathlib import Path
+
+    from antares.lock import RobotLock
+    from antares.synthetic import make_dataset
+
+    lock = RobotLock.load(Path(__file__).parent.parent / "locks" / "svla_so101_pickplace_perjoint.lock.json")
+    assert isinstance(lock.params.latency_frames, tuple)
+    ds = make_dataset("x/y", lock.params, n_episodes=1, T=90)
+    report = compensate_episode(arm, ds.episodes[0], lock.params, iters=2)
+    assert report.ilc_iterations >= 1
+    arm.apply(SimParams())
+
+
 def test_shift_compensate_rejects_bad_input():
     with pytest.raises(ValueError):
         shift_compensate(np.zeros(6), 1)
