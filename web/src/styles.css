@@ -102,6 +102,12 @@ body {
   pointer-events: none;
 }
 
+.show-toggle {
+  position: absolute;
+  right: 16px;
+  top: 12px;
+}
+
 .legend span {
   display: flex;
   align-items: center;

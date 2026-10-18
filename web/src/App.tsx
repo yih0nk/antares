@@ -35,6 +35,9 @@ const PARAM_KEYS: (keyof Params)[] = ["kp", "kv", "damping", "armature", "fricti
 // Terms a lock omits at their defaults; the row shows only when the lock carries one.
 const OPTIONAL_DEFAULTS: Partial<Record<keyof Params, number>> = { gravity_scale: 1, deadband: 0 };
 const SPEEDS = [0.25, 0.5, 1, 2];
+// Which arms the viewer draws: both overlaid, or one at a time.
+const SHOW = ["both", "real", "sim"] as const;
+type Show = (typeof SHOW)[number];
 // CMA-ES budget for a UI run; also sizes the sparkline's x axis.
 const MAX_EVALUATIONS = 150;
 // Budget of the optional per-joint refinement stage (the API's default).
@@ -139,6 +142,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [playing, setPlaying] = useState(true);
   const [speed, setSpeed] = useState(1);
+  const [show, setShow] = useState<Show>("both");
   const [frame, setFrame] = useState(0);
   const [joint, setJoint] = useState("shoulder_pan");
   const [calib, setCalib] = useState<Calibration | null>(null);
@@ -556,7 +560,14 @@ export default function App() {
             <Suspense fallback={null}>
               {/* MuJoCo is z-up; three.js is y-up. Keyed by model so a robot switch swaps the meshes cleanly. */}
               <group key={geometry.robot} rotation={[-Math.PI / 2, 0, 0]}>
-                <Arm geometry={geometry} poses={baseline?.real_poses ?? null} clip={clip} playhead={playhead} material={realMaterial} />
+                <Arm
+                  geometry={geometry}
+                  poses={baseline?.real_poses ?? null}
+                  clip={clip}
+                  playhead={playhead}
+                  material={realMaterial}
+                  hidden={show === "sim"}
+                />
                 <Arm
                   geometry={geometry}
                   poses={replay?.sim_poses ?? null}
@@ -564,8 +575,16 @@ export default function App() {
                   playhead={playhead}
                   material={ghostMaterial}
                   hotSpans={hotSpans}
+                  hidden={show === "real"}
                 />
-                <Arm geometry={geometry} poses={compPoses} clip={clip} playhead={playhead} material={compMaterial} />
+                <Arm
+                  geometry={geometry}
+                  poses={compPoses}
+                  clip={clip}
+                  playhead={playhead}
+                  material={compMaterial}
+                  hidden={show === "real"}
+                />
               </group>
             </Suspense>
           )}
@@ -574,25 +593,37 @@ export default function App() {
         </Canvas>
 
         <div className="legend">
-          <span>
-            <i className="swatch real" /> real arm (logged)
-          </span>
-          <span>
-            <i className="swatch sim" /> sim ghost, {ghostLabel}
-            {replayBusy && <span className="dot" />}
-          </span>
-          {showComp && ghost !== LIVE && (
+          {show !== "sim" && (
+            <span>
+              <i className="swatch real" /> real arm (logged)
+            </span>
+          )}
+          {show !== "real" && (
+            <span>
+              <i className="swatch sim" /> sim ghost, {ghostLabel}
+              {replayBusy && <span className="dot" />}
+            </span>
+          )}
+          {showComp && ghost !== LIVE && show !== "real" && (
             <span>
               <i className="swatch comp" /> sim with lag-compensated commands (sim-validated only)
               {compBusy && <span className="dot" />}
             </span>
           )}
-          {inEvent && (
+          {inEvent && show !== "real" && (
             <span className="warm">
               <i className="swatch warm" /> sim disagrees here: {inEvent.kind} on {inEvent.joints.join(", ")} (peak{" "}
               {inEvent.peak_deg.toFixed(1)}°)
             </span>
           )}
+        </div>
+
+        <div className="segmented show-toggle" role="group" aria-label="Arms shown">
+          {SHOW.map((v) => (
+            <button key={v} className={show === v ? "on" : ""} onClick={() => setShow(v)}>
+              {v === "both" ? "Real + sim" : v === "real" ? "Real only" : "Sim only"}
+            </button>
+          ))}
         </div>
 
         {(dsState === "loading" || (!baseline && !error)) && (
