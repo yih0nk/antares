@@ -9,8 +9,9 @@ log-uniform) and a shift of whole frames on ``latency_frames``. A per-joint
 lock keeps its per-joint shape; every joint gets the same change.
 
 The search prefers few, small changes. It minimizes the refit error plus a
-cost per change (:func:`complexity`), so a factor has to earn its size.
-Without that, a free search over all six can trade
+cost per change (:func:`complexity`), so a factor has to earn its size,
+and afterwards drops any kept change that lowers the error by less than
+:data:`STEP_GAIN_DEG`. Without that, a free search over all six can trade
 one frame of lag for a large velocity-gain swing that mimics it, or pick up
 a small gain from parameters pulling against each other on a recording
 where nothing changed. Latency is a handful of whole frames, so each shift
@@ -71,6 +72,9 @@ SHIFT_CANDIDATES = 3
 #: velocity-gain swing can otherwise stand in for it.
 COMPLEXITY_DEG = 0.2
 LATENCY_COMPLEXITY_DEG = 0.01
+#: A kept change that lowers the refit error by less than this (degrees) is
+#: dropped after the search.
+STEP_GAIN_DEG = 0.05
 #: A parameter is a cause when changing it alone recovers this share of the gap.
 CAUSE_FRACTION = 0.2
 #: A refit that improves on the lock by less than this (degrees) is noise.
@@ -427,6 +431,28 @@ def diagnose(
                 break
             es.tell(xs, values)
 
+    # Prune: drop a kept change while the unpenalized refit error rises by
+    # less than STEP_GAIN_DEG without it, smallest cost first. What is left
+    # is the fewest changes that still explain the recording.
+    def refit_error(change: Mapping[str, float]) -> float:
+        return _safe_score(apply_change(params, change), refit_eps, simulate)[1]
+
+    if not stop():
+        kept_error = refit_error(best)
+        while True:
+            costs = []
+            for f in FIELDS:
+                if _is_neutral(f, best[f]):
+                    continue
+                trial = {**best, f: neutral()[f]}
+                costs.append((refit_error(trial) - kept_error, f, trial))
+            if not costs:
+                break
+            cost, f, trial = min(costs)
+            if cost >= STEP_GAIN_DEG:
+                break
+            best, kept_error = trial, kept_error + cost
+
     stale_report, stale = _safe_score(params, held_out, simulate)
     refit_params = apply_change(params, best)
     refit_report, refit = _safe_score(refit_params, held_out, simulate)
@@ -472,6 +498,7 @@ __all__ = [
     "MIN_GAP_DEG",
     "NEUTRAL_TOL",
     "PENALTY",
+    "STEP_GAIN_DEG",
     "complexity",
     "Diagnosis",
     "ParamChange",

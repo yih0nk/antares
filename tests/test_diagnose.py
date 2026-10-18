@@ -162,6 +162,14 @@ def test_lag_and_a_weaker_gain_together_are_both_named():
     assert set(names) & {"kp", "kv", "damping"}  # the gain change is named too
 
 
+def test_a_change_too_small_to_matter_is_not_kept():
+    """A gain that moved 0.2% lowers the error less than the step threshold."""
+    eps = make_episodes(TRUE.replace(kp=TRUE.kp * 0.998), seed=6)
+    d = diagnose(eps, lock_of(), simulate=toy_simulate)
+    assert all(c.value == (0 if c.name == "latency_frames" else 1.0) for c in d.changes), d.changes
+    assert d.causes == []
+
+
 def test_drift_outside_the_dynamics_is_not_explained():
     """A sensor offset is not something the servo parameters can absorb."""
     eps = [Episode(e.index, e.fps, e.joint_names, e.state + 0.05, e.action)
