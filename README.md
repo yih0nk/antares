@@ -115,7 +115,7 @@ Bring your own dataset, in short (details in [Bring your own dataset](#bring-you
 * **Parameter values are fits, not measurements.** `kp`, `kv`, damping, armature and friction trade off at the same tracking error (seeds on one arm span 25× in `kp`); only latency and the sensor map are pinned by pick-and-place logs. `--seeds 3` records which parameters the seeds agree on, and everything downstream reads only those as physical.
 * **The leftover elbow error is step-shaped**, not a slope in gravity load, so the six servo parameters do not express it; the contact detector sees that pose dependence, not contact with a light object.
 * **Payload mass is below the noise.** The residual resolves 13 g per encoder step with a noise floor of 40–60 g; a 30 g object comes out at 22 g with a 69 g IQR, so the export uses an assumed 30 g and says so.
-* **Camera fits are loose in depth.** Silhouettes pin the viewing direction but trade distance against field of view; the SO-101 `side` camera's rays meet 2.6 cm below the object plane. The table height assumes a 15 mm object half-height and a horizontal plane.
+* **Camera fits are loose in depth, and are fits, not measurements.** Silhouettes pin the viewing direction but trade distance against field of view: on a synthetic video from a known 55° camera the fit landed at 71° and 14 cm closer, with the overlay still lined up. A second pass that borrows a fitted sibling camera's field of view helps when the two are the same webcam; with the earlier SO-101 `side` fit, its rays met 2.6 cm below the object plane. The table height assumes a 15 mm object half-height and a horizontal plane.
 
 ## Reference map
 
@@ -1494,13 +1494,17 @@ How it works, with no OpenGL and no learned segmenter:
    ones get a short CMA-ES run at 160x120, and the best is refined at full
    resolution. 12 frames from other episodes are scored as a held-out
    check. About a minute per camera.
+5. **Second pass.** When another fixed camera of the dataset with the same
+   image size is already fitted (most likely the same webcam model), the
+   fit runs again with the field of view held within 2° of that camera's,
+   and the pass with the better held-out IoU is saved.
 
 The demo datasets, 40 fit frames / 12 held-out frames each:
 
 | dataset | camera | fit IoU | held-out IoU | notes |
 |---|---|---|---|---|
 | svla_so101_pickplace | `up` | 0.82 | 0.83 | clean; residual is hull slack and the real gripper reaching lower than the sim's |
-| svla_so101_pickplace | `side` | 0.58 | 0.72 | the arm leaves the top of the frame in many fit frames (per-frame IoU down to 0.08) |
+| svla_so101_pickplace | `side` | 0.61 | 0.75 | second pass, field of view held near `up`'s (43.9°); the free fit settled on 25.8° (0.58 / 0.72) and put the gripper about a gripper-width off in the viewer. The arm leaves the top of the frame in many fit frames |
 | svla_so100_pickplace | `top` | 0.63 | 0.60 | black servo and gripper parts vanish against the black table, so the real mask is the orange and white parts only |
 
 Fits are saved as `locks/<lock>.camera.json` (frames used, per-frame IoUs)
@@ -1514,8 +1518,12 @@ overlay at the playhead whenever playback is paused.
 
 Caveats: silhouettes pin the viewing direction well but trade distance
 against field of view (a farther camera with a narrower fov looks nearly
-the same), so expect the position to be loose along the optical axis;
-wrist cameras are skipped; the sim is the SO-101 model for both datasets.
+the same), so expect the position to be loose along the optical axis.
+A fitted camera's position and field of view are values that make the
+silhouettes overlap, not measurements of the camera: on a clean synthetic
+video rendered from a known 55° camera, the fit reached IoU 0.74 at 71°
+and 14 cm closer than the true camera, and the overlay still lined up.
+Wrist cameras are skipped; the sim is the SO-101 model for both datasets.
 
 #### Video delay
 
@@ -1710,6 +1718,9 @@ camera gets the cube right.
 
 **Cross-camera check (SO-101).** With `up` and `side` both fitted, the
 object at rest is triangulated from the two pixel rays over 36 frames.
+These numbers (and `cross_camera` in the committed
+`svla_so101_pickplace.objects.json`) were measured with the earlier `side`
+fit (IoU 0.58, 25.8°), before the field-of-view second pass refit it.
 The rays pass within 0.5 cm of each other, but meet 3.0 cm from `up`'s
 plane point and 2.6 cm *below* the object plane (1 cm below the table),
 and `side`'s own plane intersection is 6.4 cm off in xy. The `side` fit
