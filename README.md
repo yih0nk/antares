@@ -1489,6 +1489,69 @@ scan produced it, and its latest check and trend from the check history (the
 view fetches `/api/history/<lock>` on expand; a 404 means never checked).
 
 
+## STS3215 servo model
+
+By default each servo is MuJoCo's ideal position actuator, and the fit has
+to find its `kp`, `kv` and force limit from teleop logs, which barely pin
+them down: three seeds on the same SO-100 data give `kp` from 19 to 1427.
+`--servo sts3215` simulates the servo as it is built instead. The firmware
+moves an internal target toward the command at most at `max_velocity`. Its
+P loop turns the error into a PWM duty cycle that saturates at 97%. The DC
+motor then pushes `kt/R * (vin*duty - kt*qvel)`, so back-EMF weakens it as it
+speeds up. The motor constants are [BAM](https://bam.readthedocs.io)'s
+bench-identified 7.4 V STS3215 (Rhoban, Apache-2.0), run at the P
+coefficient LeRobot writes to SO-100/101 followers (16). Each arm then fits
+only what differs between arms: a gain ratio, friction, rotor inertia, the
+rate limit and latency.
+
+```bash
+antares calibrate lerobot/svla_so101_pickplace --servo sts3215 --seeds 3
+python scripts/servo_study.py      # the comparison below (needs the Hub)
+```
+
+The servo model was compared against the position actuator on each demo
+lock's own split: 20 train and 10 held-out episodes, best of 3 seeds x 150
+evaluations
+([`results/servo_study.json`](results/servo_study.json)). The table gives
+held-out RMS tracking error in degrees, body joints:
+
+| | stock sim | lock (position) | BAM, nothing fitted but latency | position refit | servo fit |
+|---|---|---|---|---|---|
+| SO-101 | 6.007 | 0.736 | 0.805 | 0.713 | **0.596** |
+| SO-100 | 2.744 | 0.787 | 0.898 | 0.592 | **0.454** |
+
+* **BAM's bench numbers alone, with no fitting except the latency, get
+  within 10 to 15% of a fully fitted lock.** The motor physics carries
+  over from a test bench to these arms.
+* **The fitted servo beats the position actuator by 16% (SO-101) and 23%
+  (SO-100)** on the same budget and split.
+* **The gain is pinned.** Across seeds, `servo_gain` varies 1.4x (SO-101)
+  and 1.2x (SO-100), where the position fit's `kp` varies 11x and 74x.
+  Friction and damping are still not pinned by either model.
+* **Low stiffness was real.** At BAM's values the servo is as stiff as
+  `kp` 9.4 N·m/rad, and the old SO-101 lock sat at 10.5. The SO-101 fits a
+  gain ratio of 0.81 (PD equivalent 7.5); the SO-100 fits 2.0 to 2.3
+  (about 22). A 12 V servo or a different firmware gain would both explain
+  the SO-100 value; the logs can't tell which.
+* **Some of the "latency" was the servo.** The servo fits settle on 2
+  frames of delay where the position fits needed 3 to 4. The rate limit
+  and back-EMF account for the rest of the lag.
+
+A servo lock's `kp`, `kv` and `forcerange` are derived, not fitted: they
+always hold the model's PD equivalent (the linearized gain, the back-EMF
+velocity gain and the stall torque), so anything that reads only those
+fields (an older antares, the fleet table, `antares sag`) sees a ~9 N·m/rad
+servo rather than the stock 998 one. Exports bake that PD equivalent into
+the MJCF (`kp`, `kv`, and the stall torque as `forcerange`, the effort
+limit) and into the Isaac Lab, ManiSkill and mjlab configs; the
+`.antares.json` sidecar keeps the full model. The `drift`, `dr` and
+`check --explain` refits search the servo's own fields when they start from
+a servo lock (`calibrate` switches to the servo space: `servo_gain`,
+`max_velocity`, friction, inertia and latency), so a drift trend, a
+randomization range or a named cause is on `servo_gain`, never on `kp`.
+`identify` still perturbs the position actuator's parameters, which a
+servo lock ignores; run it on a position lock.
+
 ## Sensor calibration
 
 LeRobot normalizes the commands (the leader arm's readings) and the

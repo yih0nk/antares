@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 from test_calibrate import TRUE, fake_simulate, make_episodes
 
-from antares.calibrate import DIMS, SPACE, SimParams
+from antares.calibrate import DIMS, SERVO_SPACE, SPACE, SimParams
 from antares.dr import (
     DR_SUFFIX,
     DRRanges,
@@ -17,8 +17,10 @@ from antares.dr import (
     ParamRange,
     apply,
     bootstrap_fits,
+    dims_of,
     randomize,
     sample,
+    space_of,
     uniform_ranges,
 )
 from antares.lock import LOCK_DIR
@@ -279,3 +281,42 @@ def test_apply_and_randomize(fits):
     assert apply(arm, p) is p and arm.params is p
     q = randomize(arm, dr, 3)
     assert arm.params == q == sample(dr, 3, 1)[0]
+
+
+# --------------------------------------------------------------------------
+# servo-model locks
+# --------------------------------------------------------------------------
+
+
+def test_servo_lock_ranges_cover_the_servo_space(episodes):
+    # Refits from a servo lock search SERVO_SPACE (calibrate switches to it),
+    # so the ranges must be read off those fields and sampled over them; the
+    # toy responds to the servo gain through the derived kp.
+    start = SimParams.sts3215(latency_frames=2)
+    assert dims_of(start) == tuple(SERVO_SPACE) and space_of(START) is SPACE and dims_of(START) == DIMS
+    fits = bootstrap_fits(episodes, start, n_fits=3, n_train=3, max_evaluations=10, seed=2, simulate=fake_simulate)
+    assert all(f.params.servo == "sts3215" for f in fits)
+    assert any(f.params.servo_gain != start.servo_gain for f in fits)
+    dr = DRRanges.from_fits(fits, start, dataset="toy/servo", lock="servo-a")
+    assert set(dr.ranges) == set(SERVO_SPACE)
+    assert "kp" not in dr.ranges and "kv" not in dr.ranges
+    gain = dr["servo_gain"]
+    assert gain.scale == "log" and gain.lo <= start.servo_gain <= gain.hi
+    assert set(gain.samples) == {float(f.params.servo_gain) for f in fits}
+    assert dr["latency_frames"].scale == "int"
+    # sampling draws the servo fields and keeps the servo model; kp follows the gain
+    draws = sample(dr, 0, 20)
+    assert all(d.servo == "sts3215" for d in draws)
+    gains = [float(d.servo_gain) for d in draws]
+    assert gain.lo - 1e-12 <= min(gains) and max(gains) <= gain.hi + 1e-12
+    if gain.hi > gain.lo:
+        assert len(set(gains)) > 1
+    for d in draws:
+        assert d.kp == pytest.approx(start.kp * d.servo_gain / start.servo_gain)
+        assert d.kt == start.kt and d.vin == start.vin  # motor constants are not randomized
+    # the file round-trips with the servo ranges
+    back = DRRanges.from_dict(json.loads(json.dumps(dr.to_dict())))
+    assert set(back.ranges) == set(SERVO_SPACE) and back.nominal == start
+    # hand-picked ranges follow the same space
+    pm = uniform_ranges(start, 0.2)
+    assert set(pm.ranges) == set(SERVO_SPACE) and pm["servo_gain"].nominal == pytest.approx(start.servo_gain)

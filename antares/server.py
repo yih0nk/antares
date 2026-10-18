@@ -538,6 +538,15 @@ def default_params():
     return SimParams.default()
 
 
+def start_params(servo: str = "position"):
+    """Where a fit starts: the stock model, or BAM's values for a servo model."""
+    from antares.sim import SimParams
+
+    if servo not in ("position", "sts3215"):
+        raise HTTPException(status_code=400, detail="servo must be one of position, sts3215")
+    return SimParams.sts3215() if servo == "sts3215" else SimParams.default()
+
+
 def params_from_dict(d: dict):
     from antares.sim import SimParams
 
@@ -1293,6 +1302,7 @@ def run_calibration(
     calibration_path: str | Path | None = None,
     robot_id: str | None = None,
     robot_type: str = "so101_follower",
+    servo: str = "position",
 ) -> tuple[Any, dict, Path]:
     """Calibrate on ``ds``, save a lock, return (CalibrationResult, lock dict, path).
 
@@ -1310,7 +1320,10 @@ def run_calibration(
     still frames, then frozen).
 
     ``fit_gravity`` adds ``gravity_scale`` to the shared stage and
-    ``fit_deadband`` the servo ``deadband`` to both stages.
+    ``fit_deadband`` the servo ``deadband`` to both stages. ``servo``
+    ``"sts3215"`` starts from BAM's STS3215 servo model
+    (:meth:`antares.sim.SimParams.sts3215`) and fits its per-arm terms
+    instead of the position actuator's gains.
     ``calibration_path`` (a LeRobot calibration file) or ``robot_id`` (the
     ``--robot.id`` LeRobot saved it under, with ``robot_type``) replaces the
     model-derived unit map with the follower's own tick-to-angle map for
@@ -1336,6 +1349,7 @@ def run_calibration(
         unit_map = unit_map_from_calibration(calib_d, model)
         cal_prior = command_map_prior(calib_d, model)
         cal_record = calibration_record(calib_d, model, path=cal_path, robot_id=robot_id, robot_type=robot_type)
+    start = start_params(servo)
     train, eval_ = split_episodes(ds.episodes, n_train, n_eval, seed=seed)
     extra: dict[str, Any] = {}
     if per_joint:
@@ -1362,7 +1376,7 @@ def run_calibration(
         out = calibrate_with_sensor(
             train,
             eval_,
-            start=default_params(),
+            start=start,
             max_evaluations=max_evaluations,
             seed=seed,
             on_progress=on_progress,
@@ -1388,7 +1402,7 @@ def run_calibration(
     result = calibrate(
         train,
         eval_,
-        start=default_params(),
+        start=start,
         max_evaluations=max_evaluations,
         seed=seed,
         on_progress=on_progress,
@@ -1462,6 +1476,7 @@ def _job_worker(job: Job, req: "CalibrateRequest") -> None:
             n_seeds=req.n_seeds,
             fit_gravity=req.fit_gravity,
             fit_deadband=req.fit_deadband,
+            servo=req.servo,
             calibration_path=req.calibration_path,
             robot_id=req.robot_id,
             robot_type=req.robot_type,
@@ -1978,8 +1993,10 @@ def replay(
 class ReplayRequest(BaseModel):
     dataset: str
     episode: int
-    # A value is a scalar or a per-joint list of 6, as SimParams.from_dict accepts.
-    params: dict[str, float | list[float]]
+    # A value is a scalar or a per-joint list of 6, as SimParams.from_dict
+    # accepts; ``servo`` (the actuator model's name, written by a servo-model
+    # fit's to_dict) is a string. Anything else is rejected by params_from_dict.
+    params: dict[str, float | list[float] | str]
     # Optional {"gain": [6], "bias": [6]}, as a lock stores it (extra keys such
     # as its "mode" are ignored); omitted means identity.
     command_map: dict[str, Any] | None = None
@@ -2068,6 +2085,8 @@ class CalibrateRequest(BaseModel):
     # deadband (both stages); see run_calibration.
     fit_gravity: bool = False
     fit_deadband: bool = False
+    # Actuator model: the position actuator, or BAM's STS3215 servo model.
+    servo: Literal["position", "sts3215"] = "position"
     # Sim model override (registry name); default: the dataset's family.
     robot: str | None = None
     # The physical robot's id (LeRobot's --robot.id, e.g. "arm_a"). Two effects:

@@ -14,6 +14,7 @@ import {
   type LockSummary,
   type ObjectsFit,
   type ObjectTrack,
+  type NumericParamKey,
   type Params,
   type ParamValue,
   type PolicyEvalEvent,
@@ -44,9 +45,14 @@ import { FleetView } from "./Fleet";
 
 const DEFAULT = "default";
 const LIVE = "live";
-const PARAM_KEYS: (keyof Params)[] = ["kp", "kv", "damping", "armature", "frictionloss", "latency_frames", "forcerange", "gravity_scale", "deadband"];
+const PARAM_KEYS: NumericParamKey[] = ["kp", "kv", "damping", "armature", "frictionloss", "latency_frames", "forcerange", "gravity_scale", "deadband"];
 // Terms a lock omits at their defaults; the row shows only when the lock carries one.
-const OPTIONAL_DEFAULTS: Partial<Record<keyof Params, number>> = { gravity_scale: 1, deadband: 0 };
+const OPTIONAL_DEFAULTS: Partial<Record<NumericParamKey, number>> = { gravity_scale: 1, deadband: 0 };
+// The STS3215 servo model's fields, written only by a --servo fit; shown when either side has them.
+const SERVO_KEYS: NumericParamKey[] = ["servo_gain", "p_coefficient", "vin", "kt", "resistance", "max_velocity"];
+// With a servo model these hold its linearized PD equivalent, not fitted values.
+const LINEARIZED_KEYS: ReadonlySet<NumericParamKey> = new Set<NumericParamKey>(["kp", "kv", "forcerange"]);
+const servoOf = (p: Params) => p.servo ?? "position";
 const SPEEDS = [0.25, 0.5, 1, 2];
 // Which arms the viewer draws: both overlaid, or one at a time.
 const SHOW = ["both", "real", "sim"] as const;
@@ -92,7 +98,7 @@ const short = (id: string) => id.split("/").pop() ?? id;
 const deg = (v: number | null | undefined, digits = 2) => (v == null || !isFinite(v) ? "--" : `${v.toFixed(digits)}°`);
 const cm = (v: number | null | undefined, digits = 1) => (v == null || !isFinite(v) ? "--" : `${v.toFixed(digits)} cm`);
 
-function fmtScalar(k: keyof Params, v: number) {
+function fmtScalar(k: NumericParamKey, v: number) {
   if (k === "latency_frames") return `${Math.round(v)} fr`;
   if (Math.abs(v) >= 100) return v.toFixed(1);
   if (Math.abs(v) >= 1) return v.toFixed(3);
@@ -100,7 +106,7 @@ function fmtScalar(k: keyof Params, v: number) {
 }
 
 // A per-joint value shows as its range across the six joints.
-function fmtParam(k: keyof Params, v: ParamValue) {
+function fmtParam(k: NumericParamKey, v: ParamValue) {
   if (!Array.isArray(v)) return fmtScalar(k, v);
   const lo = Math.min(...v);
   const hi = Math.max(...v);
@@ -1505,17 +1511,45 @@ export default function App() {
                 </tr>
               </thead>
               <tbody>
+                {(servoOf(defaultParams) !== "position" || servoOf(shownParams) !== "position") && (
+                  <tr>
+                    <td>servo</td>
+                    <td>{servoOf(defaultParams)}</td>
+                    <td className={servoOf(shownParams) === servoOf(defaultParams) ? "" : "changed"}>
+                      {servoOf(shownParams)}
+                    </td>
+                  </tr>
+                )}
                 {PARAM_KEYS.map((k) => {
                   const optional = OPTIONAL_DEFAULTS[k];
                   if (optional != null && defaultParams[k] == null && shownParams[k] == null) return null;
                   const d = defaultParams[k] ?? optional;
                   const g = shownParams[k] ?? optional;
                   if (d == null || g == null) return null; // older locks have no forcerange
+                  // a servo fit's kp/kv/forcerange are its linearized equivalent, not fitted
+                  const derived = LINEARIZED_KEYS.has(k) && servoOf(shownParams) !== "position";
+                  return (
+                    <tr key={k}>
+                      <td title={derived ? "PD equivalent of the servo model (derived, not fitted)" : undefined}>
+                        {k}
+                        {derived && <span className="muted"> (PD equiv.)</span>}
+                      </td>
+                      <td>{fmtParam(k, d)}</td>
+                      <td className={sameParam(g, d) ? "" : "changed"}>{fmtParam(k, g)}</td>
+                    </tr>
+                  );
+                })}
+                {SERVO_KEYS.map((k) => {
+                  const d = defaultParams[k];
+                  const g = shownParams[k];
+                  if (d == null && g == null) return null; // position-actuator fits have none
                   return (
                     <tr key={k}>
                       <td>{k}</td>
-                      <td>{fmtParam(k, d)}</td>
-                      <td className={sameParam(g, d) ? "" : "changed"}>{fmtParam(k, g)}</td>
+                      <td>{d == null ? "–" : fmtParam(k, d)}</td>
+                      <td className={d != null && g != null && sameParam(g, d) ? "" : "changed"}>
+                        {g == null ? "–" : fmtParam(k, g)}
+                      </td>
                     </tr>
                   );
                 })}

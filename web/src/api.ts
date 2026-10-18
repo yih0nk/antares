@@ -18,7 +18,21 @@ export type Params = {
   // omitted at their defaults, so older locks have neither.
   gravity_scale?: ParamValue;
   deadband?: ParamValue;
+  // Actuator model: absent or "position" is MuJoCo's position actuator;
+  // "sts3215" simulates the Feetech servo's firmware and motor. With a
+  // servo model the fields below are written too, and kp/kv/forcerange hold
+  // the model's linearized PD equivalent rather than fitted values.
+  servo?: string;
+  servo_gain?: ParamValue;
+  p_coefficient?: ParamValue;
+  vin?: ParamValue;
+  kt?: ParamValue;
+  resistance?: ParamValue;
+  max_velocity?: ParamValue;
 };
+
+// The numeric parameters (everything but the actuator model's name).
+export type NumericParamKey = Exclude<keyof Params, "servo">;
 
 // Where a dataset came from: pinned demo, any Hub id, a zip/parquet upload,
 // or a directory on the server's disk.

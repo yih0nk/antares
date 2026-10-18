@@ -61,6 +61,24 @@ def test_sag_report_recovers_the_true_gravity_scale():
     assert d["worst_joint"] in JOINTS and d["joints"]["elbow_flex"]["bins"]
 
 
+def test_sag_report_uses_the_servo_models_linearized_stiffness():
+    # The STS3215 model is as stiff as kp ~9.4; the implied gravity scale must
+    # be read with that, not with the stock position actuator's 998 (which
+    # would put the implied scale about 100x off).
+    servo = SimParams.sts3215()
+    assert servo.linearized().kp < 20
+    truth = Arm(servo.replace(gravity_scale=0.4))
+    eps = [sweep_episode(truth, i) for i in range(3)]
+    rep = sag_report(Arm(servo), eps)
+    elbow = rep.joints["elbow_flex"]
+    assert elbow.partial_r2 > 0.5
+    assert elbow.implied_gravity_scale == pytest.approx(0.4, abs=0.1)
+    assert rep.implied_gravity_scale == pytest.approx(0.4, abs=0.1)
+    # same answer as the explicit PD equivalent, which is what the regression assumes
+    lin = sag_report(Arm(servo.linearized()), eps)
+    assert lin.joints["elbow_flex"].implied_gravity_scale == pytest.approx(elbow.implied_gravity_scale, abs=0.05)
+
+
 def test_sag_report_needs_episodes():
     with pytest.raises(ValueError):
         sag_report(Arm(SOFT), [])

@@ -48,6 +48,27 @@ def fake_simulate(params: SimParams, ep: Episode):
     return ep.state, toy_response(params, ep.action, ep.fps)
 
 
+def test_compute_trends_skips_the_servo_models_name():
+    # A servo lock's params carry the string ``servo``; the trend table must
+    # trend the numeric fields (the servo's gain among them) and skip it.
+    from antares.drift import trended_params
+
+    start = SimParams.sts3215(latency_frames=1)
+    windows = [
+        DriftWindow(episodes=list(range(5 * i, 5 * i + 10)),
+                    params=start.replace(servo_gain=start.servo_gain * (1 - 0.1 * i)),
+                    train_score=0.8, lock_score=1.0 + 0.1 * i)
+        for i in range(5)
+    ]
+    trends = compute_trends(windows, n_boot=20)
+    names = trended_params(start)
+    assert "servo" not in names and "servo" not in trends
+    assert "servo_gain" in names and "max_velocity" in names
+    assert trends["servo_gain"].slope < 0 and trends["servo_gain"].log_space
+    assert trends["max_velocity"].log_space
+    assert set(trends) == set(names) | {"lock_score", "train_score"}
+
+
 def session(n: int = 30, decay: float = 0.4, T: int = 100, fps: float = 30.0, seed: int = 0) -> list[Episode]:
     """Episodes whose true kp falls linearly by ``decay`` from first to last."""
     rng = np.random.default_rng(seed)
