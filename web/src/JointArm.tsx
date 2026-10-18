@@ -1,17 +1,17 @@
+import { hexToRgb, palette } from "./theme";
+
 // A side-view sketch of the SO-100/101 arm with each joint drawn as a dot
-// sized and colored by its tracking error, so where the sim is off reads at a
-// glance. The scale is absolute (degrees), so a calibrated ghost visibly
-// cools down against the default one.
+// sized and coloured by its tracking error, with the number beside it, so
+// where the sim is off reads at a glance. The scale is absolute (degrees), so
+// a calibrated sim visibly cools down against the stock model. The heat runs
+// through the status colours (good, warn, critical); size and the label carry
+// the same value, so it never relies on colour alone.
 
 export const ARM_JOINTS = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"];
 
 // Error at which a joint is drawn fully hot.
 const HOT_DEG = 8;
-const STOPS: [number, number, number][] = [
-  [63, 214, 184],
-  [226, 179, 90],
-  [255, 91, 110],
-];
+const STOPS: [number, number, number][] = [hexToRgb(palette.good), hexToRgb(palette.warn), hexToRgb(palette.critical)];
 
 export function heat(v: number) {
   const t = Math.min(1, Math.max(0, v / HOT_DEG));
@@ -24,7 +24,7 @@ const AT: Record<string, { p: [number, number]; dx: number; dy: number; anchor: 
   shoulder_pan: { p: [92, 164], dx: -20, dy: 0, anchor: "end" },
   shoulder_lift: { p: [104, 124], dx: -22, dy: -6, anchor: "end" },
   elbow_flex: { p: [146, 52], dx: 0, dy: -28, anchor: "middle" },
-  wrist_flex: { p: [214, 72], dx: -6, dy: -32, anchor: "end" },
+  wrist_flex: { p: [214, 72], dx: 0, dy: -32, anchor: "middle" },
   wrist_roll: { p: [252, 84], dx: 0, dy: -32, anchor: "start" },
   gripper: { p: [286, 96], dx: 0, dy: 32, anchor: "middle" },
 };
@@ -45,7 +45,7 @@ type Props = {
 export function JointArm({ errors, selected, onSelect }: Props) {
   return (
     <div className="joint-arm">
-      <svg viewBox="0 0 320 200" role="img" aria-label="Arm sketch with each joint colored by its tracking error">
+      <svg viewBox="0 0 320 200" role="img" aria-label="Arm sketch with each joint coloured by its tracking error">
         <rect x="66" y="176" width="52" height="12" rx="3" className="arm-base" />
         {LINKS.map(([a, b]) => (
           <line key={a} x1={AT[a].p[0]} y1={AT[a].p[1]} x2={AT[b].p[0]} y2={AT[b].p[1]} className="arm-link" />
@@ -84,10 +84,10 @@ export function JointArm({ errors, selected, onSelect }: Props) {
           );
         })}
       </svg>
-      <div className="arm-scale">
-        <span>0°</span>
+      <div className="arm-scale" aria-hidden="true">
+        <span className="num">0°</span>
         <i />
-        <span>{HOT_DEG}°+</span>
+        <span className="num">{HOT_DEG}°+</span>
       </div>
     </div>
   );

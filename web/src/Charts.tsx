@@ -2,12 +2,18 @@
 // width through viewBox + preserveAspectRatio="none" and keep strokes crisp
 // with vector-effect.
 
-import { useMemo } from "react";
+import { useId, useMemo } from "react";
+import { hexToRgb, palette, type SimTone } from "./theme";
 
 type TraceProps = {
   real: number[];
   sim: number[];
   frame: number;
+  // Which physics the sim trace runs on: stock grey or calibrated blue.
+  simTone?: SimTone;
+  // Frame rate, for the playhead's spoken value ("2.30 s of 10.10 s").
+  fps?: number;
+  label?: string;
   onSeek?: (frame: number) => void;
 };
 
@@ -25,7 +31,10 @@ function path(values: number[], n: number, lo: number, hi: number, w: number, h:
 const W = 1000;
 const H = 100;
 
-export function JointTrace({ real, sim, frame, onSeek }: TraceProps) {
+// One joint over the episode: the real arm as a solid line, the sim dashed.
+// It doubles as the timeline's scrubber (a slider: click or drag to seek;
+// the arrow keys are handled by the viewer's shortcuts).
+export function JointTrace({ real, sim, frame, simTone = "sim", fps = 30, label = "Playhead", onSeek }: TraceProps) {
   const n = Math.max(real.length, sim.length);
   // The playhead moves every frame; the paths only change with the data.
   const paths = useMemo(() => {
@@ -47,6 +56,7 @@ export function JointTrace({ real, sim, frame, onSeek }: TraceProps) {
     onSeek(t * (n - 1));
   };
 
+  const secs = (f: number) => `${(f / Math.max(1, fps)).toFixed(2)} s`;
   return (
     <svg
       className="trace"
@@ -54,9 +64,17 @@ export function JointTrace({ real, sim, frame, onSeek }: TraceProps) {
       preserveAspectRatio="none"
       onPointerDown={seek}
       onPointerMove={seek}
+      role="slider"
+      tabIndex={0}
+      aria-label={label}
+      aria-valuemin={0}
+      aria-valuemax={Math.max(0, n - 1)}
+      aria-valuenow={Math.round(frame)}
+      aria-valuetext={`${secs(frame)} of ${secs(Math.max(0, n - 1))}`}
+      aria-keyshortcuts="ArrowLeft ArrowRight Shift+ArrowLeft Shift+ArrowRight"
     >
       <path d={paths.real} className="trace-real" vectorEffect="non-scaling-stroke" />
-      <path d={paths.sim} className="trace-sim" vectorEffect="non-scaling-stroke" />
+      <path d={paths.sim} className={`trace-sim tone-${simTone}`} vectorEffect="non-scaling-stroke" />
       <line x1={x} x2={x} y1={0} y2={H} className="trace-head" vectorEffect="non-scaling-stroke" />
     </svg>
   );
@@ -70,15 +88,18 @@ type ResidualProps = {
   grasps: number[][];
   frames: number;
   frame: number;
+  // The residual's physics: stock grey or calibrated blue.
+  simTone?: SimTone;
   onSeek?: (frame: number) => void;
 };
 
 const RH = 40;
 
 // Where the sim disagrees with the arm: the residual as an area, detected
-// events shaded by kind, grasp windows as faint bands. Shares the trace's x
-// axis so the two strips line up.
-export function ResidualStrip({ sum, events, grasps, frames, frame, onSeek }: ResidualProps) {
+// events shaded by kind (contact critical, anomaly warn), gripper-closed
+// windows as a neutral hatch. Shares the trace's x axis so the two line up.
+export function ResidualStrip({ sum, events, grasps, frames, frame, simTone = "sim", onSeek }: ResidualProps) {
+  const hatch = `hatch-${useId().replace(/:/g, "")}`;
   const n = Math.max(frames, sum.length);
   const x = (f: number) => (f / Math.max(1, n - 1)) * W;
   const area = useMemo(() => {
@@ -102,9 +123,18 @@ export function ResidualStrip({ sum, events, grasps, frames, frame, onSeek }: Re
       preserveAspectRatio="none"
       onPointerDown={seek}
       onPointerMove={seek}
+      role="img"
+      aria-label={`Residual |real − sim| over the episode: ${events.filter((e) => e.kind === "contact").length} contact and ${
+        events.filter((e) => e.kind === "anomaly").length
+      } anomaly spans, ${grasps.length} gripper-closed windows`}
     >
+      <defs>
+        <pattern id={hatch} width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+          <line x1="0" y1="0" x2="0" y2="6" className="res-hatch-line" />
+        </pattern>
+      </defs>
       {grasps.map(([s, e], i) => (
-        <rect key={`g${i}`} x={x(s)} width={Math.max(1, x(e) - x(s))} y={0} height={RH} className="res-grasp" />
+        <rect key={`g${i}`} x={x(s)} width={Math.max(1, x(e) - x(s))} y={0} height={RH} className="res-grasp" style={{ fill: `url(#${hatch})` }} />
       ))}
       {events.map((ev, i) => (
         <rect
@@ -120,7 +150,7 @@ export function ResidualStrip({ sum, events, grasps, frames, frame, onSeek }: Re
           </title>
         </rect>
       ))}
-      <path d={area} className="res-area" />
+      <path d={area} className={`res-area tone-${simTone}`} />
       <line x1={x(frame)} x2={x(frame)} y1={0} y2={RH} className="trace-head" vectorEffect="non-scaling-stroke" />
     </svg>
   );
@@ -136,21 +166,22 @@ type CrossProps = {
   home: Record<string, string>;
 };
 
-const GOOD = [0x5b, 0x8c, 0xff]; // --sim
-const MID = [0x4a, 0x52, 0x66]; // neutral between
-const BAD = [0xff, 0x8a, 0x5b]; // --warm
+const GOOD = hexToRgb(palette.good); // low error
+const MID = hexToRgb(palette.borderStrong); // neutral between
+const BAD = hexToRgb(palette.critical); // high error
 
 function mix(a: number[], b: number[], t: number) {
   return a.map((v, i) => Math.round(v + (b[i] - v) * t));
 }
 
-// Blue (good) through gray to warm (bad), positioned on a log scale over the
-// matrix's own range so a 6° default and a 0.7° lock both get a readable cell.
+// Good (low error) through grey to critical (high), positioned on a log scale
+// over the matrix's own range so a 6° default and a 0.7° lock both get a
+// readable cell. Every cell also prints its number: colour is never alone.
 function cellColor(v: number, lo: number, hi: number) {
   const l = (x: number) => Math.log(Math.max(1e-3, x));
   const t = hi > lo ? Math.min(1, Math.max(0, (l(v) - l(lo)) / (l(hi) - l(lo)))) : 0.5;
   const c = t < 0.5 ? mix(GOOD, MID, t * 2) : mix(MID, BAD, (t - 0.5) * 2);
-  return `rgba(${c[0]}, ${c[1]}, ${c[2]}, 0.55)`;
+  return `rgba(${c[0]}, ${c[1]}, ${c[2]}, 0.42)`;
 }
 
 const short = (id: string) => id.split("/").pop() ?? id;
@@ -165,11 +196,11 @@ export function CrossHeatmap({ rows, cols, scores, perJoint, home }: CrossProps)
       <thead>
         <tr>
           <th className="corner">
-            dataset <span className="muted">↓</span> · lock <span className="muted">→</span>
+            dataset <span className="muted">↓</span> · physics <span className="muted">→</span>
           </th>
           {cols.map((c) => (
-            <th key={c} title={c === "default" ? "MJCF defaults, uncalibrated" : `lock ${c}, fitted on ${short(home[c] ?? "?")}`}>
-              {c === "default" ? "default sim" : c.replace(/_/g, "_​")}
+            <th key={c} title={c === "default" ? "Stock model: the MJCF defaults, uncalibrated" : `lock ${c}, fitted on ${short(home[c] ?? "?")}`}>
+              {c === "default" ? "stock model" : c.replace(/_/g, "_\u200b")}
             </th>
           ))}
         </tr>
@@ -211,13 +242,15 @@ type SparkProps = {
   baseline?: number | null;
   // Evaluation index where a second stage starts; drawn as a divider.
   stageAt?: number | null;
+  // What the line is, for screen readers.
+  label?: string;
 };
 
 // Best-so-far error over evaluations, on a fixed x range so the line grows.
-export function Sparkline({ values, total, baseline, stageAt }: SparkProps) {
+export function Sparkline({ values, total, baseline, stageAt, label = "Best score so far" }: SparkProps) {
   const W = 280;
   const H = 64;
-  if (!values.length) return <svg className="spark" viewBox={`0 0 ${W} ${H}`} />;
+  if (!values.length) return <svg className="spark" viewBox={`0 0 ${W} ${H}`} role="img" aria-label={`${label}: no evaluations yet`} />;
   const hi = Math.max(baseline ?? 0, ...values);
   const lo = 0;
   const n = Math.max(total, values.length);
@@ -226,7 +259,7 @@ export function Sparkline({ values, total, baseline, stageAt }: SparkProps) {
   const lastX = ((values.length - 1) / Math.max(1, n - 1)) * W;
   const stageX = stageAt != null && stageAt > 0 && stageAt < n ? (stageAt / Math.max(1, n - 1)) * W : null;
   return (
-    <svg className="spark" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none">
+    <svg className="spark" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" role="img" aria-label={`${label}: ${values.length} of ${n} evaluations`}>
       {baseline != null && (
         <line x1={0} x2={W} y1={y(baseline)} y2={y(baseline)} className="spark-base" vectorEffect="non-scaling-stroke" />
       )}
@@ -254,7 +287,7 @@ type HistorySparkProps = {
   reference?: number | null;
 };
 
-// One lock's check scores over calendar time: the limit as a warm rule, the
+// One lock's check scores over calendar time: the limit as a critical rule, the
 // lock's reference dashed, one marker per check coloured by its verdict.
 // Uniform scaling (not `none`) keeps the markers round.
 export function HistorySpark({ points, reference }: HistorySparkProps) {
