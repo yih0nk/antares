@@ -238,6 +238,28 @@ export type HistoryEntry = {
   antares_version: string;
 };
 
+// POST /api/check's answer. `diagnosis` comes back only with explain=true
+// and a drifted verdict (null with `diagnosis_error` when the refit failed).
+export type CheckResponse = {
+  passed: boolean;
+  verdict: CheckVerdict;
+  score: number | null;
+  reference: number | null;
+  limit: number | null;
+  ratio: number;
+  threshold_deg: number | null;
+  min_episodes: number;
+  worst_joint: string | null;
+  n_episodes: number;
+  n_frames: number;
+  episodes: number[];
+  lock: string;
+  dataset: string;
+  history_error?: string;
+  diagnosis?: { summary: string; causes: string[]; explained: boolean; refit_deg: number | null; stale_deg: number | null } | null;
+  diagnosis_error?: string;
+};
+
 // Least-squares line through a lock's check scores over time.
 export type HistoryTrend = {
   n: number;
@@ -882,6 +904,14 @@ export const api = {
       `/api/cross?${q({ datasets: datasets.join(","), locks: locks.join(","), n_train: nTrain, n_eval: nEval })}`,
     ).then((r) => json<CrossMatrix>(r)),
   dashboard: () => fetch("/api/dashboard").then((r) => json<Dashboard>(r)),
+  // POST /api/check: replay a dataset through a lock and judge drift; the
+  // result is recorded in the lock's history (always 200; read `verdict`).
+  check: (dataset: string, lock: string, explain = false) =>
+    fetch("/api/check", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dataset, lock, explain }),
+    }).then((r) => json<CheckResponse>(r)),
   // A lock that was never checked (or a server without the history store)
   // answers 404; the fleet view shows that as an empty history.
   history: (lock: string) =>

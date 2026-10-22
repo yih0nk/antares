@@ -1,13 +1,16 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import App from "./App";
-// Fonts bundled with the build, so the viewer renders the same offline.
-import "@fontsource/inter/400.css";
-import "@fontsource/inter/500.css";
-import "@fontsource/inter/600.css";
-import "@fontsource/jetbrains-mono/400.css";
-import "@fontsource/jetbrains-mono/500.css";
+// IBM Plex Mono, self-hosted: the only typeface (400 body, 500 emphasis, 600 the hero number).
+import "@fontsource/ibm-plex-mono/400.css";
+import "@fontsource/ibm-plex-mono/500.css";
+import "@fontsource/ibm-plex-mono/600.css";
 import "./styles.css";
+import { applyTheme } from "./theme";
+import App from "./App";
+
+// theme.ts is the one source of colour: write it onto :root as CSS custom
+// properties before the first render (three.js and the charts import it directly).
+applyTheme();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

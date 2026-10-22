@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type KeyboardEvent } from "react";
 import { api, type Dashboard, type DashboardRobot, type LockHistory, type ParamValue } from "./api";
 import { HistorySpark, type HistoryPoint } from "./Charts";
+import { CheckPanel } from "./CheckPanel";
+import { Badge, Button, Icon, InlineNotice, LegendItem, LineKey, type Tone } from "./ui";
 
 // One screen for a fleet: every saved lock as a row with its calibration
 // quality, its last `antares check` and the trend of those checks. Rows
@@ -18,6 +20,21 @@ const STATUS_LABEL: Record<Status, string> = {
   drifted: "drifted",
   insufficient: "insufficient data",
   never: "never checked",
+};
+
+// Status is never colour alone: each verdict has a glyph and a word.
+const STATUS_BADGE: Record<Status, { tone: Tone; glyph: string }> = {
+  ok: { tone: "good", glyph: "✓" },
+  drifted: { tone: "critical", glyph: "▲" },
+  insufficient: { tone: "warn", glyph: "◐" },
+  never: { tone: "muted", glyph: "○" },
+};
+
+// Enter or Space on a focused table row toggles it, like a click.
+const rowKeys = (toggle: () => void) => (e: KeyboardEvent<HTMLTableRowElement>) => {
+  if (e.target !== e.currentTarget || (e.key !== "Enter" && e.key !== " ")) return;
+  e.preventDefault();
+  toggle();
 };
 
 function verdictStatus(verdict: string | null | undefined): Status {
@@ -91,8 +108,8 @@ const COLUMNS: { key: SortKey; label: string; title: string }[] = [
   { key: "robot", label: "robot", title: "registered robot id, or the lock name" },
   { key: "dataset", label: "dataset", title: "the LeRobot dataset the lock was fitted on" },
   { key: "calibrated", label: "calibrated", title: "when the lock was written" },
-  { key: "error", label: "default → calibrated", title: "held-out tracking RMSE, default sim → this lock" },
-  { key: "gap", label: "gap closed", title: "fraction of the default sim's error the lock removed" },
+  { key: "error", label: "stock → calibrated", title: "held-out tracking RMSE, stock model → this lock" },
+  { key: "gap", label: "gap closed", title: "fraction of the stock model's error the lock removed" },
   { key: "latency", label: "latency", title: "fitted command latency (frames, and ms at the dataset's fps)" },
   { key: "check", label: "last check", title: "the newest `antares check` of this lock: score vs limit" },
   { key: "trend", label: "trend", title: "slope of the check scores over time, with the fit's r²" },
@@ -267,17 +284,19 @@ export function FleetView({ initialOpen = null }: { initialOpen?: string | null 
         key={r.name}
         className={`robot ${kind} ${isOpen ? "open" : ""}`}
         onClick={() => toggle(r.name)}
+        onKeyDown={rowKeys(() => toggle(r.name))}
+        tabIndex={0}
         aria-expanded={isOpen}
       >
         <td>
           <div className="robot-name">
             {kind === "lineage" && r.version != null && (
-              <span className={`chip tiny version ${r.is_active ? "active" : ""}`} title={r.is_active ? "the active lock of this robot" : "an older calibration of this robot"}>
+              <Badge tone={r.is_active ? "good" : "muted"} glyph={r.is_active ? "●" : undefined} title={r.is_active ? "the active lock of this robot" : "an older calibration of this robot"}>
                 v{r.version}
                 {r.is_active && " · active"}
-              </span>
+              </Badge>
             )}
-            <span className="mono" title={r.name}>
+            <span className="lock-name" title={r.name}>
               {r.name}
             </span>
             <LockChips r={r} />
@@ -288,7 +307,7 @@ export function FleetView({ initialOpen = null }: { initialOpen?: string | null 
       isOpen && (
         <tr key={`${r.name}:detail`} className="fleet-detail">
           <td colSpan={columns.length}>
-            <RobotDetail robot={r} history={histories[r.name]} />
+            <RobotDetail robot={r} history={histories[r.name]} onChecked={() => { load(); fetchHistory(r.name); }} />
           </td>
         </tr>
       ),
@@ -301,22 +320,29 @@ export function FleetView({ initialOpen = null }: { initialOpen?: string | null 
     const head = g.head;
     const version = head.version != null ? `v${head.version} of ${g.nVersions}` : `${g.nVersions} lock${g.nVersions === 1 ? "" : "s"}`;
     return [
-      <tr key={`robot:${g.id}`} className={`robot group-head ${expanded ? "expanded" : ""}`} onClick={() => toggleRobot(g.id)} aria-expanded={expanded}>
+      <tr
+        key={`robot:${g.id}`}
+        className={`robot group-head ${expanded ? "expanded" : ""}`}
+        onClick={() => toggleRobot(g.id)}
+        onKeyDown={rowKeys(() => toggleRobot(g.id))}
+        tabIndex={0}
+        aria-expanded={expanded}
+      >
         <td>
           <div className="robot-name">
             <span className="caret" aria-hidden="true">
-              {expanded ? "▾" : "▸"}
+              <Icon.chevron />
             </span>
             <span className="robot-id" title={`robot ${g.id}; active lock ${head.name}`}>
               {g.id}
             </span>
-            <span className="chip tiny version active" title={head.is_active ? `active lock ${head.name}, version ${head.version} of ${g.nVersions}` : `no active lock; showing ${head.name}`}>
+            <Badge tone="good" glyph="●" title={head.is_active ? `active lock ${head.name}, version ${head.version} of ${g.nVersions}` : `no active lock; showing ${head.name}`}>
               {version}
-            </span>
+            </Badge>
             {!head.is_active && (
-              <span className="chip tiny warn" title="the registry has no active lock for this robot">
+              <Badge tone="warn" glyph="!" title="the registry has no active lock for this robot">
                 no active lock
-              </span>
+              </Badge>
             )}
             <LockChips r={head} />
           </div>
@@ -331,8 +357,8 @@ export function FleetView({ initialOpen = null }: { initialOpen?: string | null 
     <main className="fleet">
       <div className="fleet-head">
         <div>
-          <span className="label">fleet</span>
-          <div className="small muted">
+          <h1 className="section-title">Fleet</h1>
+          <div className="section-hint">
             {data
               ? `${robots.length} lock${robots.length === 1 ? "" : "s"} in the lock directory`
               : busy
@@ -358,18 +384,22 @@ export function FleetView({ initialOpen = null }: { initialOpen?: string | null 
             {data && ` · as of ${new Date(data.generated_at).toLocaleTimeString()}`}
           </div>
         </div>
-        <button className="cta secondary small-cta" onClick={load} disabled={busy}>
-          {busy ? "refreshing…" : "refresh"}
-        </button>
+        <Button busy={busy} onClick={load}>
+          {busy ? "Refreshing…" : "Refresh"}
+        </Button>
       </div>
 
-      {error && <div className="fleet-error">{error}</div>}
+      {error && (
+        <InlineNotice tone="error" title="Could not load the fleet" onDismiss={() => setError(null)}>
+          {error}
+        </InlineNotice>
+      )}
 
       <div className="tiles">
         <div className="tile">
-          <span className="label">robots</span>
+          <span className="section-label">robots</span>
           <span className="value">{stats.robots}</span>
-          <span className="small muted">
+          <span className="caption">
             {grouped
               ? `${stats.registered} registered · ${stats.locks} lock${stats.locks === 1 ? "" : "s"}`
               : stats.inFleet
@@ -378,27 +408,28 @@ export function FleetView({ initialOpen = null }: { initialOpen?: string | null 
           </span>
         </div>
         <div className="tile">
-          <span className="label">median gap closed</span>
+          <span className="section-label">median gap closed</span>
           <span className="value">{pct(stats.medianGap)}</span>
-          <span className="small muted">held-out error, default → calibrated{grouped ? " (active locks)" : ""}</span>
+          <span className="caption">held-out error, stock model → calibrated{grouped ? " (active locks)" : ""}</span>
         </div>
         <div className="tile">
-          <span className="label">drifted at last check</span>
-          <span className={`value ${stats.drifted ? "drifted" : ""}`}>{stats.drifted}</span>
-          <span className="small muted">
-            {stats.checked ? `of ${stats.checked} checked` : "no robot has been checked yet"}
+          <span className="section-label">drifted at last check</span>
+          <span className={`value ${stats.drifted ? "drifted" : ""}`}>
+            {stats.drifted > 0 && <Icon.warn />}
+            {stats.drifted}
           </span>
+          <span className="caption">{stats.checked ? `of ${stats.checked} checked` : "no robot has been checked yet"}</span>
         </div>
         <div className="tile">
-          <span className="label">never checked</span>
-          <span className={`value ${stats.never ? "never" : ""}`}>{stats.never}</span>
-          <span className="small muted">no `antares check` on record</span>
+          <span className="section-label">never checked</span>
+          <span className="value">{stats.never}</span>
+          <span className="caption">no `antares check` on record</span>
         </div>
       </div>
 
       {data && !robots.length ? (
-        <div className="fleet-empty muted">
-          No locks yet. Calibrate an arm in the Viewer, or run <span className="mono">antares fleet scan</span>.
+        <div className="fleet-empty">
+          No locks yet. Calibrate an arm in the Viewer, or run <code>antares fleet scan</code>.
         </div>
       ) : (
         <div className="fleet-table-wrap">
@@ -409,7 +440,11 @@ export function FleetView({ initialOpen = null }: { initialOpen?: string | null 
                   <th key={c.key} aria-sort={sort.key === c.key ? (sort.dir === 1 ? "ascending" : "descending") : "none"}>
                     <button className={sort.key === c.key ? "on" : ""} onClick={() => sortBy(c.key)} title={c.title}>
                       {c.label}
-                      {sort.key === c.key && <span className="sort-dir">{sort.dir === 1 ? "▲" : "▼"}</span>}
+                      {sort.key === c.key && (
+                        <span className="sort-dir" aria-hidden="true">
+                          {sort.dir === 1 ? "▲" : "▼"}
+                        </span>
+                      )}
                     </button>
                   </th>
                 ))}
@@ -437,24 +472,16 @@ export function FleetView({ initialOpen = null }: { initialOpen?: string | null 
 function LockChips({ r }: { r: DashboardRobot }) {
   return (
     <>
-      {r.in_fleet && (
-        <span className="chip tiny" title="calibrated by `antares fleet scan`">
-          fleet
-        </span>
-      )}
-      {r.space === "per_joint" && (
-        <span className="chip tiny" title="per-joint parameters">
-          per joint
-        </span>
-      )}
-      {r.drift.exists && (
-        <span
-          className={`chip tiny ${r.drift.verdict && /^drift/i.test(r.drift.verdict) ? "warn" : ""}`}
-          title={r.drift.verdict ?? "a drift scan exists for this lock"}
-        >
-          session drift
-        </span>
-      )}
+      {r.in_fleet && <Badge title="calibrated by `antares fleet scan`">fleet</Badge>}
+      {r.space === "per_joint" && <Badge title="one value per joint for each parameter">per-joint</Badge>}
+      {r.drift.exists &&
+        (r.drift.verdict && /^drift/i.test(r.drift.verdict) ? (
+          <Badge tone="warn" glyph="!" title={r.drift.verdict}>
+            session drift
+          </Badge>
+        ) : (
+          <Badge title={r.drift.verdict ?? "a drift scan exists for this lock"}>session drift</Badge>
+        ))}
     </>
   );
 }
@@ -466,41 +493,43 @@ function LockCells({ r, showPinned }: { r: DashboardRobot; showPinned: boolean }
   return (
     <>
       <td title={r.dataset ?? undefined}>{r.dataset ? short(r.dataset) : "--"}</td>
-      <td className="mono nowrap">{date(r.created_at)}</td>
-      <td className="mono nowrap">
-        <span className="muted">{deg(r.baseline_eval_score)}</span> → {deg(r.eval_score)}
+      <td className="nowrap">{date(r.created_at)}</td>
+      <td className="nowrap">
+        <span className="faint">{deg(r.baseline_eval_score)}</span> → {deg(r.eval_score)}
       </td>
-      <td className="mono nowrap">{pct(r.improvement)}</td>
-      <td className="mono nowrap">{fmtLatency(r)}</td>
+      <td className="nowrap">{pct(r.improvement)}</td>
+      <td className="nowrap">{fmtLatency(r)}</td>
       <td>
         <div className="check-cell">
-          <span className={`chip verdict ${status}`}>{STATUS_LABEL[status]}</span>
+          <Badge tone={STATUS_BADGE[status].tone} glyph={STATUS_BADGE[status].glyph}>
+            {STATUS_LABEL[status]}
+          </Badge>
           {latest && (
-            <span className="small muted mono" title={`${latest.n_episodes} episodes from ${latest.dataset}`}>
+            <span className="when" title={`${latest.n_episodes} episodes from ${latest.dataset}`}>
               {date(latest.at)} · {deg(latest.score)}
               {latest.limit != null && <> / {deg(latest.limit)}</>}
             </span>
           )}
         </div>
       </td>
-      <td className="mono nowrap">
+      <td className="nowrap">
         <Trend robot={r} />
       </td>
       <td className="nowrap">
         {r.worst_joint ? (
           <>
-            {r.worst_joint} <span className="mono muted">{deg(r.worst_joint_deg)}</span>
+            {r.worst_joint} <span className="faint">{deg(r.worst_joint_deg)}</span>
           </>
         ) : (
           "--"
         )}
       </td>
-      {showPinned && <td className="mono">{r.pinned && r.pinned.length ? r.pinned.join(", ") : "--"}</td>}
+      {showPinned && <td>{r.pinned && r.pinned.length ? r.pinned.join(", ") : "--"}</td>}
     </>
   );
 }
 
-function RobotDetail({ robot: r, history }: { robot: DashboardRobot; history: HistoryState | undefined }) {
+function RobotDetail({ robot: r, history, onChecked }: { robot: DashboardRobot; history: HistoryState | undefined; onChecked: () => void }) {
   const entries = history && typeof history !== "string" ? history.entries : [];
   const points: HistoryPoint[] = entries
     .filter((e) => e.score != null && isFinite(e.score))
@@ -520,39 +549,34 @@ function RobotDetail({ robot: r, history }: { robot: DashboardRobot; history: Hi
   return (
     <div className="detail-grid">
       <section>
-        <span className="label">check history</span>
+        <span className="section-label">check history</span>
         {history === "loading" ? (
-          <span className="small muted">loading…</span>
+          <span className="section-hint">Loading…</span>
         ) : history === "error" ? (
-          <span className="small muted">history unavailable</span>
+          <span className="section-hint">History unavailable.</span>
         ) : !points.length ? (
-          <span className="small muted">
-            never checked · <span className="mono">antares check &lt;dataset&gt; --lock {checkRef}</span>
+          <span className="section-hint">
+            Never checked. Run one below, or from a shell: <code>antares check &lt;dataset&gt; --lock {checkRef}</code>
           </span>
         ) : (
           <>
             <HistorySpark points={points} reference={r.eval_score} />
-            <div className="small muted">
+            <div className="section-hint">
               {points.length} check{points.length === 1 ? "" : "s"} · {date(points[0].at)} → {date(points[points.length - 1].at)}
               {trend && trend.n_drifted > 0 && <> · {trend.n_drifted} drifted</>}
               {" · "}trend <Trend robot={{ ...r, history: { latest: r.history.latest, trend } }} />
             </div>
-            <div className="small muted legend-inline">
-              <span>
-                <i className="swatch spark-ref" /> lock reference {deg(r.eval_score)}
-              </span>
-              {latest?.limit != null && (
-                <span>
-                  <i className="swatch warm" /> limit {deg(latest.limit)}
-                </span>
-              )}
+            <div className="legend-row">
+              <LegendItem k={<LineKey tone="stock" dashed />}>lock reference {deg(r.eval_score)}</LegendItem>
+              {latest?.limit != null && <LegendItem k={<LineKey tone="critical" />}>limit {deg(latest.limit)}</LegendItem>}
             </div>
           </>
         )}
+        <CheckPanel lock={checkRef} lockDataset={r.dataset} lockRobot={r.robot} onChecked={onChecked} />
       </section>
 
       <section>
-        <span className="label">{latest ? "per joint · last check vs lock" : "per joint · after calibration"}</span>
+        <span className="section-label">{latest ? "per joint · last check vs lock" : "per joint · after calibration"}</span>
         <div className="bars">
           {joints.map((j) => {
             const ref = reference[j];
@@ -566,7 +590,7 @@ function RobotDetail({ robot: r, history }: { robot: DashboardRobot; history: Hi
                   {latest ? (
                     chk != null && <div className={`bar check ${status}`} style={{ width: `${(chk / scale) * 100}%` }} />
                   ) : (
-                    ref != null && <div className="bar ghost" style={{ width: `${(ref / scale) * 100}%` }} />
+                    ref != null && <div className="bar tone-sim" style={{ width: `${(ref / scale) * 100}%` }} />
                   )}
                   {latest && ref != null && (
                     <div className="bar-ref" style={{ left: `${(ref / scale) * 100}%` }} title={`lock ${deg(ref)}`} />
@@ -579,45 +603,39 @@ function RobotDetail({ robot: r, history }: { robot: DashboardRobot; history: Hi
             );
           })}
         </div>
-        <div className="small muted legend-inline">
+        <div className="legend-row">
           {latest ? (
             <>
-              <span>
-                <i className={`swatch ${status}`} /> last check
-              </span>
-              <span>
-                <i className="swatch tick" /> lock
-              </span>
+              <LegendItem k={<span className={`key status-key ${status}`} />}>last check ({STATUS_LABEL[status]})</LegendItem>
+              <LegendItem k={<span className="key tick-key" />}>lock</LegendItem>
             </>
           ) : (
-            <span>
-              <i className="swatch sim" /> lock, held out
-            </span>
+            <LegendItem k={<span className="key bar-key tone-sim" />}>lock, held out</LegendItem>
           )}
         </div>
       </section>
 
       {(r.drift.exists || (r.pinned && r.pinned.length > 0) || r.robot_id) && (
-        <section className="detail-notes small">
+        <section className="detail-notes section-hint">
           {r.robot_id && (
             <div>
-              <span className="label">robot</span>
+              <span className="section-label">robot</span>
               <div>
-                <span className="mono">{r.robot_id}</span> · version {r.version ?? "?"} of {r.n_versions ?? "?"}
+                <span>{r.robot_id}</span> · version {r.version ?? "?"} of {r.n_versions ?? "?"}
                 {r.is_active ? " · active" : " · not active"}
               </div>
             </div>
           )}
           {r.drift.exists && (
             <div>
-              <span className="label">session drift</span>
+              <span className="section-label">session drift</span>
               <div>{r.drift.verdict ?? "scan on disk, no verdict recorded"}</div>
             </div>
           )}
           {r.pinned && r.pinned.length > 0 && (
             <div>
-              <span className="label">pinned</span>
-              <div className="mono">{r.pinned.join(", ")}</div>
+              <span className="section-label">pinned</span>
+              <div>{r.pinned.join(", ")}</div>
             </div>
           )}
         </section>
