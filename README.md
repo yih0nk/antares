@@ -25,7 +25,7 @@ or `results/`; the linked section says how it was measured.
 | One parameter set per joint instead of one shared? | **0.66°** (SO-101) and **0.47°** (SO-100) | same |
 | Does it work on arms other than the two demos? | 58 public SO-100/101 arms from the Hub, all improved; median 3.45° → 1.09°, the median arm closing **63%** of its gap (`locks/fleet/fleet.json`) | [Fleet scan](#fleet-scan) |
 | Is a lock specific to its arm? | On a 6-arm cross matrix a robot scores **1.00°** on its own lock, 1.54° on another arm's, 4.60° on the defaults | [Fleet scan](#fleet-scan), [Is a lock specific to its arm?](#is-a-lock-specific-to-its-arm) |
-| Where are the cameras? | Pose from the video by silhouette matching; held-out IoU **0.83** (SO-101 `up`), 0.72 (`side`), 0.64 (SO-100 `top`) | [Cameras from the logs](#cameras-from-the-logs) |
+| Where are the cameras? | Pose from the video by silhouette matching; held-out IoU **0.83** (SO-101 `up`), 0.75 (`side`), 0.64 (SO-100 `top`) | [Cameras from the logs](#cameras-from-the-logs) |
 | Where is the table? | **−22 mm** below the base, tilt 0.6°, read from where the gripper closed (SO-101) | [Scene from the logs](#scene-from-the-logs) |
 | Where is the object? | Tracked through 50/50 episodes; vision and forward kinematics agree to **2.1 cm** median at the grasp (SO-101) | [Objects from the video and the residual](#objects-from-the-video-and-the-residual) |
 | Does the calibration change what a policy looks like? | A policy learned from the logs, open loop: the stock and the calibrated sim disagree by **5.8°** RMS on SO-101, as much as the stock sim's own replay error. Closed loop: the stock sim closes the gripper **2.8 s early** (84 frames) on average; the calibrated sim within a frame of the real close | [A learned policy, judged in both sims](#a-learned-policy-judged-in-both-sims) |
@@ -116,7 +116,7 @@ Bring your own dataset, in short (details in [Bring your own dataset](#bring-you
 * **The leftover elbow error is step-shaped**, not a slope in gravity load, so the six servo parameters do not express it; the contact detector sees that pose dependence, not contact with a light object.
 * **Payload mass is below the noise.** The residual resolves 13 g per encoder step with a noise floor of 40–60 g; a 30 g object comes out at 22 g with a 69 g IQR, so the export uses an assumed 30 g and says so.
 * **Some SO-100 numbers predate its degrees fix.** The SO-100 demo dataset is recorded in degrees and was first replayed as LeRobot's normalized units. Its locks, the per-joint and sensor tables, the two-arm `antares cross` numbers, and the camera, scene, object and payload fits were redone on `so101_deg` (2026-10-18). Still on the old reading: the robot-specificity study and the seed spread quoted from it (`antares specificity` builds one simulator for every dataset, so it cannot yet replay one in degrees), the gravity/deadband and STS3215 servo-model tables, drift over a session, contact detection, lag compensation, domain randomization, the video-delay table, both policy experiments, and the fleet scan's copy of this dataset. Their SO-100 stock baseline is 2.74° rather than 2.61°.
-* **Camera fits are loose in depth.** Silhouettes pin the viewing direction but trade distance against field of view; the SO-101 `side` camera's rays meet 2.6 cm below the object plane. The table height assumes a 15 mm object half-height and a horizontal plane.
+* **Camera fits are loose in depth, and are fits, not measurements.** Silhouettes pin the viewing direction but trade distance against field of view: on a synthetic video from a known 55° camera the fit landed at 71° and 14 cm closer, with the overlay still lined up. A second pass that borrows a fitted sibling camera's field of view lined the SO-101 `side` camera's gripper up in the video, but its rays still meet `up`'s 2.9 cm below the object plane (2.6 cm with the earlier fit). The table height assumes a 15 mm object half-height and a horizontal plane.
 
 ## Reference map
 
@@ -1504,13 +1504,17 @@ How it works, with no OpenGL and no learned segmenter:
    ones get a short CMA-ES run at 160x120, and the best is refined at full
    resolution. 12 frames from other episodes are scored as a held-out
    check. About a minute per camera.
+5. **Second pass.** When another fixed camera of the dataset with the same
+   image size is already fitted (most likely the same webcam model), the
+   fit runs again with the field of view held within 2° of that camera's,
+   and the pass with the better held-out IoU is saved.
 
 The demo datasets, 40 fit frames / 12 held-out frames each:
 
 | dataset | camera | fit IoU | held-out IoU | notes |
 |---|---|---|---|---|
 | svla_so101_pickplace | `up` | 0.82 | 0.83 | clean; residual is hull slack and the real gripper reaching lower than the sim's |
-| svla_so101_pickplace | `side` | 0.58 | 0.72 | the arm leaves the top of the frame in many fit frames (per-frame IoU down to 0.08) |
+| svla_so101_pickplace | `side` | 0.61 | 0.75 | second pass, field of view held near `up`'s (43.9°); the free fit settled on 25.8° (0.58 / 0.72) and put the gripper about a gripper-width off in the viewer. The arm leaves the top of the frame in many fit frames |
 | svla_so100_pickplace | `top` | 0.69 | 0.64 | black servo and gripper parts vanish against the black table, so the real mask is the orange and white parts only |
 
 Fits are saved as `locks/<lock>.camera.json` (frames used, per-frame IoUs)
@@ -1524,8 +1528,12 @@ overlay at the playhead whenever playback is paused.
 
 Caveats: silhouettes pin the viewing direction well but trade distance
 against field of view (a farther camera with a narrower fov looks nearly
-the same), so expect the position to be loose along the optical axis;
-wrist cameras are skipped; the sim is the SO-101 model for both datasets.
+the same), so expect the position to be loose along the optical axis.
+A fitted camera's position and field of view are values that make the
+silhouettes overlap, not measurements of the camera: on a clean synthetic
+video rendered from a known 55° camera, the fit reached IoU 0.74 at 71°
+and 14 cm closer than the true camera, and the overlay still lined up.
+Wrist cameras are skipped; the sim is the SO-101 model for both datasets.
 
 #### Video delay
 
@@ -1724,13 +1732,16 @@ camera gets the cube right.
 
 **Cross-camera check (SO-101).** With `up` and `side` both fitted, the
 object at rest is triangulated from the two pixel rays over 36 frames.
-The rays pass within 0.5 cm of each other, but meet 3.0 cm from `up`'s
-plane point and 2.6 cm *below* the object plane (1 cm below the table),
-and `side`'s own plane intersection is 6.4 cm off in xy. The `side` fit
-(IoU 0.58, the arm leaving the frame) is loose in depth, so the
-single-camera plane intersection, validated by the FK agreement above, is
-the better estimate; triangulation here measures the camera fits, not the
-object.
+With the refit `side` camera (43.9°, held-out IoU 0.75) the rays pass
+within 1.1 cm of each other, but meet 3.4 cm from `up`'s plane point and
+2.9 cm *below* the object plane (1.4 cm below the table), and `side`'s own
+plane intersection is 9.8 cm off in xy. The earlier `side` fit (25.8°,
+0.72) gave 0.5, 3.0, 2.6 and 6.4 cm. So the refit lines the gripper up in
+the video without making the two cameras agree better in depth: `side` is
+loose along its optical axis either way (the arm leaves the frame in many
+fit frames), the single-camera plane intersection, validated by the FK
+agreement above, is the better estimate, and triangulation here measures
+the camera fits, not the object.
 
 **Payload mass from the residual.** A position servo settles short of its
 command by load / gain, so a mass `m` at the fingertip adds a deflection
