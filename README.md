@@ -1533,7 +1533,8 @@ A fitted camera's position and field of view are values that make the
 silhouettes overlap, not measurements of the camera: on a clean synthetic
 video rendered from a known 55° camera, the fit reached IoU 0.74 at 71°
 and 14 cm closer than the true camera, and the overlay still lined up.
-Wrist cameras are skipped; the sim is the SO-101 model for both datasets.
+Wrist cameras are skipped; the sim is the SO-101 model for both datasets
+(the SO-100's, recorded in degrees, through `so101_deg`).
 
 #### Video delay
 
