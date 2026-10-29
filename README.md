@@ -1970,21 +1970,142 @@ progress, shows the stock-vs-calibrated table, and adds two ghosts to the
 viewer: the policy in the stock sim (grey) and in the calibrated sim
 (green) for the current held-out episode.
 
-**With a GPU.** `antares.policy.load_lerobot_policy("<hub id or dir>")`
-wraps any LeRobot `PreTrainedPolicy` (ACT, diffusion, SmolVLA) behind the
-same `Policy` interface (`lerobot` is not an Antares dependency; the
-wrapper is tested against a stub), dataset units in and out like the
-LeRobot runtime, so the shadow and closed-loop evaluators take it as is.
-What changes is the observation: an image policy needs its camera frames.
-In shadow mode the observations are real, so the dataset's own video
-frames (`antares.video.frames`) can go into `extra_inputs(ctx)`. In
-closed loop the frame has to be rendered from the sim, which is what the
-fitted camera and scene are for (see [Cameras from the logs](#cameras-from-the-logs)
-and [Scene from the logs](#scene-from-the-logs)): the exported `scene.xml`
-carries the table and the backdrops at the fitted camera pose, so
-MuJoCo's offscreen renderer through camera `up` or `side` produces the
-policy's input, or `antares.scene.sim_view` composites it without OpenGL.
-The grasp-point goal is not needed then; the images carry it.
+### A real LeRobot checkpoint, closed loop
+
+The state policy above is handed the grasp point. A checkpoint people
+actually train sees the cameras instead, so the question here is whether
+Antares can run one closed loop in both sims at all, and what it says.
+`antares.policy.load_lerobot_policy("<hub id or dir>")` wraps any LeRobot
+`PreTrainedPolicy` (`pip install lerobot`; not an Antares dependency):
+the checkpoint's own pre/post-processors (normalization) are loaded, or
+for a pre-0.4 checkpoint rebuilt from the statistics inside its weights;
+the action queue is kept in the wrapper, so the observation (and so the
+rendered frame) is only built on the frames the policy re-plans, and the
+`+shift` run can send `chunk[L]` of a real chunk. In closed loop the
+`StepContext` now carries the sim's joint angles and the object's
+position, and `antares/simcam.py` turns those into the policy's
+`observation.images.up` / `.side`: MuJoCo's offscreen render of the
+robot's meshes through the fitted cameras
+([Cameras from the logs](#cameras-from-the-logs)), pasted over the scene
+backdrops ([Scene from the logs](#scene-from-the-logs)), with the tracked
+object as a box of the fitted footprint and colour. Two other frame
+sources isolate what the render costs: **composite** (`simcam.VideoArm`)
+cuts the real arm's pixels out of the recorded frame of the lock's
+*training* episodes whose joint state is nearest the sim's (median 2.0°
+away) and pastes them over the same backdrop and box; **underlay** puts
+the real video frame of the same instant under the sim arm, which leaks
+the real episode (the real arm and brick show through) and is a
+diagnostic, not an evaluation.
+
+**The task check** (`antares/task.py`, `KinematicObject`). The sim has no
+contacts, so the brick follows rules: it starts at the operator's first
+pick (FK of the fingertip at the grasp, the frame both cameras were
+fitted in), is picked when the gripper command closes with the fingertip
+within 2.5 cm of it, moves with the fingertip while the command stays
+closed, and drops to the table when the command opens or rises 3 units
+above its held level (operators often let go by easing the leader only
+part way, as `find_grasps` already reads off the jaw). While held, the
+policy reads the jaw at the dataset's held level (7.0 units) instead of
+the sim's fully closed jaw. **Success = lifted 2 cm and released within
+5 cm (horizontally) of where the operator released it.** The operator's
+own logged commands, replayed closed loop through the same check, pass
+10/10 held-out episodes in both sims, so the check does not fail a
+correct trajectory.
+
+**The checkpoint.** `samarth-shukla6/act-svla-so101-pickplace`: ACT,
+20k steps on `lerobot/svla_so101_pickplace` (its `train_config.json`),
+`up` and `side` at 640x480, chunk 100 executed whole. It trained on all
+50 episodes, so the lock's 10 held-out episodes are held out of the
+*calibration*, not of the policy: these numbers say nothing about its
+generalization, only about the sims. `chirag1701/so101_pickplace_act_cwnu_135k`
+/ `_200k` were dropped: their `train_config.json` names
+`chirag1701/record-test_final`, another setup.
+
+**Open loop first: does the image matter?** At every 30th frame of the
+10 held-out episodes (78 windows) the checkpoint gets the *real* joint
+state and one of four images, and its first 30 actions are scored
+against the logged commands (body joints, deg RMS). "Hold state" repeats
+the current state for 30 frames: an image that cannot beat it is not
+being read for anything useful.
+
+| images | ACT (deg) |
+|---|---|
+| real video | **3.85** |
+| composite (real arm pixels, rendered brick, backdrop) | 14.71 |
+| MuJoCo render (meshes, brick, backdrop) | 24.47 |
+| MuJoCo render, no brick | 37.05 |
+| hold state (no policy) | 19.51 |
+
+The wrapper is right (3.85° on real frames: the checkpoint imitates the
+operator closely), and the render is not good enough: on rendered frames
+the policy is worse than standing still, and even with the real arm
+pasted in it is only slightly better. Tuning the render on the training
+episodes did not close it: arm grey level and brick lighting move it by
+under 2° (24-25° render, 15.8-16.3° composite); on the training
+episodes each camera rendered alone (the other real) costs 5-7°, and a
+sim arm drawn over an otherwise real frame 9.5°. The arm's appearance
+is most of the gap, the rest is everything a median backdrop and a flat
+box do not reproduce.
+
+**Closed loop**, 10 held-out episodes, from each one's real start state
+(picked / lifted / placed, closest fingertip approach to the brick's
+start, approach RMS up to the operator's grasp):
+
+| images | sim | picked | lifted | placed | closest (cm) | approach RMS (deg) |
+|---|---|---|---|---|---|---|
+| render | stock | 1 | 1 | 1 | 3.3 | 32.8 |
+| render | lock | 1 | 1 | 1 | 3.3 | 31.6 |
+| render | lock + shift | 1 | 1 | 1 | 3.4 | 33.4 |
+| composite | stock | 3 | 3 | 1 | 2.9 | 31.5 |
+| composite | lock | 2 | 2 | 1 | 3.0 | 29.8 |
+| composite | lock + shift | 2 | 2 | 1 | 2.9 | 31.8 |
+| *underlay (leaks)* | stock | 9 | 9 | 4 | 1.0 | 33.5 |
+| *underlay (leaks)* | lock | 9 | 9 | 5 | 0.9 | 31.4 |
+| *underlay (leaks)* | lock + shift | 9 | 9 | 4 | 0.9 | 34.3 |
+| logged commands | stock / lock | 10 / 10 | 10 / 10 | 10 / 10 | | |
+
+**The honest reading.**
+
+* *It runs.* A real Hub checkpoint goes through the closed-loop evaluator
+  end to end in both sims on a laptop CPU (ACT: about 2 minutes for 10
+  episodes x 3 sims per frame source), seeing only frames rendered from
+  the sim state and the fitted cameras, and judged on the task.
+* *On rendered frames the policy fails in both sims, for visual reasons,
+  so the sims cannot be compared on it.* 1/10 placed in the stock sim and
+  1/10 in the calibrated one with the render, and the same episode (38)
+  in both; 1/10 and 1/10 with the composite (episode 35 in both; the
+  sims disagree only on whether episode 38 got picked). The open-loop
+  table says why: the policy's actions on these frames are worse than no
+  policy before any dynamics are involved.
+* *With the real video underneath, the policy works and the sims start
+  to disagree.* 9/10 picked everywhere, 4/10 placed in the stock sim
+  and 5/10 in the calibrated one, with the place verdict differing on 4
+  of the 10 episodes (stock places 0, lock places 28 and 46, and episode
+  16 differs on the pick). That is the size of effect the calibration
+  could have on this checkpoint, but it comes from frames that show the
+  real episode, so it is a ceiling, not a measurement.
+* *What would make it a measurement* is a render the policy cannot tell
+  from the video: a textured arm (or a better composite: masks with the
+  white jaw tips, shadows, nearest-pose blending), the brick's yaw, the
+  real lighting. The open-loop table is the check to run on any such
+  render before closing the loop.
+* *Not here:* contact physics (the brick is carried by rule), the
+  gripper's own dynamics, a second camera fit for the brick (both
+  cameras render it at the FK grasp point, which they were fitted to;
+  the side camera's own brick estimate is 6 cm from the up camera's,
+  `cross_camera` in `locks/svla_so101_pickplace.objects.json`).
+
+```sh
+pip install lerobot          # 'lerobot[smolvla]' for SmolVLA
+python experiments/lerobot_closedloop.py --out results/ \
+    --checkpoint samarth-shukla6/act-svla-so101-pickplace
+```
+
+Everything above is in `results/lerobot_closedloop.json` (per-episode
+runs, the open-loop windows, the control, the object per episode) with
+real-vs-rendered frames of episode 0 in `results/lerobot_closedloop/`.
+On macOS with the python.org Python, point `SSL_CERT_FILE` at certifi's
+bundle for the Hub downloads.
 
 ### Does calibration help a policy transfer?
 
@@ -2458,7 +2579,7 @@ One row per module, grouped like the reference above.
 | `antares/compensate.py` | Lag compensation (shift, ILC), sim-validated (`antares compensate`) |
 | `antares/dr.py` | Domain-randomization ranges derived from refits (`antares dr`, `locks/*.dr.json`) |
 | **Seeing what the robot sees** | |
-| `antares/task.py` | Pick/place/start-pose distribution from the gripper and FK (`antares task`) |
+| `antares/task.py` | Pick/place/start-pose distribution from the gripper and FK (`antares task`); kinematic object and lift-and-place check for closed loop |
 | `antares/noise.py` | Joint-reading noise model measured while parked (`antares noise`) |
 | `antares/video.py` | Dataset video frames (episode -> file/timestamp, AV1 decode, frame cache) |
 | `antares/silhouette.py` | Real arm mask: median background, colour model, static-arm region |
@@ -2471,7 +2592,8 @@ One row per module, grouped like the reference above.
 | **A policy in the loop** | |
 | `antares/policy.py` | State-based chunked policy trained on the logs; LeRobot checkpoint wrapper (`antares policy train`, `locks/*.policy.pt`) |
 | `antares/shadow.py` | Open-loop shadow evaluation: the policy's commands rolled through each sim |
-| `antares/closedloop.py` | Closed-loop evaluation: the policy drives each sim; grasp-point proxy success |
+| `antares/closedloop.py` | Closed-loop evaluation: the policy drives each sim; grasp-point proxy success, or the task with a kinematic object |
+| `antares/simcam.py` | The policy's camera frames from the sim: MuJoCo render through the fitted cameras over the backdrops, or the real arm's pixels from the nearest recorded pose |
 | `antares/transfer.py` | Sim-to-sim reaching transfer experiment on hidden synthetic arms (`antares transfer`) |
 | **Export** | |
 | `antares/export.py` | Lock -> standalone MJCF, sidecar, scene with table, backdrops and object, zip |
@@ -2517,11 +2639,11 @@ Partial:
   calibrate and export through the registry and are covered by tests, but
   no lock for them is committed and no gap has been measured on a real
   dataset of theirs.
-* The LeRobot checkpoint wrapper (`load_lerobot_policy`) is tested against
-  a stub; no ACT, diffusion or SmolVLA checkpoint has been run through the
-  evaluators. An image policy in closed loop needs the rendered sim view,
-  which the exported scene and `/api/scene/view` provide and nothing here
-  consumes yet.
+* A real ACT checkpoint runs closed loop in both sims on rendered frames
+  (`experiments/lerobot_closedloop.py`), but on those frames it fails in
+  both, for visual reasons (worse than holding still, open loop), so the
+  stock-vs-calibrated comparison is only made on frames that leak the real
+  video. See [A real LeRobot checkpoint, closed loop](#a-real-lerobot-checkpoint-closed-loop).
 * `record-check` drives `lerobot-record` and was checked against LeRobot
   0.6.1's documented flags, not at an arm.
 * Payload mass is implemented and reports the deflection, but the mass is
