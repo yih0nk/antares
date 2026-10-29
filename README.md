@@ -342,11 +342,19 @@ gravity holds (the static sag is `g(q) / kp`).
 
 ```sh
 .venv/bin/antares excite --out dance.csv     # or .json / .npy; columns are LeRobot's <joint>.pos action names
+.venv/bin/antares excite --out dance.csv --units degrees --start 0,-95,95,60,0,2 --table-z -0.03
 ```
 
-The file is in dataset units. It starts and ends at the home pose, so move
-the arm there before replaying it. A forward-kinematics check runs on every
-frame and the command exits 1 if it fails. The commanded fingertip stays at
+The file is in dataset units: LeRobot's normalized range by default, or
+degrees with `--units degrees` (LeRobot >= 0.5 commands SO arms in degrees
+by default; the joint angles are the same either way). It starts and ends
+at the home pose. Move the arm there before replaying it, or pass the arm's
+resting pose as `--start` to open with a slow 4 s lead-in to home instead
+of a jump. `--table-z` sets your table's height for the clearance check
+(default: the demo scene's -22 mm). A forward-kinematics check runs on
+every frame after the lead-in (the lead-in is checked for speed only,
+since it starts wherever the arm already is). If it fails, the command
+writes nothing and exits 1; `--force` writes the file anyway. The commanded fingertip stays at
 least 17 cm above the demo scene's table, the body joints stay within ±50
 of 100 units, steps are at most 25 units, and the commanded speed outside
 the steps peaks at 2.3 rad/s (the STS3215's rate limit is about 5.3). In
