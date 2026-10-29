@@ -1,0 +1,143 @@
+{
+  "command": "antares compensate lerobot/<dataset> --lock <dataset> --heldout",
+  "datasets": {
+    "lerobot/svla_so101_pickplace": {
+      "lock": "svla_so101_pickplace",
+      "robot": "so101",
+      "episodes": [
+        0,
+        8,
+        16,
+        19,
+        28,
+        35,
+        37,
+        38,
+        43,
+        46
+      ],
+      "n_frames": 2493,
+      "rms": {
+        "raw": 0.735579040942551,
+        "shift": 0.9231772705466507,
+        "ilc": 0.1077610203572024
+      },
+      "ilc_iterations": [
+        7,
+        10,
+        9,
+        8,
+        10,
+        8,
+        9,
+        10,
+        9,
+        10
+      ],
+      "feasibility": {
+        "velocity_factor": 1.5,
+        "ok": true,
+        "flagged_joints": [],
+        "episodes_flagged": [],
+        "max_range_excess_deg": 0.8182041917999499,
+        "clipped_frames": 0,
+        "raw_clipped_frames": 15,
+        "real_vmax_deg_s": {
+          "shoulder_pan": 221.31717760682747,
+          "shoulder_lift": 266.33171814094334,
+          "elbow_flex": 171.87205421513013,
+          "wrist_flex": 147.39302027810027,
+          "wrist_roll": 143.00372298112507,
+          "gripper": 174.96644418659844
+        },
+        "comp_cmd_vmax_deg_s": {
+          "shoulder_pan": 208.721405787876,
+          "shoulder_lift": 249.0258701350713,
+          "elbow_flex": 168.12230697563876,
+          "wrist_flex": 153.93872758065862,
+          "wrist_roll": 137.89896545605416,
+          "gripper": 165.34305254062747
+        },
+        "raw_cmd_vmax_deg_s": {
+          "shoulder_pan": 247.499719325969,
+          "shoulder_lift": 295.5789265869956,
+          "elbow_flex": 193.04265415561545,
+          "wrist_flex": 171.99316874275056,
+          "wrist_roll": 145.34802229485365,
+          "gripper": 346.8315222932646
+        },
+        "worst_episode": 0
+      },
+      "latency_frames": 4
+    },
+    "lerobot/svla_so100_pickplace": {
+      "lock": "svla_so100_pickplace",
+      "robot": "so101_deg",
+      "episodes": [
+        0,
+        8,
+        16,
+        19,
+        28,
+        35,
+        37,
+        38,
+        43,
+        46
+      ],
+      "n_frames": 3878,
+      "rms": {
+        "raw": 0.7682675142882573,
+        "shift": 0.5293248121179142,
+        "ilc": 0.07778952679258526
+      },
+      "ilc_iterations": [
+        10,
+        10,
+        10,
+        10,
+        10,
+        10,
+        10,
+        10,
+        10,
+        10
+      ],
+      "feasibility": {
+        "velocity_factor": 1.5,
+        "ok": true,
+        "flagged_joints": [],
+        "episodes_flagged": [],
+        "max_range_excess_deg": 1.0758675204342865,
+        "clipped_frames": 169,
+        "raw_clipped_frames": 230,
+        "real_vmax_deg_s": {
+          "shoulder_pan": 118.65234375000011,
+          "shoulder_lift": 134.47265625,
+          "elbow_flex": 79.1015625,
+          "wrist_flex": 92.28515624999979,
+          "wrist_roll": 71.19140625,
+          "gripper": 132.182346006853
+        },
+        "comp_cmd_vmax_deg_s": {
+          "shoulder_pan": 121.24081233968717,
+          "shoulder_lift": 130.4222499769079,
+          "elbow_flex": 77.69363096940907,
+          "wrist_flex": 92.62543546473964,
+          "wrist_roll": 69.7888313471546,
+          "gripper": 121.74675019282755
+        },
+        "raw_cmd_vmax_deg_s": {
+          "shoulder_pan": 123.92578125,
+          "shoulder_lift": 160.83984375,
+          "elbow_flex": 87.01171875000043,
+          "wrist_flex": 116.01562499999979,
+          "wrist_roll": 92.28515625,
+          "gripper": 228.43450555363876
+        },
+        "worst_episode": 43
+      },
+      "latency_frames": 3
+    }
+  }
+}
