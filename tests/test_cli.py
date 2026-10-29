@@ -967,6 +967,31 @@ SPEC_LOCKS = {
 }
 
 
+def test_specificity_replays_each_dataset_on_its_own_robot(monkeypatch, tmp_path):
+    import antares.calibrate
+    import antares.specificity
+    from antares import server
+
+    so100, so101 = "lerobot/svla_so100_pickplace", "lerobot/svla_so101_pickplace"
+    seen = {}
+
+    def fake_study(episodes, locks, simulate, **kw):
+        seen["simulate"] = simulate
+        return {"matrix": {}, "datasets": {}}
+
+    locks = {"a": _spec_lock("a", so101, "2026-01-01"), "b": _spec_lock("b", so100, "2026-01-01")}
+    monkeypatch.setattr(server, "_DATASETS", {so101: _dataset(so101), so100: _dataset(so100)})
+    monkeypatch.setattr(server, "load_lock_dict", lambda n: locks[n])
+    monkeypatch.setattr(server, "simulate_for", lambda robot: None if robot == "so101" else f"sim:{robot}")
+    monkeypatch.setattr(antares.calibrate, "default_simulate", lambda: "default")
+    monkeypatch.setattr(antares.specificity, "study", fake_study)
+    monkeypatch.setattr(antares.specificity, "render_markdown", lambda r, title: "")
+    assert cli.main(["specificity", "--datasets", f"{so101},{so100}", "--locks", "a,b",
+                     "--out", str(tmp_path)]) == 0
+    # the catalog maps the SO-100 demo to the degrees variant of the model
+    assert seen["simulate"] == {so101: "default", so100: "sim:so101_deg"}
+
+
 def test_specificity_needs_a_lock_per_dataset(monkeypatch):
     from antares import server
 
@@ -1481,6 +1506,27 @@ def test_export_refuses_a_task_with_no_held_grasp(monkeypatch, capsys, tmp_path)
         err = capsys.readouterr().err
         assert err.startswith("error:") and "no held grasps" in err and "Traceback" not in err
         assert not out.exists()  # refused before anything was written
+
+
+def test_noise_and_task_read_the_dataset_in_its_own_units(monkeypatch, tmp_path):
+    """The SO-100 demo dataset is in degrees; `noise` and `task` convert it with
+    its catalog model's unit map (so101_deg), not the SO-101 default."""
+    import antares.noise
+    import antares.task
+    from antares import server
+    from antares.sim import Arm
+
+    seen = []
+    monkeypatch.setattr(antares.noise, "estimate", lambda eps, unit_map=None, **k: seen.append(unit_map) or 1 / 0)
+    monkeypatch.setattr(antares.task.TaskDistribution, "from_episodes",
+                        classmethod(lambda cls, eps, unit_map=None, **k: seen.append(unit_map) or 1 / 0))
+    so100 = "lerobot/svla_so100_pickplace"
+    monkeypatch.setattr(server, "_DATASETS", {so100: _dataset(so100)})
+    for cmd in ("noise", "task"):
+        with pytest.raises(ZeroDivisionError):
+            cli.main([cmd, so100])
+    expected = Arm(robot="so101_deg").unit_map.scale
+    assert len(seen) == 2 and all(np.allclose(u.scale, expected) for u in seen)
 
 
 def test_noise_prints_table_and_saves(monkeypatch, capsys, tmp_path):

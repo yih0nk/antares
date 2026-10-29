@@ -1200,7 +1200,8 @@ def cmd_noise(args: argparse.Namespace) -> int:
 
     ds = server.get_dataset(args.repo_id)
     name = args.name or server._slug(ds.repo_id)
-    model = estimate(list(ds.episodes), name=name, dataset=ds.repo_id)
+    unit_map = server.get_arm(server.dataset_robot(ds)).unit_map  # the dataset's own units
+    model = estimate(list(ds.episodes), name=name, dataset=ds.repo_id, unit_map=unit_map)
     print(f"{ds.repo_id}: joint-reading noise while each joint is parked")
     deg = lambda v, nd=3: "-" if not math.isfinite(v) else f"{math.degrees(v):.{nd}f}"  # noqa: E731
     rows = [
@@ -1257,7 +1258,9 @@ def cmd_task(args: argparse.Namespace) -> int:
 
     ds = server.get_dataset(args.repo_id)
     name = args.name or server._slug(ds.repo_id)
-    td = TaskDistribution.from_episodes(list(ds.episodes), name=name, dataset=ds.repo_id, held_gap=args.held_gap)
+    unit_map = server.get_arm(server.dataset_robot(ds)).unit_map  # the dataset's own units
+    td = TaskDistribution.from_episodes(list(ds.episodes), name=name, dataset=ds.repo_id, unit_map=unit_map,
+                                        held_gap=args.held_gap)
     s = td.summary()
     if not td.held:
         print(
@@ -1670,7 +1673,11 @@ def cmd_specificity(args: argparse.Namespace) -> int:
     if args.synthetic:
         episodes, locks, truth, splits = _synthetic_arms(datasets, lock_dicts, args, simulate)
     else:
-        episodes = {d: server.get_dataset(d).episodes for d in datasets}
+        loaded = {d: server.get_dataset(d) for d in datasets}
+        episodes = {d: ds.episodes for d, ds in loaded.items()}
+        # Each dataset on its own model and units (the SO-100 demo is in degrees).
+        simulate = {d: server.simulate_for(server.dataset_robot(ds)) or default_simulate()
+                    for d, ds in loaded.items()}
         locks = {}
         splits = {}
         for d in lock_dicts:
