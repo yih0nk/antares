@@ -24,7 +24,7 @@ or `results/`; the linked section says how it was measured.
 | Same for the SO-100 | 2.61° → **0.77°** (`locks/svla_so100_pickplace.lock.json`; this dataset is recorded in degrees, see [Per-joint calibration](#per-joint-calibration)) | same |
 | One parameter set per joint instead of one shared? | **0.66°** (SO-101) and **0.47°** (SO-100) | same |
 | Does it work on arms other than the two demos? | 58 public SO-100/101 arms from the Hub, all improved; median 3.45° → 1.09°, the median arm closing **63%** of its gap (`locks/fleet/fleet.json`) | [Fleet scan](#fleet-scan) |
-| Is a lock specific to its arm? | On a 6-arm cross matrix a robot scores **1.00°** on its own lock, 1.54° on another arm's, 4.60° on the defaults | [Fleet scan](#fleet-scan), [Is a lock specific to its arm?](#is-a-lock-specific-to-its-arm) |
+| Is a lock specific to its arm? | On a 6-arm cross matrix a robot scores **1.00°** on its own lock, 1.56° on another arm's, 4.58° on the defaults | [Fleet scan](#fleet-scan), [Is a lock specific to its arm?](#is-a-lock-specific-to-its-arm) |
 | Where are the cameras? | Pose from the video by silhouette matching; held-out IoU **0.83** (SO-101 `up`), 0.72 (`side`), 0.64 (SO-100 `top`) | [Cameras from the logs](#cameras-from-the-logs) |
 | Where is the table? | **−22 mm** below the base, tilt 0.6°, read from where the gripper closed (SO-101) | [Scene from the logs](#scene-from-the-logs) |
 | Where is the object? | Tracked through 50/50 episodes; vision and forward kinematics agree to **2.1 cm** median at the grasp (SO-101) | [Objects from the video and the residual](#objects-from-the-video-and-the-residual) |
@@ -291,7 +291,7 @@ per-joint parameters are unconstrained and should not be read as physical.
 One CMA-ES run is deterministic for its seed but not representative. On
 the same SO-101 episodes, seeds 0/1/2 land at kp 10.5 / 27 / 260 with
 held-out errors of 0.74° / 0.91° / 1.06°; on SO-100 they land at kp
-1427 / 14 / 13 at 0.79° / 0.57° / 0.66°
+71 / 17 / 99 at 0.77° / 0.60° / 0.71°
 ([`results/robot_specificity.md`](results/robot_specificity.md)). The
 tracking error is repeatable to within about 1.4×; the parameter values
 are not, because several parameter sets reproduce the arm equally well.
@@ -317,7 +317,7 @@ demo datasets) and are what a lock worth keeping should use; the default
 stays at 1 so the live demo stays fast. `antares.lock.pinned_params(lock)`
 returns the pinned list, and for a lock without seed spread the
 conservative default `["latency_frames"]`: one frame either way costs
-0.3-0.9° with everything else held fixed, so latency is the one parameter
+0.2-1.0° with everything else held fixed, so latency is the one parameter
 a single fit does pin down.
 
 Drift, diagnose and the fleet statistics now read only pinned parameters
@@ -531,22 +531,24 @@ and the UI's calibrate panel has a checkbox for each; a lock's parameter table
 shows the two terms when the lock carries them.
 
 Held-out RMS (deg) at an equal budget of 300 shared evaluations. Seed 0 and
-seed 1 use different train/eval splits.
+seed 1 use different train/eval splits; every fit, its parameters and its
+split are in [`results/gravity_deadband.json`](results/gravity_deadband.json).
 
 | dataset | seed | dynamics only | + gravity | + deadband | + both |
 |---|---|---|---|---|---|
 | SO-101 | 0 | 0.701 | 0.690 | 0.997 | 0.950 |
 | SO-101 | 1 | 1.137 | 0.588 | | |
-| SO-100 | 0 | 0.760 | 0.524 | 0.540 | 0.577 |
-| SO-100 | 1 | 0.800 | 0.537 | | |
+| SO-100 | 0 | 0.546 | 0.518 | 0.673 | 0.541 |
+| SO-100 | 1 | 0.777 | 0.470 | | |
 
-The gravity term wins all four pairs. It works by keeping the fit off the
-gain ridge (see per-joint calibration): without it, three of four fits drove
-`kp` to between 730 and 2,600, and with it every fit landed between 19 and 36.
-The fitted scale is 1.3 to 1.9, which reads as a heavier arm than the MJCF.
-That number is inferred to stand in for whatever else makes the real servo
-droop, not measured as a mass. The deadband helps SO-100 about as much as
-gravity does, but makes SO-101 worse, so it stays opt-in. A per-joint deadband
+The gravity term wins all four pairs. It mostly works by keeping the fit off
+the gain ridge (see per-joint calibration): without it, two of four fits drove
+`kp` to 318 and 732, and with it every fit landed between 10 and 27. Three
+fits put the scale at 1.7 to 1.9, which reads as a heavier arm than the MJCF,
+and SO-100's seed 0 at 0.5, so the number stands in for whatever else makes
+the real servo droop and is not a measured mass. The deadband makes both arms
+worse (it had helped SO-100 when that dataset was read as normalized units),
+so it stays opt-in. A per-joint deadband
 fit (600 evaluations) put the SO-101 elbow's band at 1.4°, but scored 0.674°
 held-out against 0.593° without it.
 
@@ -554,7 +556,7 @@ held-out against 0.593° without it.
 
 By default each servo is MuJoCo's ideal position actuator, and the fit has
 to find its `kp`, `kv` and force limit from teleop logs, which barely pin
-them down: three seeds on the same SO-100 data give `kp` from 19 to 1427.
+them down: three seeds on the same SO-101 data give `kp` from 10.5 to 120.
 `--servo sts3215` simulates the servo as it is built instead. The firmware
 moves an internal target toward the command at most at `max_velocity`. Its
 P loop turns the error into a PWM duty cycle that saturates at 97%. The DC
@@ -579,20 +581,22 @@ held-out RMS tracking error in degrees, body joints:
 | | stock sim | lock (position) | BAM, nothing fitted but latency | position refit | servo fit |
 |---|---|---|---|---|---|
 | SO-101 | 6.007 | 0.736 | 0.805 | 0.713 | **0.596** |
-| SO-100 | 2.744 | 0.787 | 0.898 | 0.592 | **0.454** |
+| SO-100 | 2.614 | 0.768 | 0.857 | 0.569 | **0.461** |
 
 * **BAM's bench numbers alone, with no fitting except the latency, get
   within 10 to 15% of a fully fitted lock.** The motor physics carries
   over from a test bench to these arms.
-* **The fitted servo beats the position actuator by 16% (SO-101) and 23%
+* **The fitted servo beats the position actuator by 16% (SO-101) and 19%
   (SO-100)** on the same budget and split.
-* **The gain is pinned.** Across seeds, `servo_gain` varies 1.4x (SO-101)
-  and 1.2x (SO-100), where the position fit's `kp` varies 11x and 74x.
-  Friction and damping are still not pinned by either model.
+* **The gain is pinned more tightly than `kp`.** Across seeds,
+  `servo_gain` varies 1.4x on both arms, where the position fit's `kp`
+  varies 11x (SO-101) and 3.4x (SO-100; 74x when the data was read as
+  normalized units). Friction and damping are still not pinned by either
+  model.
 * **Low stiffness was real.** At BAM's values the servo is as stiff as
   `kp` 9.4 N·m/rad, and the old SO-101 lock sat at 10.5. The SO-101 fits a
-  gain ratio of 0.81 (PD equivalent 7.5); the SO-100 fits 2.0 to 2.3
-  (about 22). A 12 V servo or a different firmware gain would both explain
+  gain ratio of 0.81 (PD equivalent 7.5); the SO-100 fits 1.9 to 2.7
+  (18 to 25). A 12 V servo or a different firmware gain would both explain
   the SO-100 value; the logs can't tell which.
 * **Some of the "latency" was the servo.** The servo fits settle on 2
   frames of delay where the position fits needed 3 to 4. The rate limit
@@ -624,11 +628,13 @@ and give each physical robot one identity its locks hang off.
 A lock is only worth having per robot if it beats another arm's lock on
 this arm, by more than refitting the same arm moves the score. `antares
 specificity` runs that test on the newest shared (one value for all
-joints) lock of each dataset, scoring the held-out episodes of the split
-that lock was fitted with, and writes `results/robot_specificity.{md,json}`:
+joints) lock of each dataset, or the locks given with `--locks`, scoring
+the held-out episodes of the split that lock was fitted with, each dataset
+replayed on its own model (the SO-100 demo in degrees, on `so101_deg`), and
+writes `results/robot_specificity.{md,json}`:
 
 ```sh
-.venv/bin/antares specificity                # the two demo arms
+.venv/bin/antares specificity --locks svla_so101_pickplace,svla_so100_pickplace   # the two demo arms
 .venv/bin/antares specificity --synthetic    # same study on simulated arms with known parameters
 .venv/bin/antares identify lerobot/svla_so101_pickplace --lock svla_so101_pickplace
 ```
@@ -646,39 +652,43 @@ error, full tables in [`results/robot_specificity.md`](results/robot_specificity
 
 | | SO-101 data | SO-100 data |
 |---|---|---|
-| own lock | **0.74°** | 0.79° |
-| other seeds, same episodes | 0.91°, 1.06° | **0.57°**, 0.66° |
-| same arm, refit on other episodes | 1.05° | 0.80° |
-| own fit, other arm's kp/kv pinned | 1.09° | 0.65° |
-| other arm's lock | 1.27° (1.73×) | 0.96° (1.22×) |
+| own lock | **0.74°** | 0.77° |
+| other seeds, same episodes | 0.91°, 1.06° | **0.60°**, 0.71° |
+| same arm, refit on other episodes | 1.05° | 0.78° |
+| own fit, other arm's kp/kv pinned | 1.02° | 0.65° |
+| other arm's lock | 1.83° (2.48×) | 0.92° (1.20×) |
 
 * **The arms are distinguishable.** Each arm's own lock beats the other
   arm's, and the best fit found for each arm beats the other arm's lock by
-  about 1.7× on both (0.74° vs 1.27°, 0.57° vs 0.96°).
+  2.5× on SO-101 (0.74° vs 1.83°) and 1.5× on SO-100 (0.60° vs 0.92°).
 * **A single fit is not reliable.** The same episodes with another CMA-ES
   seed score up to 1.4× worse on SO-101, and two seeds beat SO-100's own
-  lock (0.57° vs 0.79°). Which basin a 150-200 evaluation run lands in
+  lock (0.60° and 0.71° vs 0.77°). Which basin a 150-200 evaluation run lands in
   matters as much as which arm it is fitting, so the cross margins above
   carry that noise. Keeping the best of several seeds would make a lock,
   and every check built on it, much more repeatable.
 * **The stiffness gap is not a difference between the arms.** The locks
-  sit at kp 10.5 (SO-101) and 1427 (SO-100), but SO-100's two better
-  seeds land at kp 13-14, and pinning SO-100's fit to SO-101's `kp`/`kv`
-  scores 0.65°, better than its own lock. Across seeds `kp` and `kv`
-  spread 25-125× at similar error.
-* **The linearized table is local only.** It finds SO-100's lock tightly
-  pinned (every parameter within ×1.4-1.6, condition number 3), yet better
-  fits sit 100× away. On SO-101 it shows `damping` unconstrained and
-  traded off against `kv` (×8800 with the others refit, ×1.9 alone).
+  sit at kp 10.5 (SO-101) and 71 (SO-100), SO-100's best seed lands at
+  kp 17 and its same-arm control at 1085 with the lock's error, and
+  pinning SO-100's fit to SO-101's `kp`/`kv` scores 0.65°, better than its
+  own lock. Across seeds `kp` spreads 6-25× and `kv` 36-100× at similar
+  error.
+* **The linearized table is local only.** On SO-101 it shows `damping`
+  unconstrained and traded off against `kv` (×8800 with the others refit,
+  ×1.9 alone). On SO-100 `kv` and `damping` are unbounded once the others
+  refit and `kp` moves ×1.6 alone but ×9 with them (condition number
+  2×10⁴), the ridge the seeds land along. (Read as normalized units the
+  SO-100 lock sat at kp 1427, where the table called every parameter
+  pinned within ×1.4-1.6 while better fits sat 100× away.)
 * **Latency is the best-pinned parameter**: one frame either side of the
-  lock costs 0.3-0.9° with everything else held fixed.
+  lock costs 0.2-1.0° with everything else held fixed.
 
 The synthetic study ([`results/synthetic/robot_specificity.md`](results/synthetic/robot_specificity.md))
 gives each simulated arm one real lock's parameters as its truth (kp 10.5
-vs 1427). There the own lock wins by 2.2× and 5.4×, but the fit still
-misses the truth (SO-100-like arm: kp 182 vs 1427 at 0.40° against
-0.35°), and the seeds on one arm range from 0.55° to 1.91°. So the
-optimizer spread above is a property of the fit, not of the real data.
+vs 71). There the own lock wins by 2.2× and 3.1×, but the fit still
+misses the truth (SO-100-like arm: kp 36 vs 71 at 0.87° against 0.35°),
+and the seeds on one arm range from 0.52° to 1.71°. So the optimizer
+spread above is a property of the fit, not of the real data.
 The fleet scan's cross matrix over many arms is the larger version of
 this test.
 
@@ -710,6 +720,10 @@ mostly a second dataset from the same account (30), v1 datasets without
 `meta/info.json` (24), bimanual or non-SO arms (16), v2 datasets stored as
 one parquet file per episode (15), simulation recordings (10, two of them
 caught by the default-sim rule above), too few episodes (7) and merges (3).
+The scan's copy of `lerobot/svla_so100_pickplace` was refit on `so101_deg`
+on 2026-10-28 (the dataset is recorded in degrees; the scan now picks each
+dataset's model from the catalog), and the statistics and cross matrix
+below were recomputed with it.
 
 * **Every robot improved.** Held-out tracking RMSE went from a median of
   3.45 deg to 1.09 deg; the median robot closed **63 %** of its gap (IQR
@@ -717,7 +731,7 @@ caught by the default-sim rule above), too few episodes (7) and merges (3).
 * **The fitted parameters are all over the place**, which is the point of
   calibrating per robot. Latency spans 0–5 frames (0–167 ms at 30 fps),
   median 3 frames (100 ms), IQR 3–4. Actuator gain `kp` spans 10–4582
-  (2.7 decades) with a median of 81 and IQR 17–571; the MJCF default is
+  (2.7 decades) with a median of 70 and IQR 17–542; the MJCF default is
   998. Ten robots fit `kp` under 12, at or near the floor of 10, so the low
   end is still set partly by the bound. Damping, armature, friction and
   `kv` each span two to three decades. The fleet's own fit of
@@ -725,8 +739,8 @@ caught by the default-sim rule above), too few episodes (7) and merges (3).
   0.771 deg, next to the demo lock's `kp` 10.5 and 0.736 deg at 200.
 * **Per-robot calibration beats borrowing a neighbour's.** On a 6-robot
   cross matrix (the two demo arms plus the next four), a robot scored on
-  its own lock averages 1.00 deg, on another robot's lock 1.54 deg (1.53x;
-  per-robot median 1.53x), and on the defaults 4.60 deg (4.6x). Any
+  its own lock averages 1.00 deg, on another robot's lock 1.56 deg (1.56x;
+  per-robot median 1.59x), and on the defaults 4.58 deg (4.6x). Any
   calibrated lock beats the defaults on all 30 (robot, other lock) pairs,
   and 5 of 6 robots do best on their own lock.
 * **Outliers worth a look.** `kmg0620/so101_bomb_pick_place_v1` starts at
@@ -905,11 +919,12 @@ streamed over `/api/jobs/{id}/events`, one event per window) and
 
 What the two demo datasets show (window 10, step 5, nine windows each):
 
-* **SO-100**: the lock's error grows by 17% over the session (r² 0.66,
-  significant) and the windowed refits' own training error grows with it
-  (+20%, r² 0.61), so refitting does not recover it and no parameter
-  moves consistently. This is a harder tail of the session, not wear the
-  six parameters can describe.
+* **SO-100**: no drift. The lock's error rises 15% from the first window
+  to the last (r² 0.38), but its interval includes zero, and the windowed
+  refits' own training error stays flat (+2%). `kp` and `armature` fall
+  the most (-50% and -73%, r² 0.34 and 0.37), with intervals that include
+  zero too. (Read as normalized units, the same scan flagged the lock's
+  error at +17% with the refits' error rising alongside it.)
 * **SO-101**: the lock's error falls slightly (-5%, significant but under
   the 10% bar) and no parameter drifts. `armature` moves the most (+201%
   first to last window, r² 0.31), but its interval includes zero, so that
@@ -1231,17 +1246,18 @@ real arm. `GET /api/events?dataset=&lock=` runs every episode and pools
 the validation.
 
 What the two demo datasets give, at `z=4`, `min_frames=5`, all 50
-episodes (held-out episodes in parentheses):
+episodes (held-out episodes in parentheses;
+[`results/contact_events.json`](results/contact_events.json)):
 
 | | SO-101 lock | SO-100 lock |
 |---|---|---|
-| grasps / events | 68 / 112 | 89 / 196 |
-| recall (grasps with an event in +-15 frames) | 100% (100%) | 54% (71%) |
-| precision (events in a grasp window) | 53% (61%) | 33% (41%) |
-| events far from any gripper transition | 33% | 44% |
-| residual energy inside grasp windows | 20% (19%) | 11% (10%) |
+| grasps / events | 68 / 112 | 89 / 286 |
+| recall (grasps with an event in +-15 frames) | 100% (100%) | 62% (71%) |
+| precision (events in a grasp window) | 53% (61%) | 21% (23%) |
+| events far from any gripper transition | 33% | 66% |
+| residual energy inside grasp windows | 20% (19%) | 10% (10%) |
 | frames inside grasp windows (chance) | 18% (16%) | 14% (14%) |
-| lift | 1.12x (1.17x) | 0.78x (0.75x) |
+| lift | 1.12x (1.17x) | 0.75x (0.75x) |
 
 Read these with care. On the SO-101 the residual does concentrate around
 grasps, but weakly (1.1x chance), and the perfect recall comes from
@@ -1283,23 +1299,27 @@ removes *in the sim*. Whether the physical servo agrees is exactly the
 question the lock cannot answer on its own.
 
 RMS tracking error in degrees (gripper excluded), 10 held-out episodes
-per dataset, with each dataset's own lock:
+per dataset, with each dataset's own lock
+([`results/lag_compensation.json`](results/lag_compensation.json)):
 
 | dataset | latency | raw commands | shift | ILC | ILC iterations |
 |---|---|---|---|---|---|
 | `lerobot/svla_so101_pickplace` | 4 frames | 0.736 | 0.923 | 0.108 | 7–10 per episode |
-| `lerobot/svla_so100_pickplace` | 3 frames | 0.787 | 0.369 | 0.120 | 3–5 per episode |
+| `lerobot/svla_so100_pickplace` | 3 frames | 0.768 | 0.529 | 0.078 | 10 per episode (the cap) |
 
 On the SO-101 the pure shift makes tracking worse than the raw commands.
 Its lock's `kp` of about 10 makes the sim servo respond as a slow lag, not
 a pure 4-frame delay, so shifting the commands alone does not help; ILC
-does, with more iterations than on the stiffer SO-100.
+does. On the SO-100 (`kp` 71) the shift alone removes a third of the gap,
+and ILC is still improving when it stops at its 10-iteration cap on every
+episode.
 
 
 Feasibility (also sim-only): the compensated commands stay within the
-actuator range, exceed the original commands' range by at most 0.8°, and
-their peak velocity is 1.04× (SO-101) and 1.11× (SO-100) the fastest
-joint motion seen in the real data; the tool flags any joint above 1.5×.
+actuator range, exceed the original commands' range by at most 0.8°
+(SO-101) and 1.1° (SO-100), and their peak velocity is 1.04× (SO-101) and
+1.02× (SO-100) the fastest joint motion seen in the real data; the tool
+flags any joint above 1.5×.
 Frames sitting on the control limit are reported for the raw and the
 compensated commands side by side, because a desired trajectory that
 rides a joint limit (the SO-100 gripper and wrist roll do) legitimately
@@ -1427,7 +1447,7 @@ On the two demo datasets (gripper tip in the base frame):
 | | picks | carried | missed | idle | pick x, y (cm) | place x, y, z (cm) | jaw on the cube |
 |---|---|---|---|---|---|---|---|
 | SO-101 | 51 in 50 episodes | 50 | 0 | 27 | 3..24, -14..13 | 2.8, -15.3, 7.0 (±1) | -2.3° |
-| SO-100 | 50 in 49 episodes | 49 | 1 | 49 | 19..33, -8..14 | 8.4, -12.4, 8.0 (±1) | +5.8° |
+| SO-100 | 50 in 49 episodes | 49 | 1 | 49 | 19..34, -7..13 | 9.9, -11.2, 7.3 (±1) | +5.8° |
 
 Picks spread over a 20 x 27 cm area on SO-101 and land in one spot about
 7 cm up (on top of something). That is the distribution a sim environment
@@ -1452,11 +1472,11 @@ reading still does is sensor noise. Pooled over those stretches:
 
 | joint | SO-101 std | lag-1 corr | step | SO-100 std | lag-1 corr | step |
 |---|---|---|---|---|---|---|
-| shoulder_pan | 0.030° | 0.33 | 0.088° | 0.045° | 0.78 | 0.097° |
+| shoulder_pan | 0.030° | 0.33 | 0.088° | 0.041° | 0.78 | 0.088° |
 | shoulder_lift | 0.013° | 0.79 | 0.084° | 0.060° | 0.51 | 0.088° |
-| elbow_flex | 0.035° | 0.80 | 0.087° | 0.017° | 0.86 | 0.085° |
-| wrist_flex | 0.066° | 0.67 | 0.081° | 0.018° | 0.77 | 0.084° |
-| wrist_roll | 0.030° | 0.59 | 0.078° | 0.046° | 0.39 | 0.141° |
+| elbow_flex | 0.035° | 0.80 | 0.087° | 0.018° | 0.86 | 0.088° |
+| wrist_flex | 0.066° | 0.67 | 0.081° | 0.019° | 0.77 | 0.088° |
+| wrist_roll | 0.030° | 0.59 | 0.078° | 0.029° | 0.39 | 0.088° |
 
 The readings barely move: the noise is smaller than one encoder step
 (about 0.09°), so a parked joint mostly reads the same value. The common
@@ -1706,7 +1726,7 @@ FK fingertip at the grasp:
 
 50 of 50 episodes tracked on each. The vision start poses cover the same
 area as `antares task`'s FK picks (SO-101: x 3..24, y -14..13; SO-100: x
-19..33, y -8..14) and the two agree to about 2 cm, most of it a fixed
+19..34, y -7..13) and the two agree to about 2 cm, most of it a fixed
 offset: on the SO-101 roughly 1 cm along +x, where the camera puts the
 object a little further out than the kinematics put the jaws (the blob
 centroid takes in the object's front face from an oblique camera, and the
@@ -1833,15 +1853,15 @@ action of the chunk, and the raw MSE in dataset units²:
 | SO-101 | **policy** | **5.47** | 3.61 | **24.4** | 4.26 |
 | SO-101 | hold state | 11.81 | 5.72 | 105.3 | 12.09 |
 | SO-101 | repeat command | 8.41 | **1.46** | 53.7 | 8.63 |
-| SO-100 | **policy** | **3.70** | 2.39 | **10.9** | 2.82 |
-| SO-100 | hold state | 5.80 | 2.62 | 28.5 | 5.80 |
-| SO-100 | repeat command | 4.30 | **0.76** | 14.9 | 4.31 |
+| SO-100 | **policy** | **3.30** | 2.17 | **10.3** | 2.65 |
+| SO-100 | hold state | 5.45 | 2.48 | 28.5 | 5.38 |
+| SO-100 | repeat command | 4.02 | **0.70** | 14.9 | 3.98 |
 
 The policy beats both baselines over the chunk on both arms (seeds 0-2:
-5.47-5.63° on SO-101, 3.61-3.70° on SO-100). On the first action alone
+5.47-5.63° on SO-101, 3.26-3.30° on SO-100). On the first action alone
 "repeat the last command" wins, as it must: commands are smooth at 30 fps
 and the policy does not see them. The phase is not moot, but the policy is
-a modest imitator (3.6° / 2.4° from the operator's commands), and that is
+a modest imitator (3.6° / 2.2° from the operator's commands), and that is
 the thing being judged below, not a strong one.
 
 **Shadow (open loop)** (`antares/shadow.py`). For each held-out episode the
@@ -1860,11 +1880,11 @@ fingertip was against where it really was.
 | SO-101 | stock | 6.40 | – | 2.25 | – | 6.01 |
 | SO-101 | shared lock | **3.52** | **5.78** | **1.18** | 1.68 | 0.74 |
 | SO-101 | per-joint lock | 3.53 | 5.71 | 1.24 | 1.62 | 0.66 |
-| SO-100 | stock | 2.96 | – | 0.83 | – | 2.74 |
-| SO-100 | shared lock | **2.37** | **2.61** | 0.86 | 0.61 | 0.79 |
-| SO-100 | per-joint lock | 2.33 | 2.76 | 0.99 | 0.93 | 0.54 |
+| SO-100 | stock | 2.81 | – | 0.85 | – | 2.61 |
+| SO-100 | shared lock | **2.18** | **2.44** | 0.94 | 0.72 | 0.77 |
+| SO-100 | per-joint lock | 2.15 | 2.58 | 1.02 | 0.99 | 0.47 |
 
-Policy vs logged commands: 3.60° (SO-101), 2.38° (SO-100). Seeds 0-2 move
+Policy vs logged commands: 3.60° (SO-101), 2.17° (SO-100). Seeds 0-2 move
 the SO-101 divergence between 5.78 and 5.90°. Per joint on SO-101 the stock
 and the calibrated sim disagree by 7.7° on the shoulder pan, 6.5° on the
 shoulder lift, 5.1° on the elbow and the wrist roll, 3.8° on the wrist
@@ -1895,11 +1915,11 @@ there is a latency to shift.
 | SO-101 | per-joint lock | 43.1 | 32.8 | 7.3 | 2.7 | 4/10 | 8/10 | -13 |
 | SO-101 | shared lock + shift | 39.9 | 35.3 | **2.2** | **1.1** | **5/10** | 10/10 | -74 |
 | SO-101 | per-joint lock + shift | 41.8 | 34.7 | 4.5 | 1.7 | 6/10 | 10/10 | -59 |
-| SO-100 | stock | 59.5 | 53.9 | 21.0 | 9.7 | 0/10 | 4/10 | -139 |
-| SO-100 | shared lock | 40.8 | 41.3 | 23.4 | 10.5 | 0/10 | 2/10 | -46 |
-| SO-100 | per-joint lock | 38.0 | 39.6 | 18.1 | 11.8 | 0/10 | 2/10 | +51 |
-| SO-100 | shared lock + shift | 49.0 | 47.9 | 14.3 | 10.1 | 0/10 | 3/10 | -107 |
-| SO-100 | per-joint lock + shift | 48.5 | 45.0 | 20.5 | 11.5 | 0/10 | 2/10 | -93 |
+| SO-100 | stock | 71.7 | 60.6 | 20.9 | 9.7 | 0/10 | 4/10 | -120 |
+| SO-100 | shared lock | 52.4 | 38.1 | 23.0 | 10.4 | 0/10 | 2/10 | -2 |
+| SO-100 | per-joint lock | 34.9 | 37.2 | – | 13.2 | 0/10 | 0/10 | – |
+| SO-100 | shared lock + shift | 43.3 | 37.9 | 13.5 | 8.6 | 0/10 | 2/10 | -65 |
+| SO-100 | per-joint lock + shift | 44.8 | 39.2 | 18.7 | 11.5 | 0/10 | 2/10 | -46 |
 
 Across training seeds 0-2 the SO-101 successes are 2/4/2 (stock), 3/5/3
 (shared lock), 4/5/2 (per-joint), 5/7/4 (shared + shift), 6/4/2 (per-joint
@@ -1915,8 +1935,9 @@ Across training seeds 0-2 the SO-101 successes are 2/4/2 (stock), 3/5/3
   do. At the grasp instants the stock sim puts the fingertip 2.25 cm from
   where the real jaws were, the calibrated sim 1.2 cm; the two sims are
   1.7 cm apart there, about half the width of the cube being picked. On
-  the stiff SO-100 the same numbers are 2.6° and 0.6 cm: the stock sim is
-  less wrong about that arm, so it is less wrong about the policy.
+  the SO-100 the same numbers are 2.4° and 0.7 cm: the stock sim is less
+  wrong about that arm (2.6° replay error against 6.0°), so it is less
+  wrong about the policy.
 * *Closed loop, the stock sim gets the timing wrong, and the ranking is
   the same direction but inside the noise.* In the stock sim the policy
   closes the gripper 84 frames (2.8 s) early on average: the stiff,
@@ -1937,9 +1958,10 @@ Across training seeds 0-2 the SO-101 successes are 2/4/2 (stock), 3/5/3
   phase. The approach RMS (up to the real grasp) is the comparable one:
   38.8° stock vs 33.2° calibrated on SO-101.
 * *On SO-100 the sims agree that this policy does not work closed-loop*
-  (0/10 everywhere, the gripper closes in 2-4 of 10 episodes), even though
-  it is the better imitator. Calibration changes the trajectory (59.5° to
-  40.8°) but not the verdict; the task's bimodal grasps (table and
+  (0/10 everywhere, the gripper closes in at most 4 of 10 episodes and
+  never with the per-joint lock; across training seeds 0-2 no sim scores
+  above 2/10), even though it is the better imitator. Calibration changes
+  the trajectory (approach 60.6° to 38.1°) but not the verdict; the task's bimodal grasps (table and
   container) are more than a state-only policy with one goal point learns
   from 20 episodes.
 * *What this is not.* A state-only policy handed the grasp point, judged
@@ -2332,24 +2354,32 @@ model, each behind its own lock, `/api/replay` reports the `robot` it used,
 and every lock records its `robot` (older locks read as `so101`).
 
 Which model a dataset gets is `MODEL_FOR_FAMILY` in `robots.py`. Both
-families currently map to the SO-101 model, decided on the committed
-`svla_so100_pickplace` lock's 10 held-out episodes (RMS degrees, gripper
-excluded):
+families currently map to the SO-101 model. The comparison behind that, on
+the committed `svla_so100_pickplace` lock's 10 held-out episodes read in
+degrees (RMS degrees, gripper excluded;
+`python scripts/so100_model_choice.py` writes
+[`results/so100_model_choice.json`](results/so100_model_choice.json)):
 
-| model | default params | fresh 150-eval calibration (seed 0) |
-|---|---|---|
-| so101 (Menagerie file, implicitfast @ 5 ms) | 2.744 | **0.787** (the committed lock) |
-| so100 (Menagerie file verbatim, Euler @ 2 ms) | 2.720 | 0.697 |
-| so100 with so101's `<option>` block (implicitfast @ 5 ms) | 2.737 | 0.777 (lands on the same parameters as the so101 lock) |
+| model | default params | committed lock | fresh 150-eval calibration (seed 0) |
+|---|---|---|---|
+| so101 (Menagerie file, implicitfast @ 5 ms) | 2.614 | **0.768** | 0.768 (the committed lock) |
+| so100 (Menagerie file verbatim, Euler @ 2 ms) | 2.600 | 0.766 | **0.495** |
+| so100 with so101's `<option>` block (implicitfast @ 5 ms) | 2.615 | 0.770 | 0.648 |
 
-The SO-100 geometry does not change the answer: stepped the same way the
-two files are within 0.01° and find the same optimum, and the committed
-so100 lock scores 0.791 on the so100 model. The verbatim so100 file's 11%
+The SO-100 geometry does not change the answer: stepped the same way, the
+two files are within 0.01° at the defaults and on the committed lock, and
+the fresh fit's 0.648 is one CMA-ES basin among the 0.57-0.77 that seeds on
+the SO-101 model reach on this split (see
+[Is a lock specific to its arm?](#is-a-lock-specific-to-its-arm) and the
+[STS3215 servo model](#sts3215-servo-model)). The verbatim so100 file's
 gain comes from its finer timestep, which costs 17 physics substeps per
 frame instead of 7 (2.4x slower replay; the live 150-evaluation
-calibration would take 90 s instead of 45 s) and would invalidate every
-committed SO-100 number in this README. So SO-100 datasets stay on the
-SO-101 model and the SO-100 meshes are there for anyone who wants them.
+calibration would take 90 s instead of 45 s). Read as normalized units
+that gain was 11%; read in degrees it is 36%, larger than the seed spread,
+so the timestep is worth revisiting for SO-100 datasets. Switching would
+invalidate every committed SO-100 number in this README, so SO-100
+datasets stay on the SO-101 model for now and the SO-100 meshes are there
+for anyone who wants them.
 The exporter (`antares export`) writes SO-100 locks on the SO-101 MJCF.
 
 To add an SO-style robot inside the package: vendor its MJCF, meshes and LICENSE under
