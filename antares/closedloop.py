@@ -16,6 +16,14 @@ point) and clock in every sim. Metrics per sim:
   :data:`SUCCESS_CM` (2 cm): a proxy success rate with no objects, plus the
   minimum fingertip distance to the grasp point over the whole run, for
   the episodes where the policy never closes.
+* with an object (``objects=``, a :class:`~antares.task.KinematicObject`
+  per episode, starting where the operator picked it), the task itself:
+  did the policy pick it up, lift it, and let go of it within
+  :data:`~antares.task.PLACE_CM` of where the operator put it down
+  (:meth:`KinematicObject.result`). The object is carried by rule, not
+  simulated (the sim has no contacts); an image policy sees it through
+  :mod:`antares.simcam`, which renders the frame from ``ctx.q_rad`` and
+  ``ctx.object_xyz``.
 
 The point is to measure, not to force a difference: if the default and the
 calibrated sim rank the policy the same, the numbers say so.
@@ -53,6 +61,7 @@ from antares.gap import GapReport, aggregate, tracking_error
 from antares.policy import GraspContext, Policy, StepContext, real_grasp
 from antares.shadow import SIM_ONLY_NOTE, SimVariant, episode_goal
 from antares.sim import GRIPPER_INDEX, JOINTS, Arm
+from antares.task import KinematicObject, PlaceResult
 
 #: Fingertip within this distance of the real grasp point when the policy
 #: closes the gripper counts as reaching it.
@@ -143,6 +152,8 @@ def run_closed_loop(
     fps: float,
     exec_index: int = 0,
     goal: np.ndarray | None = None,
+    obj: KinematicObject | None = None,
+    episode: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Drive ``arm`` with ``policy`` for ``n_frames`` from ``q0_rad``.
 
@@ -152,7 +163,10 @@ def run_closed_loop(
     chunk). The sim applies at frame ``t`` the command sent at ``t - L``
     with ``L = max(latency, 1)`` per joint; frames before the first command
     arrives hold the command sent at frame 0. ``goal`` is handed to the
-    policy in every frame's :class:`StepContext`.
+    policy in every frame's :class:`StepContext`, with the sim's joint
+    angles and, with ``obj``, the object's position (``obj`` is reset and
+    stepped every frame with the gripper command the sim applies, and the
+    policy reads the jaw through :meth:`KinematicObject.observe`).
     """
     T = int(n_frames)
     if T < 1:
@@ -166,13 +180,22 @@ def run_closed_loop(
     sent_units = np.empty((T, nq), dtype=np.float64)
     sent_rad = np.empty((T, nq), dtype=np.float64)
     policy.reset()
+    if obj is not None:
+        obj.reset()
     with FrameStepper(arm, q0_rad, fps) as st:
         q = st.q
         sim_q[0] = q
-        hist = np.repeat(um.to_units(q)[None, :], k, axis=0)  # (k,6) dataset units
+        oxyz = None if obj is None else obj.xyz.copy()
+
+        def seen(q: np.ndarray) -> np.ndarray:
+            u = um.to_units(q)
+            return u if obj is None else obj.observe(u)
+
+        hist = np.repeat(seen(q)[None, :], k, axis=0)  # (k,6) dataset units
 
         def decide(t: int) -> None:
-            chunk = np.asarray(policy.act(hist, StepContext(t, fps, goal)), dtype=np.float64)
+            ctx = StepContext(t, fps, goal, q_rad=q.copy(), object_xyz=oxyz, episode=episode)
+            chunk = np.asarray(policy.act(hist, ctx), dtype=np.float64)
             a = chunk[min(ex, chunk.shape[0] - 1)]
             sent_units[t] = a
             sent_rad[t] = um.to_rad(cm.apply(a))
@@ -184,7 +207,10 @@ def run_closed_loop(
             applied = sent_rad[src, rows]
             q = st.step(applied)
             sim_q[t] = q
-            hist = np.vstack([hist[1:], um.to_units(q)[None, :]]) if k > 1 else um.to_units(q)[None, :]
+            if obj is not None:
+                oxyz = obj.step(t, q, float(sent_units[src[GRIPPER_INDEX], GRIPPER_INDEX]))
+            u = seen(q)
+            hist = np.vstack([hist[1:], u[None, :]]) if k > 1 else u[None, :]
             decide(t)
     return sim_q, sent_units
 
@@ -214,6 +240,7 @@ class ClosedLoopRun:
     final_error_deg: float  # body-joint RMS at the last frame
     approach_rms_deg: float | None = None  # trajectory RMS up to the real grasp frame
     exec_index: int = 0
+    place: PlaceResult | None = None  # the object's fate, with ``objects=``
 
     def to_dict(self, include_arrays: bool = False) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -232,6 +259,7 @@ class ClosedLoopRun:
             "success": self.success,
             "final_error_deg": self.final_error_deg,
             "exec_index": self.exec_index,
+            "place": None if self.place is None else self.place.to_dict(),
         }
         if include_arrays:
             d["sim_q_deg"] = np.degrees(self.sim_q).tolist()
@@ -351,6 +379,18 @@ class ClosedLoopSummary:
                 "success_rate": (float(sum(1 for r in judged if r.success)) / len(judged)) if judged else None,
                 "success_cm": SUCCESS_CM,
             }
+            placed = [r.place for r in rs if r.place is not None]
+            if placed:
+                out["variants"][n].update(
+                    n_objects=len(placed),
+                    n_picked=sum(1 for p in placed if p.picked),
+                    n_lifted=sum(1 for p in placed if p.lifted),
+                    n_placed=sum(1 for p in placed if p.success),
+                    place_rate=sum(1 for p in placed if p.success) / len(placed),
+                    place_error_cm=_mean([p.place_error_cm for p in placed if p.released]),
+                    lift_cm=_mean([p.lift_cm for p in placed if p.picked]),
+                    place_cm=placed[0].place_cm,
+                )
         return out
 
     def to_dict(self, include_arrays: bool = False) -> dict[str, Any]:
@@ -375,6 +415,7 @@ def closed_loop_episodes(
     shift: bool = True,
     on_progress: Callable[[int, int, list[ClosedLoopRun]], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
+    objects: Callable[[Episode], KinematicObject | None] | None = None,
 ) -> ClosedLoopSummary:
     """Run the policy closed-loop in every variant on every episode.
 
@@ -382,6 +423,8 @@ def closed_loop_episodes(
     runs as ``<name>+shift``, executing ``chunk[L]`` (see the module
     docstring). Starts from each episode's real initial state; episodes
     without a grasp point are skipped for a policy that needs one.
+    ``objects(ep)`` gives the episode's object (None for none), used fresh
+    in every variant.
     """
     episodes = list(episodes)
     variants = list(variants)
@@ -409,13 +452,18 @@ def closed_loop_episodes(
         if goal is None and getattr(policy, "needs_goal", False):
             skipped.append(int(ep.index))
             continue
+        obj = objects(ep) if objects is not None else None
         batch: list[ClosedLoopRun] = []
         for v, name, ex in plan:
             arm = arms[v.name]
             q0 = arm.real_q(ep)[0]
-            sim_q, actions = run_closed_loop(policy, arm, q0, len(ep), ep.fps, exec_index=ex, goal=goal)
+            sim_q, actions = run_closed_loop(
+                policy, arm, q0, len(ep), ep.fps, exec_index=ex, goal=goal, obj=obj, episode=int(ep.index)
+            )
             run = score_run(v, arm, ep, sim_q, actions, ctx, exec_index=ex)
             run.variant = name
+            if obj is not None:
+                run.place = obj.result()
             batch.append(run)
         runs.extend(batch)
         if on_progress is not None:

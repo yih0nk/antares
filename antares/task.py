@@ -253,6 +253,180 @@ def find_grasps(
     return out
 
 
+def place_target(grasps: Sequence[Grasp]) -> np.ndarray | None:
+    """Where the episode's object was put down: the fingertip at the
+    release of its first carried pick (else of its first pick with a
+    release), None when nothing was placed."""
+    picks = [g for g in grasps if g.kind == "pick" and g.release_xyz is not None]
+    carried = [g for g in picks if g.carried]
+    g = (carried or picks or [None])[0]
+    return None if g is None else np.asarray(g.release_xyz, dtype=np.float64)
+
+
+# --------------------------------------------------------------------------
+# A pick-and-place check in a sim without contacts
+# --------------------------------------------------------------------------
+
+#: A close of the gripper command with the fingertip within this of the
+#: object's centre picks the object up.
+PICK_RADIUS_M = 0.025
+#: The held object rose at least this far above where it rests: lifted.
+LIFT_M = 0.02
+#: Released and resting within this (horizontally) of the logged place
+#: position: placed.
+PLACE_CM = 5.0
+
+
+@dataclass(frozen=True)
+class PlaceResult:
+    """What happened to the object in one closed-loop run."""
+
+    picked: bool  # a close caught it (fingertip within the pick radius)
+    lifted: bool  # held and raised at least ``lift_m``
+    released: bool  # let go after being lifted
+    lift_cm: float  # highest it got above its resting height while held
+    place_error_cm: float | None  # resting position vs the logged place, horizontal; None without a place
+    start_error_cm: float  # resting position vs where it started, horizontal
+    success: bool  # lifted, released, resting within ``place_cm`` of the place
+    pick_frame: int | None
+    release_frame: int | None
+    final_xyz: tuple[float, float, float]
+    place_cm: float = PLACE_CM
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "picked": self.picked,
+            "lifted": self.lifted,
+            "released": self.released,
+            "lift_cm": self.lift_cm,
+            "place_error_cm": self.place_error_cm,
+            "start_error_cm": self.start_error_cm,
+            "success": self.success,
+            "pick_frame": self.pick_frame,
+            "release_frame": self.release_frame,
+            "final_xyz": list(self.final_xyz),
+            "place_cm": self.place_cm,
+        }
+
+
+class KinematicObject:
+    """The task's object in a sim that has no contacts: carried, not simulated.
+
+    The sim arm cannot push or squeeze anything (:class:`antares.sim.Arm`
+    runs without contacts), so the object follows rules instead: it rests
+    at ``start_xyz`` until the gripper *command* closes (hysteresis on the
+    dataset's thresholds, as :mod:`antares.events` reads it) with the
+    fingertip within ``pick_radius`` of its centre; from then it moves
+    rigidly with the fingertip while the command stays closed; when the
+    command opens, or rises :data:`HELD_GAP` above the lowest it reached
+    while holding (operators often let go by easing the leader only part
+    way open, as :func:`find_grasps` reads off the jaw), it drops straight
+    down to its resting height. It can be picked again. A close away from
+    it, or a close that started before the fingertip got there, catches
+    nothing.
+
+    While it is held the real follower's jaw would stop on it, short of
+    closed; ``held_jaw`` (dataset units) is that reading, and
+    :meth:`observe` puts it in place of the sim's fully closed jaw so a
+    policy that watches its gripper sees what it would on the robot.
+    """
+
+    def __init__(
+        self,
+        start_xyz: Sequence[float],
+        thresholds: GripperThresholds,
+        tip: Tip,
+        place_xyz: Sequence[float] | None = None,
+        held_jaw: float | None = None,
+        pick_radius: float = PICK_RADIUS_M,
+    ):
+        self.start = np.asarray(start_xyz, dtype=np.float64).reshape(3)
+        self.rest_z = float(self.start[2])
+        self.thr = thresholds
+        self.tip = tip
+        self.place = None if place_xyz is None else np.asarray(place_xyz, dtype=np.float64).reshape(3)
+        self.held_jaw = held_jaw
+        self.pick_radius = float(pick_radius)
+        self.reset()
+
+    def reset(self) -> None:
+        self.xyz = self.start.copy()
+        self.held = False
+        self._offset = np.zeros(3)
+        self._closed: bool | None = None
+        self._hold_cmd = float("inf")
+        self.lift = 0.0
+        self.lifted = False
+        self.pick_frame: int | None = None
+        self.release_frame: int | None = None
+        self.picked = False
+        self.trace: list[np.ndarray] = []
+
+    def _is_closed(self, cmd: float) -> bool:
+        if cmd < self.thr.closed_below:
+            return True
+        if cmd > self.thr.open_above:
+            return False
+        if self._closed is None:
+            return cmd < 0.5 * (self.thr.closed_below + self.thr.open_above)
+        return self._closed
+
+    def step(self, frame: int, q_rad: np.ndarray, gripper_cmd: float) -> np.ndarray:
+        """Advance to ``frame`` with the arm at ``q_rad`` and the gripper
+        command (dataset units) the sim is applying; returns the object's
+        position."""
+        tip = np.asarray(self.tip(np.asarray(q_rad, dtype=np.float64)), dtype=np.float64)
+        was = self._closed
+        cmd = float(gripper_cmd)
+        closed = self._is_closed(cmd)
+        if not self.held:
+            if closed and was is False and np.linalg.norm(tip - self.xyz) <= self.pick_radius:
+                self.held, self.picked = True, True
+                self._offset = self.xyz - tip
+                self._hold_cmd = cmd
+                if self.pick_frame is None:
+                    self.pick_frame = int(frame)
+        elif closed and cmd <= self._hold_cmd + HELD_GAP:
+            self._hold_cmd = min(self._hold_cmd, cmd)
+            self.xyz = tip + self._offset
+            self.lift = max(self.lift, float(self.xyz[2] - self.rest_z))
+            self.lifted = self.lifted or self.lift >= LIFT_M
+        else:
+            self.held = False
+            self.xyz = np.array([*(tip + self._offset)[:2], self.rest_z])
+            if self.lifted and self.release_frame is None:
+                self.release_frame = int(frame)
+        self._closed = closed
+        self.trace.append(self.xyz.copy())
+        return self.xyz.copy()
+
+    def observe(self, q_units: np.ndarray) -> np.ndarray:
+        """The joint state a policy would read (dataset units): the jaw held
+        open on the object while it is held."""
+        q = np.asarray(q_units, dtype=np.float64).copy()
+        if self.held and self.held_jaw is not None:
+            q[GRIPPER_INDEX] = max(q[GRIPPER_INDEX], float(self.held_jaw))
+        return q
+
+    def result(self, place_cm: float = PLACE_CM) -> PlaceResult:
+        """Lifted, released, and resting within ``place_cm`` of the logged place."""
+        released = self.lifted and not self.held and self.release_frame is not None
+        place_err = None if self.place is None else float(np.linalg.norm(self.xyz[:2] - self.place[:2]) * 100.0)
+        return PlaceResult(
+            picked=self.picked,
+            lifted=self.lifted,
+            released=released,
+            lift_cm=float(self.lift * 100.0),
+            place_error_cm=place_err,
+            start_error_cm=float(np.linalg.norm(self.xyz[:2] - self.start[:2]) * 100.0),
+            success=bool(released and place_err is not None and place_err <= place_cm),
+            pick_frame=self.pick_frame,
+            release_frame=self.release_frame,
+            final_xyz=tuple(float(v) for v in self.xyz),
+            place_cm=float(place_cm),
+        )
+
+
 def _stats(points: np.ndarray) -> dict[str, Any] | None:
     """Mean, standard deviation and min/max per axis of an (N,3) cloud."""
     if len(points) == 0:

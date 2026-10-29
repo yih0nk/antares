@@ -138,11 +138,20 @@ def episode_goals(episodes: Sequence[Episode], ctx: GraspContext) -> dict[int, n
 class StepContext:
     """What a policy may know besides the joint states at one frame: the
     frame index and rate (so time since the start), and the goal (grasp
-    point, metres, base frame) when the task has one."""
+    point, metres, base frame) when the task has one.
+
+    The closed loop also fills in what a camera would see, for image
+    policies (:mod:`antares.simcam` renders it): ``q_rad``, the sim's joint
+    angles this frame, and ``object_xyz``, where the sim's object is (base
+    frame, metres; None when the run has no object). ``episode`` is the
+    episode being evaluated, for inputs read off its recording."""
 
     frame: int
     fps: float
     goal: np.ndarray | None = None
+    q_rad: np.ndarray | None = None
+    object_xyz: np.ndarray | None = None
+    episode: int | None = None
 
     @property
     def seconds(self) -> float:
@@ -754,15 +763,26 @@ def list_policies(lock_dir: Path | str | None = None, lock: str | None = None) -
 class LeRobotPolicy:
     """A LeRobot ``PreTrainedPolicy`` behind the :class:`Policy` interface.
 
-    LeRobot policies keep their own observation history and action queue:
-    ``select_action(batch)`` takes one frame and returns one action, so the
-    wrapper reports ``k = 1`` and ``h = 1`` (the chunk-shift variant of the
-    closed loop then has nothing to shift; ACT/diffusion queue their own
-    chunks internally). ``batch`` is ``{"observation.state": (1,6) float32}``
-    plus whatever ``extra_inputs(ctx)`` returns, which is where rendered
-    camera images go for an image policy (see the README: the fitted camera
-    and scene are what make that render match the real one). Such a policy
-    does not need the grasp point: the images carry it.
+    Every frame the wrapper builds LeRobot's observation batch,
+    ``{"observation.state": (6,) float32}`` plus whatever
+    ``extra_inputs(ctx)`` returns (the camera images of an image policy,
+    see :mod:`antares.simcam`) and, for a language-conditioned policy, the
+    ``task`` string; runs it through the checkpoint's ``preprocessor``
+    (rename, batch, device, normalize), the policy, and the
+    ``postprocessor`` (unnormalize), as ``lerobot-record`` does. Without
+    processors the batch goes to the policy as is (older LeRobot, where
+    the policy normalizes inside).
+
+    **Chunks.** A policy with ``predict_action_chunk`` and
+    ``config.n_action_steps`` (ACT, diffusion, SmolVLA, pi0) is queried only
+    when its queue of ``n_action_steps`` actions runs out, exactly like its
+    own ``select_action``, but the queue is kept here: ``act`` returns the
+    rest of the current chunk (``h = n_action_steps``), so the closed
+    loop's ``+shift`` variant can send ``chunk[L]``, and the observation
+    (and so the rendered images) is only built on the frames the policy
+    actually looks at. Anything else goes through ``select_action`` one
+    action at a time (``h = 1``). Such a policy does not need the grasp
+    point: the images carry it.
 
     Dataset units in, dataset units out, like the LeRobot runtime.
     """
@@ -775,40 +795,136 @@ class LeRobotPolicy:
         device: str = "cpu",
         state_key: str = "observation.state",
         extra_inputs: Callable[[StepContext], dict[str, Any]] | None = None,
+        preprocessor: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+        postprocessor: Callable[[Any], Any] | None = None,
+        task: str | None = None,
+        n_action_steps: int | None = None,
     ):
         self.policy = policy
         self.device = device
         self.state_key = state_key
         self.extra_inputs = extra_inputs
+        self.preprocessor = preprocessor
+        self.postprocessor = postprocessor
+        self.task = task
+        cfg = getattr(policy, "config", None)
+        chunked = callable(getattr(policy, "predict_action_chunk", None)) and cfg is not None
+        if chunked and getattr(cfg, "temporal_ensemble_coeff", None) is not None:
+            chunked = False  # the ensembler needs a query every frame: let select_action run it
+        n = n_action_steps if n_action_steps is not None else getattr(cfg, "n_action_steps", None) if chunked else None
+        self.chunked = bool(chunked and n)
         self.k = 1
-        self.h = 1
+        self.h = int(n) if self.chunked else 1
+        self._queue: np.ndarray = np.zeros((0, N_JOINTS))
+        self.n_queries = 0
+
+    @property
+    def image_keys(self) -> list[str]:
+        """The checkpoint's camera inputs (``observation.images.<name>``)."""
+        feats = getattr(getattr(self.policy, "config", None), "image_features", None) or {}
+        return list(feats)
 
     def reset(self) -> None:
         reset = getattr(self.policy, "reset", None)
         if callable(reset):
             reset()
+        for p in (self.preprocessor, self.postprocessor):
+            r = getattr(p, "reset", None)
+            if callable(r):
+                r()
+        self._queue = np.zeros((0, N_JOINTS))
+        self.n_queries = 0
+
+    def _batch(self, obs: np.ndarray, ctx: StepContext) -> dict[str, Any]:
+        torch = _torch()
+        state = torch.as_tensor(obs[-1], dtype=torch.float32)
+        batch: dict[str, Any] = {self.state_key: state if self.preprocessor is not None else state[None].to(self.device)}
+        if self.extra_inputs is not None:
+            batch.update(self.extra_inputs(ctx))
+        if self.task is not None:
+            batch["task"] = self.task
+        return self.preprocessor(batch) if self.preprocessor is not None else batch
+
+    def _out(self, a: Any) -> np.ndarray:
+        if self.postprocessor is not None:
+            a = self.postprocessor(a)
+        return np.asarray(a.detach().cpu().numpy() if hasattr(a, "detach") else a, dtype=np.float64).reshape(-1, N_JOINTS)
 
     def act(self, obs: np.ndarray, ctx: StepContext) -> np.ndarray:
         torch = _torch()
         obs = np.asarray(obs, dtype=np.float64)
         if obs.ndim != 2 or obs.shape[1] != N_JOINTS:
             raise ValueError(f"obs must be (k,{N_JOINTS}), got {obs.shape}")
-        batch = {self.state_key: torch.as_tensor(obs[-1][None], dtype=torch.float32, device=self.device)}
-        if self.extra_inputs is not None:
-            batch.update(self.extra_inputs(ctx))
-        with torch.no_grad():
-            a = self.policy.select_action(batch)
-        a = np.asarray(a.detach().cpu().numpy() if hasattr(a, "detach") else a, dtype=np.float64).reshape(-1, N_JOINTS)
-        return a[:1]
+        if not self.chunked:
+            with torch.no_grad():
+                return self._out(self.policy.select_action(self._batch(obs, ctx)))[:1]
+        if len(self._queue) == 0:
+            with torch.no_grad():
+                chunk = self.policy.predict_action_chunk(self._batch(obs, ctx))[:, : self.h]
+            self._queue = self._out(chunk)
+            self.n_queries += 1
+        out = self._queue
+        self._queue = self._queue[1:]
+        return out
 
 
-def load_lerobot_policy(repo_id: str, device: str = "cpu", **kwargs: Any) -> LeRobotPolicy:
+def _checkpoint_file(repo_id: str, filename: str) -> Path | None:
+    """``filename`` of a local checkpoint directory or a Hub repo, None when it has none."""
+    local = Path(repo_id)
+    if local.is_dir():
+        p = local / filename
+        return p if p.is_file() else None
+    from huggingface_hub import hf_hub_download
+    from huggingface_hub.utils import EntryNotFoundError
+
+    try:
+        return Path(hf_hub_download(repo_id, filename))
+    except EntryNotFoundError:
+        return None
+
+
+def _stats_from_weights(repo_id: str, keys: Sequence[str]) -> dict[str, dict[str, Any]] | None:
+    """Normalization statistics of a checkpoint saved before LeRobot moved
+    them out of the model (``normalize_inputs.buffer_<key>.mean`` ... in
+    ``model.safetensors``, the key's dots flattened), as ``{key: {"mean":
+    ..., "std": ...}}`` for the feature ``keys`` of its config."""
+    path = _checkpoint_file(repo_id, "model.safetensors")
+    if path is None:
+        return None
+    from safetensors import safe_open
+
+    flat = {k.replace(".", "_"): k for k in keys}
+    stats: dict[str, dict[str, Any]] = {}
+    with safe_open(str(path), framework="pt") as f:
+        for name in f.keys():
+            head, _, rest = name.partition(".buffer_")
+            if not rest or head not in ("normalize_inputs", "normalize_targets", "unnormalize_outputs"):
+                continue
+            key, _, stat = rest.rpartition(".")
+            if key in flat:
+                stats.setdefault(flat[key], {})[stat] = f.get_tensor(name)
+    return stats or None
+
+
+def load_lerobot_policy(
+    repo_id: str,
+    device: str = "cpu",
+    dataset_stats: dict[str, dict[str, Any]] | None = None,
+    **kwargs: Any,
+) -> LeRobotPolicy:
     """Load a LeRobot checkpoint (Hub id or local directory) as a :class:`Policy`.
 
-    Needs the ``lerobot`` package (not installed by any Antares extra; follow
-    LeRobot's own install instructions). The policy class is picked from the
-    checkpoint's config, as ``lerobot.policies.factory`` does. ``kwargs`` go
-    to :class:`LeRobotPolicy` (``extra_inputs`` for image policies).
+    Needs the ``lerobot`` package (not installed by any Antares extra;
+    ``pip install lerobot``). The policy class is picked from the
+    checkpoint's config, as ``lerobot.policies.factory`` does, on
+    ``device`` whatever device it was trained on. The ImageNet backbone
+    weights are not fetched (the checkpoint's own weights replace them).
+    The checkpoint's pre/post-processors (``policy_preprocessor.json``)
+    are loaded when it has them; a checkpoint from before LeRobot 0.4 has
+    its normalization statistics inside the weights instead, and those are
+    read out and turned into the same processors (``dataset_stats``
+    overrides them). ``kwargs`` go to :class:`LeRobotPolicy`
+    (``extra_inputs`` for image policies, ``task`` for VLAs).
     """
     try:
         from lerobot.configs.policies import PreTrainedConfig  # type: ignore
@@ -819,13 +935,34 @@ def load_lerobot_policy(repo_id: str, device: str = "cpu", **kwargs: Any) -> LeR
             "the state-based ChunkedPolicy needs only torch"
         ) from e
     cfg = PreTrainedConfig.from_pretrained(repo_id)
+    if hasattr(cfg, "device"):
+        cfg.device = device
+    if hasattr(cfg, "pretrained_backbone_weights"):
+        cfg.pretrained_backbone_weights = None
     cls = get_policy_class(cfg.type)
     policy = cls.from_pretrained(repo_id, config=cfg)
     policy.eval()
     to = getattr(policy, "to", None)
     if callable(to):
         to(device)
-    return LeRobotPolicy(policy, device=device, **kwargs)
+    pre = post = None
+    try:
+        from lerobot.policies.factory import make_pre_post_processors  # type: ignore
+    except ImportError:  # LeRobot before 0.4: the policy normalizes inside
+        make_pre_post_processors = None
+    if make_pre_post_processors is not None:
+        dev = {"device_processor": {"device": device}}
+        if dataset_stats is None and _checkpoint_file(repo_id, "policy_preprocessor.json") is not None:
+            pre, post = make_pre_post_processors(
+                cfg, pretrained_path=repo_id, preprocessor_overrides=dev, postprocessor_overrides=dev
+            )
+        else:
+            keys = [*(getattr(cfg, "input_features", None) or {}), *(getattr(cfg, "output_features", None) or {})]
+            stats = dataset_stats if dataset_stats is not None else _stats_from_weights(repo_id, keys)
+            if stats is None:
+                raise ValueError(f"{repo_id} has neither processor files nor normalization statistics; pass dataset_stats")
+            pre, post = make_pre_post_processors(cfg, dataset_stats=stats)
+    return LeRobotPolicy(policy, device=device, preprocessor=pre, postprocessor=post, **kwargs)
 
 
 __all__ = [
