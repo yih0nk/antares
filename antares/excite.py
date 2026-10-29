@@ -140,6 +140,8 @@ def dance(
     chirp_seconds: float = 5.0,
     move_seconds: float = 1.2,
     pose_hold: float = 1.5,
+    start: Sequence[float] | None = None,
+    start_seconds: float = 4.0,
 ) -> Dance:
     """The calibration dance, about 60 s at the defaults.
 
@@ -148,6 +150,11 @@ def dance(
     with ``small_step``, then a chirp of ``chirp_amp`` units from ``f0`` to
     ``f1`` Hz. Then each of ``gravity_poses`` is approached on a
     minimum-jerk path and held for ``pose_hold`` seconds.
+
+    ``start`` (dataset units) is where the arm is when the replay begins.
+    Given, the dance opens with a ``start_seconds`` minimum-jerk move from it
+    to ``home`` (and the safety check covers that move), so an arm is never
+    commanded to jump to the first frame from wherever it rests.
     """
     big_step = {**BIG_STEP, **(big_step or {})}
     chirp_amp = {**CHIRP_AMP, **(chirp_amp or {})}
@@ -170,6 +177,11 @@ def dance(
     def hold(q: np.ndarray, seconds: float) -> np.ndarray:
         return np.repeat(q[None], _frames(seconds, fps), axis=0)
 
+    if start is not None:
+        start_v = np.asarray(start, dtype=np.float64)
+        if start_v.shape != (len(JOINTS),):
+            raise ValueError(f"start needs {len(JOINTS)} values, got {start_v.shape}")
+        add("lead-in from start", np.concatenate([start_v[None], _minjerk(start_v, home_v, _frames(start_seconds, fps))]))
     add("home", hold(home_v, 1.0))
     for j, name in enumerate(BODY):
         for size, secs in ((big_step[name], step_hold), (small_step, small_hold)):
@@ -193,6 +205,7 @@ def dance(
         "big_step": big_step, "small_step": small_step, "chirp_amp": chirp_amp, "f0": f0, "f1": f1,
         "step_hold": step_hold, "small_hold": small_hold, "chirp_seconds": chirp_seconds,
         "move_seconds": move_seconds, "pose_hold": pose_hold,
+        "start": None if start is None else [float(v) for v in start], "start_seconds": start_seconds,
     }
     return Dance(fps=fps, commands=np.concatenate(parts), segments=tuple(segments), steps=tuple(steps),
                  config=config)
@@ -212,6 +225,7 @@ def check_safety(
     clearance: float = CLEARANCE,
     limit: float = LIMIT,
     max_speed: float = MAX_SPEED,
+    lead_in: int = 0,
 ) -> dict:
     """Forward-kinematics check of every frame of ``commands`` (dataset units).
 
@@ -220,6 +234,11 @@ def check_safety(
     ``clearance`` metres above ``table_z``, and the commanded speed outside
     the ``steps`` frames stays below ``max_speed`` rad/s. Returns the
     margins alongside the verdict.
+
+    The first ``lead_in`` frames (a move from where the arm already rests,
+    :func:`dance` ``start``) are checked for speed only: the rest pose is
+    wherever the arm is, so its joint limits and clearance are not the
+    dance's to fail.
     """
     import mujoco
 
@@ -244,11 +263,13 @@ def check_safety(
     jumps = {s - 1 for s in steps if s > 0}
     smooth = np.array([t for t in range(len(speed)) if t not in jumps], dtype=int)
     peak = speed[smooth].max(axis=0) if smooth.size else np.zeros(q.shape[1])
-    body = commands[:, : len(BODY)]
-    grip = commands[:, len(BODY):]
+    body = commands[lead_in:, : len(BODY)]
+    grip = commands[lead_in:, len(BODY):]
+    tip_z, link_z = tip_z[lead_in:], link_z[lead_in:]
     floor = table_z + clearance
     out = {
         "n_frames": int(len(commands)),
+        "lead_in_frames": int(lead_in),
         "duration_s": float(len(commands) / fps),
         "max_abs_units": float(np.abs(body).max()),
         "limit_units": float(limit),
@@ -270,30 +291,62 @@ def check_safety(
 
 
 # --------------------------------------------------------------------------
+# Units
+# --------------------------------------------------------------------------
+
+#: How the arm's commands are scaled: LeRobot's normalized range, or degrees
+#: (LeRobot >= 0.5 records and commands SO arms in degrees by default).
+UNITS = ("normalized", "degrees")
+UNITS_LABEL = {
+    "normalized": "LeRobot normalized: body joints -100..100, gripper 0..100",
+    "degrees": "degrees for the body joints (LeRobot use_degrees), gripper 0..100",
+}
+
+
+def to_units(commands: np.ndarray, units: str) -> np.ndarray:
+    """The dance's normalized ``commands`` in the arm's ``units``.
+
+    ``degrees`` goes through the same joint angles: normalized units to
+    radians with the SO-101 model's map, then radians to degrees with the
+    ``so101_deg`` model's, so the arm moves exactly as the checked path.
+    """
+    if units not in UNITS:
+        raise ValueError(f"units must be one of {', '.join(UNITS)}, got {units!r}")
+    commands = np.asarray(commands, dtype=np.float64)
+    if units == "normalized":
+        return commands
+    from antares.sim import Arm
+
+    return Arm(robot="so101_deg").unit_map.to_units(Arm().unit_map.to_rad(commands))
+
+
+# --------------------------------------------------------------------------
 # Files
 # --------------------------------------------------------------------------
 
 
-def write(path: str | Path, d: Dance) -> Path:
+def write(path: str | Path, d: Dance, units: str = "normalized") -> Path:
     """Save ``d`` by extension: ``.csv`` (``timestamp`` plus one ``<joint>.pos``
     column per joint, LeRobot's action names), ``.json`` (the same plus the
-    segments and the generator settings) or ``.npy`` (the bare (T, 6) array)."""
+    segments and the generator settings) or ``.npy`` (the bare (T, 6) array),
+    in ``units`` (see :func:`to_units`)."""
     path = Path(path)
     names = [f"{j}.pos" for j in d.joint_names]
+    commands = to_units(d.commands, units)
     if path.suffix == ".npy":
-        np.save(path, d.commands)
+        np.save(path, commands)
     elif path.suffix == ".csv":
         with path.open("w", newline="") as f:
             w = csv.writer(f)
             w.writerow(["timestamp", *names])
-            for t, row in enumerate(d.commands):
+            for t, row in enumerate(commands):
                 w.writerow([f"{t / d.fps:.4f}", *(f"{v:.3f}" for v in row)])
     elif path.suffix == ".json":
         path.write_text(json.dumps({
             "fps": d.fps,
             "names": names,
-            "units": "LeRobot normalized: body joints -100..100, gripper 0..100",
-            "action": np.round(d.commands, 3).tolist(),
+            "units": UNITS_LABEL[units],
+            "action": np.round(commands, 3).tolist(),
             "segments": [{"label": s, "start": a, "end": b} for s, a, b in d.segments],
             "config": d.config,
         }) + "\n")
@@ -320,4 +373,4 @@ def read(path: str | Path) -> tuple[np.ndarray, float]:
     raise ValueError(f"{path}: expected a .csv, .json or .npy path")
 
 
-__all__ = ["BODY", "Dance", "GRAVITY_POSES", "HOME", "check_safety", "chirp", "dance", "read", "write"]
+__all__ = ["BODY", "Dance", "GRAVITY_POSES", "HOME", "UNITS", "check_safety", "chirp", "dance", "read", "to_units", "write"]

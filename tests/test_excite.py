@@ -107,3 +107,44 @@ def test_cli_excite_writes_the_dance(tmp_path, capsys):
 def test_cli_excite_rejects_unknown_suffix(tmp_path, capsys):
     assert cli.main(["excite", "--out", str(tmp_path / "dance.txt")]) == 2
     assert "expected a .csv" in capsys.readouterr().err
+
+
+def test_dance_lead_in_ramps_from_the_start_pose_to_home():
+    rest = (0.0, -95.0, 95.0, 60.0, 0.0, 2.0)
+    d = excite.dance(start=rest)
+    np.testing.assert_allclose(d.commands[0], rest)
+    assert d.segments[0][0] == "lead-in from start"
+    end = d.segments[0][2]
+    np.testing.assert_allclose(d.commands[end - 1], excite.HOME)
+    # a smooth move: no frame-to-frame jump anywhere near a step's size
+    assert np.abs(np.diff(d.commands[:end], axis=0)).max() < 4.0
+    np.testing.assert_allclose(d.commands[end:], excite.dance().commands)
+
+
+def test_degrees_output_keeps_the_same_joint_angles():
+    from antares.sim import Arm
+
+    d = excite.dance()
+    deg = excite.to_units(d.commands, "degrees")
+    np.testing.assert_allclose(Arm(robot="so101_deg").unit_map.to_rad(deg), Arm().unit_map.to_rad(d.commands), atol=1e-9)
+    with pytest.raises(ValueError):
+        excite.to_units(d.commands, "radians")
+
+
+def test_cli_excite_does_not_write_an_unsafe_dance(tmp_path, capsys):
+    out = tmp_path / "dance.csv"
+    # a table far above the arm makes every frame fail the clearance check
+    assert cli.main(["excite", "--out", str(out), "--table-z", "1.0"]) == 1
+    assert not out.exists() and "not writing" in capsys.readouterr().err
+    assert cli.main(["excite", "--out", str(out), "--table-z", "1.0", "--force"]) == 1
+    assert out.exists()
+
+
+def test_cli_excite_writes_degrees_with_a_lead_in(tmp_path, capsys):
+    out = tmp_path / "dance.json"
+    assert cli.main(["excite", "--out", str(out), "--units", "degrees", "--start", "0,-90,90,60,0,2"]) == 0
+    import json
+
+    doc = json.loads(out.read_text())
+    assert doc["units"].startswith("degrees") and doc["config"]["start"] is not None
+    assert cli.main(["excite", "--out", str(out), "--start", "1,2,3"]) == 2
