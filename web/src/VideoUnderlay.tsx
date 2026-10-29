@@ -91,7 +91,12 @@ export function useUnderlay(
         setFits(r.cameras);
         setFitsFor(lock);
       },
-      () => live && setFits({}),
+      () => {
+        // A failed fetch still belongs to this lock: no fit, rather than the last lock's.
+        if (!live) return;
+        setFits({});
+        setFitsFor(lock);
+      },
     );
     return () => {
       live = false;
@@ -111,7 +116,11 @@ export function useUnderlay(
         setDatasetFits(r.cameras);
         setDatasetFitsFor(dataset);
       },
-      () => live && setDatasetFits({}),
+      () => {
+        if (!live) return;
+        setDatasetFits({});
+        setDatasetFitsFor(dataset);
+      },
     );
     return () => {
       live = false;
