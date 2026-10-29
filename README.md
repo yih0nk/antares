@@ -112,7 +112,7 @@ Bring your own dataset, in short (details in [Bring your own dataset](#bring-you
 
 * **Two arm types.** Every number here is from the two SO-100/101 demo datasets and the 58 SO-100/101 arms in the fleet scan. ALOHA, Trossen AI, AgileX Piper and Koch are registered models that load, replay and export (the tests cover them), but no lock for them is committed and no gap has been measured. Adding a robot is an MJCF, a unit map and a registry entry.
 * **Nothing was driven on hardware.** Locks are scored against held-out logged trajectories; lag compensation, DR ranges and both policy experiments are sim-to-sim. The policy claim is "the stock sim and the calibrated sim judge the same policy differently, and the lock's held-out replay says which to believe", not "the policy works on the arm".
-* **Parameter values are fits, not measurements.** `kp`, `kv`, damping, armature and friction trade off at the same tracking error (seeds on one arm span 25× in `kp`); only latency and the sensor map are pinned by pick-and-place logs. `--seeds 3` records which parameters the seeds agree on, and everything downstream reads only those as physical.
+* **Parameter values are fits, not measurements.** `kp`, `kv`, damping, armature and friction trade off at the same tracking error (seeds on one arm span 25× in `kp`); only latency and the sensor map are pinned by pick-and-place logs. `--seeds 3` records which parameters the seeds agree on, and everything downstream reads only those as physical. A sim-only [calibration dance](#a-calibration-dance-sim-only) helps on some synthetic arms, but it is not a fix yet.
 * **The leftover elbow error is step-shaped**, not a slope in gravity load, so the six servo parameters do not express it; the contact detector sees that pose dependence, not contact with a light object.
 * **Payload mass is below the noise.** The residual resolves 13 g per encoder step with a noise floor of 40–60 g; a 30 g object comes out at 22 g with a 69 g IQR, so the export uses an assumed 30 g and says so.
 * **Some SO-100 numbers predate its degrees fix.** The SO-100 demo dataset is recorded in degrees and was first replayed as LeRobot's normalized units. Its locks, the per-joint and sensor tables, the two-arm `antares cross` numbers, and the camera, scene, object and payload fits were redone on `so101_deg` (2026-10-18). Still on the old reading: the robot-specificity study and the seed spread quoted from it (`antares specificity` builds one simulator for every dataset, so it cannot yet replay one in degrees), the gravity/deadband and STS3215 servo-model tables, drift over a session, contact detection, lag compensation, domain randomization, the video-delay table, both policy experiments, and the fleet scan's copy of this dataset. Their SO-100 stock baseline is 2.74° rather than 2.61°.
@@ -122,7 +122,7 @@ Bring your own dataset, in short (details in [Bring your own dataset](#bring-you
 
 | Section | What it answers |
 |---|---|
-| [Calibrating the arm](#calibrating-the-arm) | What the fit accounts for, per-joint and seeded fits, the sensor map, gravity and deadband, the STS3215 servo model, your own LeRobot calibration file |
+| [Calibrating the arm](#calibrating-the-arm) | What the fit accounts for, per-joint and seeded fits, the calibration dance, the sensor map, gravity and deadband, the STS3215 servo model, your own LeRobot calibration file |
 | [Every robot is different](#every-robot-is-different) | Whether a lock is specific to its arm, the 58-arm fleet scan, the registry that gives each physical robot one id |
 | [Operating the robot](#operating-the-robot) | Drift within a session, the pre-deploy gate with its cause diagnosis and alerts, contact events, lag compensation, DR ranges |
 | [Seeing what the robot sees](#seeing-what-the-robot-sees) | Pick and place positions, joint noise, camera poses and video delay, the table and backdrops, the object and its mass |
@@ -328,6 +328,98 @@ names a cause the lock pins; fleet statistics take `pinned_only`, and
 `antares fleet list` prints which parameters are pinned across the
 fleet's locks. The committed locks were fitted with one seed, so for them
 that is latency only.
+
+### A calibration dance (sim-only)
+
+Pick-and-place logs pin latency and the sensor map; the other servo
+parameters trade off. `antares excite` writes a 61.8 s excitation
+trajectory, the "calibration dance", that a user would record once: for
+each body joint in turn, around a raised home pose, a large step (20-25
+units, enough to saturate the soft arm's force limit, where `kv` and joint
+damping stop acting alike), a small 4-unit step (rise time and stall, for
+`kp` and friction) and a 0.3-2 Hz log chirp (inertia and lag), then three
+gravity holds (the static sag is `g(q) / kp`).
+
+```sh
+.venv/bin/antares excite --out dance.csv     # or .json / .npy; columns are LeRobot's <joint>.pos action names
+.venv/bin/antares excite --out dance.csv --units degrees --start 0,-95,95,60,0,2 --table-z -0.03
+```
+
+The file is in dataset units: LeRobot's normalized range by default, or
+degrees with `--units degrees` (LeRobot >= 0.5 commands SO arms in degrees
+by default; the joint angles are the same either way). It starts and ends
+at the home pose. Move the arm there before replaying it, or pass the arm's
+resting pose as `--start` to open with a slow 4 s lead-in to home instead
+of a jump. `--table-z` sets your table's height for the clearance check
+(default: the demo scene's -22 mm). A forward-kinematics check runs on
+every frame after the lead-in (the lead-in is checked for speed only,
+since it starts wherever the arm already is). If it fails, the command
+writes nothing and exits 1; `--force` writes the file anyway. The commanded fingertip stays at
+least 17 cm above the demo scene's table, the body joints stay within ±50
+of 100 units, steps are at most 25 units, and the commanded speed outside
+the steps peaks at 2.3 rad/s (the STS3215's rate limit is about 5.3). In
+the sim the softest arm sags, but its fingertip still clears the table by
+9.7 cm.
+
+**Every number below is from synthetic arms in the sim.** The dance has
+not been run on an arm, and nothing here says how a real servo responds to
+it. `scripts/excite_study.py` builds three SO-101 arms with known
+parameters: the SO-101 lock's (kp 10.5), the SO-100 lock's (kp 70.9, with
+a high friction loss of 1.22) and the stock MJCF's (kp 998, latency 2).
+Each arm records the 50 real teleoperated command sequences of
+`lerobot/svla_so101_pickplace` and one dance, with 0.3 units of noise.
+Each training set is fitted with 4 CMA-ES seeds at 150 evaluations (the
+default) and at 600, and every fit is scored on the same 10 held-out
+pick-and-place episodes. Full tables are in
+[`results/excite_study.md`](results/excite_study.md).
+
+Seed spread (max/min over the 4 seeds) at 600 evaluations, trained on
+20 pick-and-place episodes alone vs. the dance plus those episodes:
+
+| param | SO-101-like, p&p | SO-101-like, +dance | SO-100-like, p&p | SO-100-like, +dance | stock, p&p | stock, +dance |
+|---|---|---|---|---|---|---|
+| kp | ×1.06 | ×1.05 | ×47.3 | ×2.92 | ×4.72 | **×1.17** |
+| kv | ×1.3 | ×1.27 | ×45.7 | ×3.39 | ×2.15 | **×1.22** |
+| damping | ×18.9 | **×1.65** | ×14.3 | ×1.74 | ×1.83 | ×1.33 |
+| armature | ×4.3 | ×13.7 | ×6.04 | ×1.5 | ×1.13 | ×1.1 |
+| frictionloss | ×62.1 | **×2.89** | ×35.9 | ×16.3 | ×8.78 | ×175 |
+| latency_frames | ±1 | ±0 | ±0 | ±0 | ±0 | ±0 |
+| held-out, median | 0.342° | 0.343° | 0.535° | 0.556° | 0.349° | 0.346° |
+
+(The held-out error at the true parameters is 0.34° on all three arms.)
+
+* **At the default 150 evaluations, the dance does not help.** No
+  training set converges at that budget. The fits train at 0.39-1.67°
+  while the truth itself scores 0.34°, and the seed spread stays large
+  with or without the dance (`kp` ×3-131). The 25× spread seen on the
+  real arms is at least partly the optimizer stopping short.
+* **The budget pins `kp`/`kv` on the soft arm; the dance does not.** At
+  600 evaluations the SO-101-like arm's seeds agree on `kp` and `kv`
+  within ×1.3 from pick-and-place alone, and land within ×1.35 of the
+  truth. What the dance adds there is damping (×18.9 → ×1.65) and friction
+  (×62 → ×2.9).
+* **On the stiff arm the dance pins `kp`/`kv`.** With the dance, every
+  seed lands within ×1.25 of the true `kp` and `kv`. From pick-and-place
+  alone the seeds land up to ×5.5 and ×2.3 off.
+* **The SO-100-like arm stays unidentified.** Its high friction keeps
+  CMA-ES short of the truth in every training set (train 0.52-0.57° vs
+  0.34°, except one dance-only seed). With the dance the seeds agree
+  better (`kp` ×2.9), but they agree on the wrong value: `kp` is up to
+  ×34 off. Held-out tracking gets slightly worse with the dance (0.556°
+  vs 0.535°), and worse still from the dance alone (median 0.578°).
+* **Held-out pick-and-place tracking does not get worse** on the other
+  two arms (0.343° vs 0.342°, 0.346° vs 0.349°).
+* **Linearized at the truth**, the dance shrinks how far `kv` can move
+  with the others refit (SO-101-like ×575 → ×13, SO-100-like ×1360 →
+  ×82) and SO-100-like damping (×568 → ×15). `kp` is locally pinned
+  (×1.4-2.9) from pick-and-place alone on every arm, which is consistent
+  with the spread being about the optimizer rather than the data.
+
+The honest summary: in the sim, the dance plus a 600-evaluation fit pins
+`kp`/`kv` on two of three arms. On one of those two the budget alone
+already did, and on the high-friction arm nothing does. Four seeds is a
+small sample for a spread, and a dance only helps a real arm if the
+real servo follows these commands the way the sim does.
 
 ### Sensor calibration
 
@@ -2455,6 +2547,7 @@ One row per module, grouped like the reference above.
 | `antares/sag.py` | Residual vs gravity load and motion (`antares sag`) |
 | `antares/specificity.py` | Cross-arm verdict, identifiability, swap and same-arm checks (`antares specificity`, `cross`, `identify`) |
 | `antares/synthetic.py` | Simulated arm datasets with known parameters, for the synthetic studies |
+| `antares/excite.py` | The calibration dance: excitation trajectory, FK safety check, LeRobot-named CSV (`antares excite`) |
 | `antares/synth.py` | Synthetic recordings of an arm with known wear, as a LeRobot directory (`antares synth`) |
 | **Every robot is different** | |
 | `antares/fleet.py` | Hub discovery, fleet scan, fleet statistics (`antares fleet`, `/api/fleet`) |
@@ -2491,10 +2584,10 @@ One row per module, grouped like the reference above.
 | **Around the package** | |
 | `antares/assets/` | The vendored SO-101 and SO-100 MJCFs, meshes and licences |
 | `locks/` | Committed locks, camera/scene/object/policy fits for the demo arms; `locks/fleet/` for the fleet scan |
-| `results/` | Robot-specificity reports (`antares specificity`, `results/synthetic/`), the reaching transfer report (`policy_transfer.{json,md}`), the servo study (`servo_study.json`) |
+| `results/` | Robot-specificity reports (`antares specificity`, `results/synthetic/`), the reaching transfer report (`policy_transfer.{json,md}`), the servo study (`servo_study.json`), the calibration-dance study (`excite_study.{json,md}`) |
 | `examples/` | `randomize_env.py` (DR ranges in a training loop), `drift_demo.py` (a ten-week wear story), `factors.toml` (an added factor) |
 | `experiments/` | `policy_transfer.py` (fleet transfer of tracking controllers), `dump_refs.py` (fleet reference trajectories), `results/` |
-| `scripts/` | `sensor_synthetic.py` (synthetic sensor-fit check), `dr_compare.py` (derived vs hand-picked DR ranges), `servo_study.py` (servo model vs position actuator) |
+| `scripts/` | `excite_study.py` (calibration dance on synthetic arms, `results/excite_study.{json,md}`), `sensor_synthetic.py` (synthetic sensor-fit check), `dr_compare.py` (derived vs hand-picked DR ranges), `servo_study.py` (servo model vs position actuator) |
 | `tests/` | pytest suite; `slow` marks the tests that run real MuJoCo replays |
 | `action.yml` | Composite GitHub Action running the gate in CI |
 | `.github/workflows/` | Tests on every push (`ci.yml`) and an example weekly drift gate on the SO-101 demo lock (`robot-check.yml`) |

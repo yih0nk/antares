@@ -1489,6 +1489,51 @@ def cmd_synth(args: argparse.Namespace) -> int:
 
 
 
+def cmd_excite(args: argparse.Namespace) -> int:
+    import numpy as np
+
+    from antares import excite
+
+    if os.path.splitext(args.out)[1] not in (".csv", ".json", ".npy"):
+        print(f"{args.out}: expected a .csv, .json or .npy path", file=sys.stderr)
+        return EXIT_USAGE
+    start = None
+    if args.start:
+        try:
+            start = [float(v) for v in args.start.split(",")]
+        except ValueError:
+            start = []
+        if len(start) != len(excite.JOINTS):
+            print(f"--start needs {len(excite.JOINTS)} comma-separated values in dataset units "
+                  f"({', '.join(excite.JOINTS)})", file=sys.stderr)
+            return EXIT_USAGE
+        if args.units == "degrees":  # the dance is built in normalized units
+            from antares.sim import Arm
+
+            start = list(Arm().unit_map.to_units(Arm(robot="so101_deg").unit_map.to_rad(np.asarray(start))))
+    d = excite.dance(fps=args.fps, start=start)
+    lead_in = d.segments[0][2] if d.segments[0][0] == "lead-in from start" else 0
+    safety = excite.check_safety(d.commands, d.fps, d.steps, table_z=args.table_z, lead_in=lead_in)
+    peak = max(list(safety["peak_speed_rad_s"].values())[: len(excite.BODY)])
+    print(f"safety (forward kinematics, commanded path): fingertip >= {safety['min_tip_z'] - args.table_z:.3f} m "
+          f"above the table at z = {args.table_z:g} m, body joints within +-{safety['max_abs_units']:g} normalized units, "
+          f"peak speed outside steps {peak:.2f} rad/s, largest step {safety['max_step_units']:g} units: "
+          + ("ok" if safety["ok"] else "NOT OK"))
+    if not safety["ok"] and not args.force:
+        print(f"not writing {args.out}: the dance fails its safety check (pass --force to write it anyway)", file=sys.stderr)
+        return 1
+    excite.write(args.out, d, units=args.units)
+    print(f"wrote {len(d.commands)} frames ({d.duration:.1f} s at {d.fps:g} fps, {len(d.segments)} segments, "
+          f"{args.units} units) -> {args.out}")
+    if start is None:
+        first = excite.to_units(d.commands[:1], args.units)[0]
+        print(f"move the arm to the home pose before replaying ({args.units} units): " + ", ".join(
+            f"{j} {v:.1f}" for j, v in zip(d.joint_names, first))
+            + "; or pass --start with the arm's resting pose to add a slow lead-in")
+    print("sim-only: the dance was evaluated against synthetic arms (results/excite_study.md), not on hardware")
+    return 0 if safety["ok"] else 1
+
+
 def cmd_transfer_run(args: argparse.Namespace) -> int:
     from antares import transfer
 
@@ -2994,6 +3039,27 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--noise", type=float, default=0.2, help="sensor noise, dataset units (default 0.2)")
     p.add_argument("--seed", type=int, default=0)
     p.set_defaults(func=cmd_synth)
+
+    p = sub.add_parser(
+        "excite",
+        help="write the calibration dance: a ~60 s excitation trajectory for the SO-101 (sim-validated only)",
+        description=(
+            "Per-joint steps and chirps plus gravity holds around a raised home pose, in dataset units, "
+            "built so a fit can pin more than latency. Checked with forward kinematics against the joint "
+            "limits and the table; evaluated on synthetic arms only (results/excite_study.md)."
+        ),
+    )
+    p.add_argument("--out", default="dance.csv", help="output file: .csv, .json or .npy (default dance.csv)")
+    p.add_argument("--fps", type=float, default=30.0, help="frame rate to replay and record at (default 30)")
+    p.add_argument("--units", choices=("normalized", "degrees"), default="normalized",
+                   help="the arm's command units: LeRobot's normalized -100..100 (default) or degrees "
+                        "(LeRobot >= 0.5's default, use_degrees=True)")
+    p.add_argument("--start", default=None, metavar="P1,...,P6",
+                   help="the arm's resting pose in --units, one value per joint; adds a slow lead-in to the home pose")
+    p.add_argument("--table-z", type=float, default=-0.022,
+                   help="table height in the base frame (m) for the clearance check (default -0.022, the demo scene's)")
+    p.add_argument("--force", action="store_true", help="write the file even when the safety check fails")
+    p.set_defaults(func=cmd_excite)
 
     p = sub.add_parser("transfer", help="does calibration help a policy transfer? (sim-to-sim experiment)")
     tsub = p.add_subparsers(dest="transfer_cmd", required=True)
