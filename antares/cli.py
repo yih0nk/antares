@@ -1489,6 +1489,27 @@ def cmd_synth(args: argparse.Namespace) -> int:
 
 
 
+def cmd_excite(args: argparse.Namespace) -> int:
+    from antares import excite
+
+    if os.path.splitext(args.out)[1] not in (".csv", ".json", ".npy"):
+        print(f"{args.out}: expected a .csv, .json or .npy path", file=sys.stderr)
+        return EXIT_USAGE
+    d = excite.dance(fps=args.fps)
+    safety = excite.check_safety(d.commands, d.fps, d.steps)
+    excite.write(args.out, d)
+    print(f"wrote {len(d.commands)} frames ({d.duration:.1f} s at {d.fps:g} fps, {len(d.segments)} segments) -> {args.out}")
+    print("start from the home pose (dataset units): " + ", ".join(
+        f"{j} {v:g}" for j, v in zip(d.joint_names, d.commands[0])))
+    peak = max(list(safety["peak_speed_rad_s"].values())[: len(excite.BODY)])
+    print(f"safety (forward kinematics, commanded path): fingertip >= {safety['min_tip_z'] - excite.TABLE_Z:.3f} m "
+          f"above the table, body joints within +-{safety['max_abs_units']:g} units, "
+          f"peak speed outside steps {peak:.2f} rad/s, largest step {safety['max_step_units']:g} units: "
+          + ("ok" if safety["ok"] else "NOT OK"))
+    print("sim-only: the dance was evaluated against synthetic arms (results/excite_study.md), not on hardware")
+    return 0 if safety["ok"] else 1
+
+
 def cmd_transfer_run(args: argparse.Namespace) -> int:
     from antares import transfer
 
@@ -2993,6 +3014,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--noise", type=float, default=0.2, help="sensor noise, dataset units (default 0.2)")
     p.add_argument("--seed", type=int, default=0)
     p.set_defaults(func=cmd_synth)
+
+    p = sub.add_parser(
+        "excite",
+        help="write the calibration dance: a ~60 s excitation trajectory for the SO-101 (sim-validated only)",
+        description=(
+            "Per-joint steps and chirps plus gravity holds around a raised home pose, in dataset units, "
+            "built so a fit can pin more than latency. Checked with forward kinematics against the joint "
+            "limits and the table; evaluated on synthetic arms only (results/excite_study.md)."
+        ),
+    )
+    p.add_argument("--out", default="dance.csv", help="output file: .csv, .json or .npy (default dance.csv)")
+    p.add_argument("--fps", type=float, default=30.0, help="frame rate to replay and record at (default 30)")
+    p.set_defaults(func=cmd_excite)
 
     p = sub.add_parser("transfer", help="does calibration help a policy transfer? (sim-to-sim experiment)")
     tsub = p.add_subparsers(dest="transfer_cmd", required=True)
