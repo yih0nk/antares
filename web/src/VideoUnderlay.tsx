@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useThree } from "@react-three/fiber";
 import * as THREE from "three";
-import { api, type CameraFit, type CameraInfo, type CameraJobEvent, type CameraProgressEvent, pickCamera } from "./api";
+import { api, followJob, type CameraFit, type CameraInfo, type CameraJobEvent, type CameraProgressEvent, pickCamera } from "./api";
 import type { Playhead } from "./Arm";
 
 // The dataset's own video drawn behind the 3D view. With a fitted camera (the
@@ -52,6 +52,8 @@ export function useUnderlay(
 ) {
   const [camera, setCamera] = useState("");
   const [fits, setFits] = useState<Record<string, CameraFit>>({});
+  // The lock whose fits `fits` holds, once they have arrived.
+  const [fitsFor, setFitsFor] = useState<string | null>(null);
   const [datasetFits, setDatasetFits] = useState<Record<string, CameraFit & { lock: string }>>({});
   // The dataset whose fits `datasetFits` holds, once they have arrived.
   const [datasetFitsFor, setDatasetFitsFor] = useState<string | null>(null);
@@ -79,12 +81,22 @@ export function useUnderlay(
   useEffect(() => {
     if (!on || !lock) {
       setFits({});
+      setFitsFor(null);
       return;
     }
     let live = true;
     api.cameraFits(lock).then(
-      (r) => live && setFits(r.cameras),
-      () => live && setFits({}),
+      (r) => {
+        if (!live) return;
+        setFits(r.cameras);
+        setFitsFor(lock);
+      },
+      () => {
+        // A failed fetch still belongs to this lock: no fit, rather than the last lock's.
+        if (!live) return;
+        setFits({});
+        setFitsFor(lock);
+      },
     );
     return () => {
       live = false;
@@ -104,7 +116,11 @@ export function useUnderlay(
         setDatasetFits(r.cameras);
         setDatasetFitsFor(dataset);
       },
-      () => live && setDatasetFits({}),
+      () => {
+        if (!live) return;
+        setDatasetFits({});
+        setDatasetFitsFor(dataset);
+      },
     );
     return () => {
       live = false;
@@ -116,11 +132,12 @@ export function useUnderlay(
   // The lock's own fit of the camera, whatever dataset id it was saved with:
   // the same choice as the Camera panel, so the two never disagree on
   // whether the camera is fitted.
-  const own = fixed ? fits[camera] : undefined;
+  // Fits fetched for another lock or dataset (just after a switch) are not used.
+  const own = fixed && fitsFor === lock ? fits[camera] : undefined;
   // Memoised so the pinned camera is only re-posed when the fit changes.
   const fit = useMemo(
-    () => (own ? { ...own, lock: lock ?? undefined } : fixed ? datasetFits[camera] ?? null : null),
-    [own, lock, fixed, datasetFits, camera],
+    () => (own ? { ...own, lock: lock ?? undefined } : fixed && datasetFitsFor === dataset ? datasetFits[camera] ?? null : null),
+    [own, lock, fixed, datasetFits, datasetFitsFor, dataset, camera],
   );
   // ---- automatic fit for a fixed camera no lock of the dataset has fitted ----
   // Once per dataset and camera per page load, so a stop or a failure is not retried.
@@ -139,8 +156,7 @@ export function useUnderlay(
         const src = api.jobEvents(jobId);
         sourceRef.current = src;
         const update = (f: (l: LineUp) => LineUp | null) => setLineUp((l) => (l && l.jobId === jobId ? f(l) : l));
-        src.onmessage = (msg) => {
-          const ev = JSON.parse(msg.data) as CameraJobEvent;
+        followJob<CameraJobEvent>(src, (ev) => {
           if (ev.type === "progress") {
             update((l) => ({ ...l, last: ev }));
           } else if (ev.type === "pass") {
@@ -153,11 +169,26 @@ export function useUnderlay(
             src.close();
             update((l) => ({ ...l, status: "error", error: ev.message }));
           }
-        };
+        });
         src.onerror = () => {
-          if (src.readyState === EventSource.CLOSED) {
-            update((l) => (l.status === "running" ? { ...l, status: "error", error: "lost the progress stream" } : l));
-          }
+          // EventSource reconnects on its own; once it gives up, the server
+          // says how the fit ended.
+          if (src.readyState !== EventSource.CLOSED) return;
+          const lost = (l: LineUp) =>
+            l.status === "running" || l.status === "cancelled" ? { ...l, status: "error" as const, error: "lost the progress stream" } : l;
+          api.jobStatus(jobId).then(
+            (st) => {
+              if (st.status === "done") {
+                update((l) => ({ ...l, status: "done" }));
+                setLineUpRev((r) => r + 1);
+              } else if (st.status === "error") {
+                update((l) => ({ ...l, status: "error", error: st.error ?? "the fit failed" }));
+              } else {
+                update(lost);
+              }
+            },
+            () => update(lost),
+          );
         };
       },
       (e) => setLineUp({ jobId: null, dataset, camera, status: "error", error: (e as Error).message }),
