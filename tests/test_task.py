@@ -257,3 +257,89 @@ def test_kinds_miss_pick_regrab_idle(tip, unit_map):
     assert (s["held"], s["carried"], s["missed"], s["idle"]) == (2, 1, 1, 1)
     assert s["missed_episodes"] == [0] and s["episodes_without_pick"] == []
     assert all(d["place"] is not None for d in td.sample(20, np.random.default_rng(0)))
+
+
+# --------------------------------------------------------------------------
+# the kinematic object and the place check
+# --------------------------------------------------------------------------
+
+
+def _fake_tip(q):
+    """The first three joint angles are the fingertip position (m)."""
+    q = np.asarray(q, dtype=np.float64)
+    return q[..., :3].copy()
+
+
+def _obj(**kw):
+    from antares.events import GripperThresholds
+    from antares.task import KinematicObject
+
+    return KinematicObject((0.2, 0.0, 0.0), GripperThresholds(10.0, 13.0), _fake_tip, place_xyz=(0.0, -0.15, 0.06), **kw)
+
+
+def _q(x, y, z):
+    return np.array([x, y, z, 0.0, 0.0, 0.0])
+
+
+def test_object_is_picked_carried_lifted_and_placed():
+    from antares.task import LIFT_M
+
+    o = _obj(held_jaw=8.0)
+    o.step(0, _q(0.21, 0.0, 0.0), 40.0)  # open, at the object
+    o.step(1, _q(0.21, 0.0, 0.0), 2.0)  # closes on it
+    assert o.held and o.picked and o.pick_frame == 1
+    assert o.observe(np.array([0, 0, 0, 0, 0, 1.0]))[5] == 8.0  # the jaw reads open on the object
+    p = o.step(2, _q(0.11, -0.08, 0.10), 2.0)  # carried, keeping its offset from the tip
+    assert np.allclose(p, (0.10, -0.08, 0.10)) and o.lifted and o.lift >= LIFT_M
+    p = o.step(3, _q(0.01, -0.15, 0.07), 40.0)  # opens: drops to its resting height
+    assert not o.held and np.allclose(p, (0.0, -0.15, 0.0))
+    r = o.result()
+    assert r.picked and r.lifted and r.released and r.success
+    assert r.release_frame == 3 and r.place_error_cm == pytest.approx(0.0, abs=1e-9)
+    assert r.lift_cm == pytest.approx(10.0)
+
+
+def test_object_misses_far_closes_and_closes_that_started_early():
+    o = _obj()
+    o.step(0, _q(0.30, 0.0, 0.0), 40.0)
+    o.step(1, _q(0.30, 0.0, 0.0), 2.0)  # closes 10 cm away
+    assert not o.held
+    o.step(2, _q(0.20, 0.0, 0.0), 2.0)  # arrives already closed: still nothing
+    assert not o.held
+    r = o.result()
+    assert not r.picked and not r.success and r.start_error_cm == 0.0
+
+
+def test_object_released_when_the_leader_eases_open_inside_the_band():
+    from antares.task import HELD_GAP
+
+    o = _obj()
+    o.step(0, _q(0.2, 0.0, 0.0), 40.0)
+    o.step(1, _q(0.2, 0.0, 0.0), 2.0)
+    o.step(2, _q(0.0, -0.15, 0.08), 1.0)
+    assert o.held and o.lifted
+    o.step(3, _q(0.0, -0.15, 0.08), 1.0 + HELD_GAP + 1.0)  # 5 units: still "closed" by the thresholds
+    assert not o.held and o.release_frame == 3 and o.result().success
+
+
+def test_lifted_but_never_released_is_not_a_place():
+    o = _obj()
+    o.step(0, _q(0.2, 0.0, 0.0), 40.0)
+    o.step(1, _q(0.2, 0.0, 0.0), 2.0)
+    o.step(2, _q(0.0, -0.15, 0.08), 2.0)
+    r = o.result()
+    assert r.lifted and not r.released and not r.success
+    o.reset()
+    assert not o.held and np.allclose(o.xyz, o.start) and o.trace == []
+
+
+def test_place_target_is_the_first_carried_pick():
+    from antares.task import Grasp, place_target
+
+    def g(kind, rel, carried):
+        return Grasp(0, 10, (0.0, 0.0, 0.0), 20, rel, 5.0, 10.0, kind == "pick", carried, kind)
+
+    assert place_target([]) is None
+    assert place_target([g("miss", (1.0, 0, 0), False)]) is None
+    got = place_target([g("pick", (0.01, 0, 0), False), g("pick", (0.2, 0, 0), True)])
+    assert np.allclose(got, (0.2, 0, 0))

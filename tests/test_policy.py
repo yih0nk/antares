@@ -285,6 +285,116 @@ def test_load_lerobot_policy_uses_the_checkpoint_config(monkeypatch):
     assert made == {"cfg": "someone/act_so101", "policy": ("someone/act_so101", "act")}
 
 
+class _ChunkStub(_StubLeRobot):
+    """ACT-shaped: a config with ``n_action_steps`` and ``predict_action_chunk``."""
+
+    class config:
+        n_action_steps = 4
+        temporal_ensemble_coeff = None
+        image_features = {"observation.images.up": None}
+
+    def predict_action_chunk(self, batch):
+        torch = pytest.importorskip("torch")
+        self.batches.append(batch)
+        s = batch["observation.state"]  # (1,6) after the stub preprocessor
+        return torch.stack([s + i for i in range(10)], dim=1)  # (1,10,6)
+
+
+def test_lerobot_wrapper_keeps_the_chunk_queue_and_runs_the_processors():
+    torch = pytest.importorskip("torch")
+    stub = _ChunkStub()
+    seen = []
+
+    def pre(batch):
+        seen.append(dict(batch))
+        return {**batch, "observation.state": batch["observation.state"][None] * 2}
+
+    pol = LeRobotPolicy(
+        stub, preprocessor=pre, postprocessor=lambda a: a + 100, task="pick it",
+        extra_inputs=lambda ctx: {"observation.images.up": torch.zeros(3, 2, 2) + ctx.frame},
+    )
+    assert pol.chunked and pol.h == 4 and pol.image_keys == ["observation.images.up"]
+    pol.reset()
+    obs = np.array([[1.0, 2, 3, 4, 5, 6]])
+    chunks = [pol.act(obs, StepContext(t, FPS)) for t in range(6)]
+    # queried at frames 0 and 4 only; each call returns the rest of the chunk
+    assert len(stub.batches) == 2 and pol.n_queries == 2
+    assert [len(c) for c in chunks] == [4, 3, 2, 1, 4, 3]
+    assert np.allclose(chunks[0][:, 0], 2 + np.arange(4) + 100) and np.allclose(chunks[1][0], chunks[0][1])
+    assert seen[0]["task"] == "pick it" and float(seen[1]["observation.images.up"].max()) == 4.0
+    assert tuple(seen[0]["observation.state"].shape) == (6,)  # the preprocessor adds the batch dim
+    pol.reset()
+    assert pol.n_queries == 0 and len(pol.act(obs, StepContext(0, FPS))) == 4
+
+
+def test_lerobot_wrapper_leaves_temporal_ensembling_to_select_action():
+    pytest.importorskip("torch")
+    stub = _ChunkStub()
+    stub.config = type("cfg", (), {"n_action_steps": 1, "temporal_ensemble_coeff": 0.01})
+    pol = LeRobotPolicy(stub)
+    assert not pol.chunked and pol.h == 1
+    a = pol.act(np.zeros((1, 6)), StepContext(0, FPS))
+    assert a.shape == (1, 6) and np.allclose(a, 1.0)
+
+
+def test_stats_from_weights_reads_pre_0_4_normalization_buffers(tmp_path):
+    torch = pytest.importorskip("torch")
+    st = pytest.importorskip("safetensors.torch")
+    from antares.policy import _stats_from_weights
+
+    st.save_file(
+        {
+            "normalize_inputs.buffer_observation_state.mean": torch.ones(6),
+            "normalize_inputs.buffer_observation_state.std": torch.full((6,), 2.0),
+            "normalize_inputs.buffer_observation_images_wrist_cam.mean": torch.zeros(3, 1, 1),
+            "unnormalize_outputs.buffer_action.mean": torch.full((6,), 3.0),
+            "model.layer.weight": torch.zeros(2),
+        },
+        str(tmp_path / "model.safetensors"),
+    )
+    stats = _stats_from_weights(str(tmp_path), ["observation.state", "observation.images.wrist_cam", "action"])
+    assert set(stats) == {"observation.state", "observation.images.wrist_cam", "action"}
+    assert float(stats["observation.state"]["std"][0]) == 2.0 and float(stats["action"]["mean"][0]) == 3.0
+    (tmp_path / "empty").mkdir()
+    assert _stats_from_weights(str(tmp_path / "empty"), ["action"]) is None
+
+
+def test_closed_loop_carries_the_object_and_tells_the_policy(soft_arm, episodes):
+    from antares.closedloop import closed_loop_episodes, run_closed_loop
+    from antares.shadow import GraspContext, variant_from_lock
+    from antares.task import KinematicObject
+
+    ep = episodes[0]
+    ctx = GraspContext.for_dataset(episodes)
+    replay = soft_arm.replay(ep)
+    close = 50 + int(soft_arm.params.per_joint("latency_frames")[5])  # when the sim applies the close
+    start = ctx.tip(replay[close])
+
+    seen = []
+
+    class Logged(LoggedPolicy):
+        def act(self, obs, c=None):
+            seen.append((c.q_rad.copy(), None if c.object_xyz is None else c.object_xyz.copy(), c.episode, obs[-1, 5]))
+            return super().act(obs, c)
+
+    obj = KinematicObject(start, ctx.thresholds, ctx.tip, place_xyz=ctx.tip(replay[95]), held_jaw=33.0)
+    sim_q, _ = run_closed_loop(Logged(ep), soft_arm, soft_arm.real_q(ep)[0], len(ep), ep.fps, obj=obj, episode=7)
+    assert np.max(np.abs(sim_q - replay)) < 1e-9  # the object does not touch the dynamics
+    assert np.allclose(seen[10][0], sim_q[10]) and seen[10][2] == 7 and np.allclose(seen[0][1], start)
+    r = obj.result()
+    assert r.picked and r.pick_frame == close
+    assert seen[close + 5][3] == 33.0  # the policy reads the jaw held open on the object
+    assert np.allclose(seen[close + 5][1], ctx.tip(sim_q[close + 5]))  # carried with the fingertip
+
+    variants = [variant_from_lock(_lock_dict("unit", SOFT), "lock")]
+    s = closed_loop_episodes(
+        LoggedPolicy(ep), [ep], variants, ctx, shift=False,
+        objects=lambda e: KinematicObject(start, ctx.thresholds, ctx.tip, place_xyz=ctx.tip(replay[95])),
+    )
+    agg = s.aggregate()["variants"]["lock"]
+    assert agg["n_objects"] == 1 and agg["n_picked"] == 1 and s.runs[0].to_dict()["place"]["picked"] is True
+
+
 # --------------------------------------------------------------------------
 # closed loop: the stepper reproduces rollout
 # --------------------------------------------------------------------------
