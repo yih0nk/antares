@@ -2039,13 +2039,27 @@ being read for anything useful.
 The wrapper is right (3.85° on real frames: the checkpoint imitates the
 operator closely), and the render is not good enough: on rendered frames
 the policy is worse than standing still, and even with the real arm
-pasted in it is only slightly better. Tuning the render on the training
-episodes did not close it: arm grey level and brick lighting move it by
-under 2° (24-25° render, 15.8-16.3° composite); on the training
-episodes each camera rendered alone (the other real) costs 5-7°, and a
-sim arm drawn over an otherwise real frame 9.5°. The arm's appearance
-is most of the gap, the rest is everything a median backdrop and a flat
-box do not reproduce.
+pasted in it is only slightly better. Where the gap comes from, on the
+lock's training episodes instead (every 5th, 31 windows, the composite's
+pool leaving the scored episode out; `results/lerobot_render_ablation.json`,
+`experiments/lerobot_render_ablation.py`):
+
+| images (training episodes) | ACT (deg) |
+|---|---|
+| real video | 3.99 |
+| backdrop + the real arm *and* brick pixels of the same frame | 11.49 |
+| real `up`, rendered `side` / rendered `up`, real `side` | 9.50 / 9.90 |
+| sim arm drawn over the real frame | 14.84 |
+| composite | 15.86 |
+| render (black arm, unlit brick; grey 0.2-0.3 arm, lit brick) | 24.83 (22.20-22.58) |
+| backdrop only | 34.43 |
+| hold state (no policy) | 17.21 |
+
+Even the real arm and brick of the very frame, pasted on the median
+backdrop, cost 7.5°: the policy reads the shadows and lighting the
+backdrop averages away, not only the arm. The render's arm costs about as
+much again, and its colour and the brick's barely matter (2.6° at most).
+Each camera alone costs 5.5-6°.
 
 **Closed loop**, 10 held-out episodes, from each one's real start state
 (picked / lifted / placed, closest fingertip approach to the brick's
@@ -2084,10 +2098,10 @@ start, approach RMS up to the operator's grasp):
   16 differs on the pick). That is the size of effect the calibration
   could have on this checkpoint, but it comes from frames that show the
   real episode, so it is a ceiling, not a measurement.
-* *What would make it a measurement* is a render the policy cannot tell
-  from the video: a textured arm (or a better composite: masks with the
-  white jaw tips, shadows, nearest-pose blending), the brick's yaw, the
-  real lighting. The open-loop table is the check to run on any such
+* *What would make it a measurement* is a frame the policy cannot tell
+  from the video: shadows and the real lighting first (the backdrop alone
+  costs 7.5°), then a textured arm (or a better composite: masks with the
+  white jaw tips, nearest-pose blending), the brick's yaw. The open-loop table is the check to run on any such
   render before closing the loop.
 * *Not here:* contact physics (the brick is carried by rule), the
   gripper's own dynamics, a second camera fit for the brick (both

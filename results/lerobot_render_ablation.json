@@ -1,0 +1,30 @@
+{
+  "checkpoint": "samarth-shukla6/act-svla-so101-pickplace",
+  "created_at": "2026-10-29T00:41:10Z",
+  "dataset": "lerobot/svla_so101_pickplace",
+  "episodes": [
+    1,
+    10,
+    22,
+    30
+  ],
+  "lock": "svla_so101_pickplace",
+  "n_windows": 31,
+  "rmse_deg": {
+    "backdrop + real foreground of the same frame": 11.486199744112918,
+    "backdrop only": 34.42868319871853,
+    "composite": 15.855849067524444,
+    "composite: black arm, unlit brick (default)": 15.855849067524444,
+    "composite: grey 0.2 arm, brick emission 0.5": 15.822636433735449,
+    "composite: grey 0.3 arm, brick emission 1.0": 16.22456185786964,
+    "hold state (no policy)": 17.213132510047185,
+    "real": 3.988095612798058,
+    "real up, render side": 9.502014133766869,
+    "render": 24.826660474576702,
+    "render up, real side": 9.897151236636713,
+    "render: black arm, unlit brick (default)": 24.826660474576702,
+    "render: grey 0.2 arm, brick emission 0.5": 22.581437567583514,
+    "render: grey 0.3 arm, brick emission 1.0": 22.203073576649633,
+    "sim arm drawn over the real frame": 14.839195229947462
+  }
+}
