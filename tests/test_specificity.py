@@ -317,6 +317,29 @@ def test_study_scores_the_split_its_lock_was_fitted_on():
     assert len(out["splits"]["toy/fast"]["eval"]) == 3
 
 
+def test_study_replays_each_dataset_on_its_own_simulator():
+    # toy/deg logs the same arm at twice the scale (other units); only its own
+    # simulator reads that back, so one shared simulator would score it badly.
+    deg = [Episode(index=ep.index, fps=ep.fps, joint_names=JOINTS, state=2.0 * ep.state, action=ep.action)
+           for ep in toy_episodes(FAST, n=6, seed=2)]
+
+    def deg_simulate(params, ep):
+        return ep.state / 2.0, toy_response(params, ep.action, ep.fps)
+
+    data = {"toy/slow": toy_episodes(TRUE, n=6, seed=1), "toy/deg": deg}
+    locks = {"slow": ("toy/slow", TRUE), "deg": ("toy/deg", FAST)}
+    kw = dict(n_train=2, n_eval=2, restart_seeds=(), max_evaluations=10)
+    out = study(data, locks, {"toy/slow": toy_simulate, "toy/deg": deg_simulate}, **kw)
+    own = {r["dataset"]: r["own_score"] for r in out["specificity"]["rows"]}
+    assert own == {"toy/slow": pytest.approx(0.0, abs=1e-9), "toy/deg": pytest.approx(0.0, abs=1e-9)}
+    assert out["datasets"]["toy/deg"]["path_to_other"][0][1] == pytest.approx(0.0, abs=1e-9)
+    assert out["robots"] == {"toy/slow": None, "toy/deg": None}  # untagged callables
+    shared = study(data, locks, toy_simulate, **kw)
+    assert shared["matrix"]["scores"][1][1] > 1.0  # the units mismatch one simulator leaves
+    with pytest.raises(ValueError, match="toy/deg: no simulator"):
+        study(data, locks, {"toy/slow": toy_simulate}, **kw)
+
+
 def test_study_refuses_a_per_joint_lock_up_front():
     data = {"toy/slow": toy_episodes(TRUE, n=4, seed=1), "toy/fast": toy_episodes(FAST, n=4, seed=2)}
     locks = {"slow": ("toy/slow", TRUE), "fast": ("toy/fast", FAST.replace(kp=(1500.0,) * 6))}
