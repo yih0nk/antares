@@ -39,6 +39,7 @@ from antares.calibrate import (
     calibrate,
     decode,
     encode,
+    robot_of,
     scoring_names,
     split_episodes,
 )
@@ -480,10 +481,20 @@ def _resolve_splits(
     return out
 
 
+def _simulate_for(simulate: SimulateFn | Mapping[str, SimulateFn], dataset: str) -> SimulateFn:
+    """``simulate`` itself, or its entry for ``dataset`` when it is a mapping."""
+    if not isinstance(simulate, Mapping):
+        return simulate
+    try:
+        return simulate[dataset]
+    except KeyError:
+        raise ValueError(f"{dataset}: no simulator given for this dataset") from None
+
+
 def study(
     datasets: Mapping[str, Sequence[Episode]],
     locks: Mapping[str, tuple[str, Any]],
-    simulate: SimulateFn,
+    simulate: SimulateFn | Mapping[str, SimulateFn],
     *,
     n_train: int = 20,
     n_eval: int = 10,
@@ -504,12 +515,15 @@ def study(
     episodes the lock really never saw; a dataset without one is split
     like ``antares calibrate`` would with ``split_seed``, which only
     matches a lock fitted with the same seed and counts. Every lock must
-    be a shared (scalar) one. For every dataset that has both its own lock
-    and a foreign one, the study also runs: identifiability and the latency
-    profile at its own lock (train split), seed restarts, a same-arm
-    control fitted on different training episodes, a swap test that pins
-    the foreign lock's ``kp``/``kv``, and the path from the own lock to the
-    foreign one. ``truth`` (synthetic arms) maps dataset ids to the
+    be a shared (scalar) one. ``simulate`` is one callable for every
+    dataset, or a mapping from dataset id to the callable that replays it
+    (each dataset on its own robot model and units, so a degrees recording
+    and a normalized one can sit in the same study). For every dataset
+    that has both its own lock and a foreign one, the study also runs:
+    identifiability and the latency profile at its own lock (train
+    split), seed restarts, a same-arm control fitted on different training
+    episodes, a swap test that pins the foreign lock's ``kp``/``kv``, and
+    the path from the own lock to the foreign one. ``truth`` (synthetic arms) maps dataset ids to the
     parameters that generated them.
     """
     from antares.calibrate import SimParams
@@ -526,11 +540,12 @@ def study(
     for d, (_, eval_) in splits.items():
         if not eval_:
             raise ValueError(f"{d}: no held-out episodes to score (n_train={n_train}, n_eval={n_eval})")
+    sims = {d: _simulate_for(simulate, d) for d in datasets}
 
     cols = list(locks) + ["default"]
     col_params = [lock_params[c] for c in locks] + [SimParams()]
     log("cross matrix")
-    scores = [[_safe_score(p, splits[d][1], simulate)[1] for p in col_params] for d in datasets]
+    scores = [[_safe_score(p, splits[d][1], sims[d])[1] for p in col_params] for d in datasets]
     matrix = {"rows": list(datasets), "cols": cols, "scores": scores}
     summary = summarize_cross(matrix, lock_datasets)
 
@@ -540,17 +555,18 @@ def study(
         if row["own_lock"] is None or row["best_other_lock"] is None:
             continue
         train, eval_ = splits[d]
+        simulate_d = sims[d]
         own = lock_params[row["own_lock"]]
         other = lock_params[row["best_other_lock"]]
         out: dict[str, Any] = {"own_lock": row["own_lock"], "other_lock": row["best_other_lock"]}
 
         log(f"{d}: identifiability")
-        rep = identifiability(own, train, simulate, delta_deg=delta_deg)
+        rep = identifiability(own, train, simulate_d, delta_deg=delta_deg)
         out["identifiability"] = rep.to_dict()
-        out["latency_profile"] = latency_profile(own, train, simulate)
+        out["latency_profile"] = latency_profile(own, train, simulate_d)
 
         log(f"{d}: seed restarts {list(restart_seeds)}")
-        restarts = seed_restarts(train, eval_, restart_seeds, simulate, max_evaluations=max_evaluations)
+        restarts = seed_restarts(train, eval_, restart_seeds, simulate_d, max_evaluations=max_evaluations)
         restarts["runs"].insert(
             0,
             {
@@ -568,7 +584,7 @@ def study(
         fresh = [ep for ep in datasets[d] if ep.index not in held_out and ep.index not in used]
         if fresh:
             log(f"{d}: same-arm control on {min(len(fresh), n_train)} fresh episodes")
-            ctrl = calibrate(fresh[:n_train], eval_, simulate=simulate, max_evaluations=max_evaluations)
+            ctrl = calibrate(fresh[:n_train], eval_, simulate=simulate_d, max_evaluations=max_evaluations)
             out["same_arm_control"] = {
                 "n_train": min(len(fresh), n_train),
                 "params": ctrl.params.to_dict(),
@@ -577,12 +593,12 @@ def study(
 
         log(f"{d}: swap test with {row['best_other_lock']}'s kp/kv")
         out["swap"] = pinned_refit(
-            train, eval_, {"kp": other.kp, "kv": other.kv}, simulate, max_evaluations=max_evaluations
+            train, eval_, {"kp": other.kp, "kv": other.kv}, simulate_d, max_evaluations=max_evaluations
         )
-        out["path_to_other"] = interpolate(own, other, eval_, simulate)
+        out["path_to_other"] = interpolate(own, other, eval_, simulate_d)
         if truth and d in truth:
             out["truth"] = truth[d].to_dict()
-            out["truth_eval_score"] = _safe_score(truth[d], eval_, simulate)[1]
+            out["truth_eval_score"] = _safe_score(truth[d], eval_, simulate_d)[1]
         per_dataset[d] = out
 
     return {
@@ -594,6 +610,7 @@ def study(
             "max_evaluations": max_evaluations,
             "delta_deg": delta_deg,
         },
+        "robots": {d: getattr(robot_of(sims[d]), "name", None) for d in datasets},
         "locks": {n: {"dataset": ds, "params": p.to_dict()} for n, (ds, p) in locks.items()},
         "splits": {
             d: {"train": [ep.index for ep in tr], "eval": [ep.index for ep in ev]} for d, (tr, ev) in splits.items()
@@ -635,6 +652,10 @@ def render_markdown(results: Mapping[str, Any], title: str = "Robot specificity"
     out = [f"## {title}", ""]
     out.append("Held-out tracking error (RMS over the five body joints). Rows are the arms' "
                "datasets, columns are the locks.")
+    robots = {d: r for d, r in (results.get("robots") or {}).items() if r}
+    if robots:
+        out.append("Each dataset replays on its own model: "
+                   + ", ".join(f"{d} on `{r}`" for d, r in robots.items()) + ".")
     out.append("")
     out.append(_md_table(["dataset"] + list(m["cols"]),
                          [[r] + [_deg(v) for v in sc] for r, sc in zip(m["rows"], m["scores"])]))

@@ -374,6 +374,29 @@ def test_scan_builds_a_sim_when_none_is_passed(tmp_path, monkeypatch):
     assert rep.failures == [] and [r.dataset for r in rep.robots] == ["alice/so101_a"]
 
 
+def test_scan_replays_each_dataset_on_its_catalog_model(tmp_path, monkeypatch):
+    """The SO-100 demo dataset is recorded in degrees: the scan fits and
+    scores it on so101_deg, and the lock says so."""
+    import antares.calibrate as calibrate_mod
+    from antares.lock import RobotLock
+
+    built = []
+
+    def fake_default_simulate(*a, robot=None, **k):
+        built.append(robot)
+        return toy_simulate
+
+    monkeypatch.setattr(calibrate_mod, "default_simulate", fake_default_simulate)
+    so100 = "lerobot/svla_so100_pickplace"
+    data = {"alice/so101_a": make_dataset("alice/so101_a", seed=1), so100: make_dataset(so100, seed=2),
+            "bob/so101_b": make_dataset("bob/so101_b", seed=3)}
+    rep = scan([cand(r) for r in data], max_evaluations=2, lock_dir=tmp_path, load=data.__getitem__, cross_n=0)
+    assert rep.failures == [] and len(rep.robots) == 3
+    assert built == ["so101", "so101_deg"]  # one sim per model, reused across datasets
+    assert RobotLock.load(tmp_path / "lerobot__svla_so100_pickplace.lock.json").robot == "so101_deg"
+    assert RobotLock.load(tmp_path / "alice__so101_a.lock.json").robot == "so101"
+
+
 def test_scan_stops_when_the_budget_is_spent(tmp_path, monkeypatch):
     ds = make_dataset("alice/so101_a", seed=1)
     clock = {"t": 0.0}

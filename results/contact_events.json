@@ -1,0 +1,109 @@
+{
+  "command": "antares events lerobot/<dataset> --all --lock <dataset>",
+  "datasets": {
+    "lerobot/svla_so101_pickplace": {
+      "lock": "svla_so101_pickplace",
+      "robot": "so101",
+      "z": 4.0,
+      "min_frames": 5,
+      "summary": {
+        "n_episodes": 50,
+        "n_frames": 11939,
+        "n_grasps": 68,
+        "n_grasps_hit": 68,
+        "n_events": 112,
+        "n_events_in_grasp": 59,
+        "n_events_near_transition": 75,
+        "n_events_far": 37,
+        "recall": 1.0,
+        "precision": 0.5267857142857143,
+        "near_transition": 0.6696428571428571,
+        "far_fraction": 0.33035714285714285,
+        "energy_in_grasp_fraction": 0.19691828843015366,
+        "chance": 0.17656420135689757,
+        "lift": 1.1152786743679337
+      },
+      "summary_held_out": {
+        "n_episodes": 10,
+        "n_frames": 2493,
+        "n_grasps": 13,
+        "n_grasps_hit": 13,
+        "n_events": 23,
+        "n_events_in_grasp": 14,
+        "n_events_near_transition": 14,
+        "n_events_far": 9,
+        "recall": 1.0,
+        "precision": 0.6086956521739131,
+        "near_transition": 0.6086956521739131,
+        "far_fraction": 0.391304347826087,
+        "energy_in_grasp_fraction": 0.1884597642003801,
+        "chance": 0.16165262735659847,
+        "lift": 1.1658317423115325
+      },
+      "baseline_episodes": [
+        0,
+        8,
+        16,
+        19,
+        28,
+        35,
+        37,
+        38,
+        43,
+        46
+      ]
+    },
+    "lerobot/svla_so100_pickplace": {
+      "lock": "svla_so100_pickplace",
+      "robot": "so101_deg",
+      "z": 4.0,
+      "min_frames": 5,
+      "summary": {
+        "n_episodes": 50,
+        "n_frames": 19631,
+        "n_grasps": 89,
+        "n_grasps_hit": 55,
+        "n_events": 286,
+        "n_events_in_grasp": 60,
+        "n_events_near_transition": 96,
+        "n_events_far": 190,
+        "recall": 0.6179775280898876,
+        "precision": 0.2097902097902098,
+        "near_transition": 0.3356643356643357,
+        "far_fraction": 0.6643356643356644,
+        "energy_in_grasp_fraction": 0.10495737261822806,
+        "chance": 0.1405430186949213,
+        "lift": 0.7467989060777219
+      },
+      "summary_held_out": {
+        "n_episodes": 10,
+        "n_frames": 3878,
+        "n_grasps": 17,
+        "n_grasps_hit": 12,
+        "n_events": 57,
+        "n_events_in_grasp": 13,
+        "n_events_near_transition": 19,
+        "n_events_far": 38,
+        "recall": 0.7058823529411765,
+        "precision": 0.22807017543859648,
+        "near_transition": 0.3333333333333333,
+        "far_fraction": 0.6666666666666666,
+        "energy_in_grasp_fraction": 0.10130207302891102,
+        "chance": 0.13589479112944816,
+        "lift": 0.74544485617859
+      },
+      "baseline_episodes": [
+        0,
+        8,
+        16,
+        19,
+        28,
+        35,
+        37,
+        38,
+        43,
+        46
+      ]
+    }
+  }
+}

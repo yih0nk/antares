@@ -109,9 +109,14 @@ class GraspContext:
 
     @classmethod
     def for_dataset(cls, episodes: Sequence[Episode], robot: str | None = None, unit_map: UnitMap | None = None) -> GraspContext:
+        from antares.sim import Arm
+
         thr = dataset_thresholds(episodes)
         model = load_model(get_robot(robot).model_path)
-        return cls(thr, empty_level(episodes, thr), Tip(model), unit_map if unit_map is not None else UnitMap.from_model(model))
+        # The robot's own units (so101_deg reads degrees), not the MJCF's normalized default.
+        if unit_map is None:
+            unit_map = Arm(robot=robot).unit_map
+        return cls(thr, empty_level(episodes, thr), Tip(model), unit_map)
 
 
 def real_grasp(ep: Episode, ctx: GraspContext, unit_map: UnitMap | None = None) -> Grasp | None:
@@ -565,6 +570,8 @@ def train_policy(
         if ctx is None:
             ctx = GraspContext.for_dataset(train + eval)
         goals = episode_goals(train + eval, ctx)
+        if unit_map is None:
+            unit_map = ctx.unit_map  # report degrees in the dataset's own units
     wtr = windows(train, k, h, features, goals)
     wev = windows(eval, k, h, features, goals)
     norm = Normalizer.from_windows(wtr)

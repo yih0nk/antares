@@ -1,0 +1,48 @@
+{
+  "lock": "svla_so100_pickplace",
+  "dataset": "lerobot/svla_so100_pickplace",
+  "models": {
+    "so101_deg": {
+      "default_eval_deg": 2.614228788942476,
+      "lock_eval_deg": 0.7682675142882573,
+      "fresh_eval_deg": 0.7682675142882573,
+      "fresh_params": {
+        "kp": 70.89776478354354,
+        "kv": 0.18957747951486026,
+        "damping": 0.14000922558006437,
+        "armature": 0.021155025022141383,
+        "frictionloss": 1.2186038360701466,
+        "latency_frames": 3,
+        "forcerange": 2.94
+      }
+    },
+    "so100_deg": {
+      "default_eval_deg": 2.6002941208182366,
+      "lock_eval_deg": 0.7664391573926599,
+      "fresh_eval_deg": 0.49477665477239324,
+      "fresh_params": {
+        "kp": 20.42477778944203,
+        "kv": 1.9114022415021292,
+        "damping": 0.011278211817439444,
+        "armature": 0.0023774538097170797,
+        "frictionloss": 0.08141674326703016,
+        "latency_frames": 1,
+        "forcerange": 2.94
+      }
+    },
+    "so100_so101_options_deg": {
+      "default_eval_deg": 2.615158576426186,
+      "lock_eval_deg": 0.7700581403962351,
+      "fresh_eval_deg": 0.6477456978641968,
+      "fresh_params": {
+        "kp": 54.279704256329595,
+        "kv": 3.7430842326941196,
+        "damping": 0.14368146906719273,
+        "armature": 0.024946473443201996,
+        "frictionloss": 0.002307824393728823,
+        "latency_frames": 2,
+        "forcerange": 2.94
+      }
+    }
+  }
+}

@@ -93,8 +93,17 @@ class Ref:
     q: np.ndarray  # (T, 6) measured joint positions, radians
 
 
+def _unit_map(lock: str):
+    """The unit map of the model the fleet lock was fitted on (its ``robot``;
+    locks from before the field read as the SO-101 default), so a dataset
+    recorded in degrees (the SO-100 demo, ``so101_deg``) converts as such."""
+    path = FLEET.parent / f"{lock}.lock.json"
+    robot = json.loads(path.read_text()).get("robot") if path.exists() else None
+    return Arm(robot=robot).unit_map
+
+
 def load_refs(path: Path, max_len: int) -> dict[str, list[Ref]]:
-    """Measured trajectories per arm, converted with the default unit map (fleet locks carry none)."""
+    """Measured trajectories per arm, converted to radians with that arm's own unit map."""
     z = np.load(path, allow_pickle=False)
     raw = z["meta"]
     if raw.ndim == 0:  # one JSON string holding the whole list, or a single entry
@@ -102,9 +111,9 @@ def load_refs(path: Path, max_len: int) -> dict[str, list[Ref]]:
         meta = loaded if isinstance(loaded, list) else [loaded]
     else:
         meta = [json.loads(str(m)) for m in raw]
-    unit_map = Arm().unit_map
     out: dict[str, list[Ref]] = {}
     for m in meta:
+        unit_map = _unit_map(m["lock"])
         refs = []
         for ep in m["episode_indices"]:
             state = z[f"{m['lock']}/{ep}/state"].astype(np.float64)

@@ -532,10 +532,22 @@ def scan(
         from antares.data import load_dataset
 
         load = load_dataset
-    if simulate is None:
-        # One SO-101 sim shared by the baseline score and every fit (score()
-        # has no default, so None here failed every candidate).
-        simulate = default_simulate()
+    from antares.catalog import robot_for_dataset
+    from antares.robots import model_for_dataset
+
+    # One sim per model, shared by the baseline score and every fit on it
+    # (score() has no default, so None here failed every candidate). The
+    # catalog picks the model where robot_type cannot: the SO-100 demo
+    # dataset is recorded in degrees and replays on so101_deg.
+    sims: dict[str, Any] = {}
+
+    def simulate_for(robot: str) -> Any:
+        if simulate is not None:
+            return simulate
+        if robot not in sims:
+            sims[robot] = default_simulate(robot=robot)
+        return sims[robot]
+
     lock_dir = Path(lock_dir)
     report_path = Path(report_path) if report_path is not None else lock_dir / FLEET_REPORT_NAME
     emit = on_progress or (lambda ev: None)
@@ -569,6 +581,8 @@ def scan(
             ds = load_with_retries(cand.repo_id, load, retries=retries, wait_s=retry_wait_s)
             if tuple(ds.joint_names) != JOINTS:
                 raise ValueError(f"joints {list(ds.joint_names)} are not the SO-101 joints")
+            robot = robot_for_dataset(ds.repo_id) or model_for_dataset(ds.robot_type)
+            sim = simulate_for(robot)
             episodes = _usable_episodes(ds)
             n_tr, n_ev = plan_split(len(episodes), n_train, n_eval)
             train, eval_ = split_episodes(episodes, n_tr, n_ev, seed=seed)
@@ -587,7 +601,7 @@ def scan(
 
             # One cheap held-out score of the defaults decides whether this is a
             # physical arm at all, before any fit budget is spent on it.
-            default_eval = float(score(SimParams.default(), eval_ or train, simulate).overall_deg)
+            default_eval = float(score(SimParams.default(), eval_ or train, sim).overall_deg)
             if default_eval < MIN_BASELINE_DEG:
                 reason = (
                     f"the default sim already tracks it to {default_eval:.2f} deg "
@@ -599,14 +613,14 @@ def scan(
                 result = calibrate(
                     train,
                     eval_,
-                    simulate=simulate,
+                    simulate=sim,
                     start=SimParams.default(),
                     max_evaluations=max_evaluations,
                     seed=seed,
                     on_progress=on_fit,
                 )
                 name = lock_name(cand.repo_id)
-                lock = RobotLock.create(ds.repo_id, ds.robot_type, train, result, name=name)
+                lock = RobotLock.create(ds.repo_id, ds.robot_type, train, result, name=name, robot=robot)
                 lock.save(lock_dir / f"{name}{LOCK_SUFFIX}")
                 entry = RobotEntry(
                     dataset=ds.repo_id,

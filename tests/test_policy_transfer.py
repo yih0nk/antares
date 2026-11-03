@@ -106,3 +106,22 @@ def test_end_to_end_on_synthetic_refs(tmp_path):
     )
     assert rc == 0
     assert json.loads((out / "train_lock_s0.json").read_text())["settings"]["generations"] == 3
+
+
+def test_refs_convert_with_each_arms_own_units(tmp_path):
+    """The fleet's SO-100 demo lock is on so101_deg: its logged degrees become
+    radians as degrees, every other arm through the SO-101 default map."""
+    from antares.sim import Arm
+
+    state = np.tile(np.linspace(-30.0, 30.0, 60)[:, None], (1, 6))
+    meta = [{"lock": lock, "fps": 30.0, "episode_indices": [0]}
+            for lock in ("lerobot__svla_so100_pickplace", "lerobot__svla_so101_pickplace")]
+    arrays = {f"{m['lock']}/0/state": state for m in meta}
+    arrays["meta"] = np.array([json.dumps(m) for m in meta])
+    np.savez_compressed(tmp_path / "refs.npz", **arrays)
+    refs = pt.load_refs(tmp_path / "refs.npz", max_len=1000)
+    deg = refs["lerobot__svla_so100_pickplace"][0].q
+    norm = refs["lerobot__svla_so101_pickplace"][0].q
+    np.testing.assert_allclose(deg, Arm(robot="so101_deg").unit_map.to_rad(state))
+    np.testing.assert_allclose(norm, Arm().unit_map.to_rad(state))
+    assert not np.allclose(deg[:, :5], norm[:, :5])

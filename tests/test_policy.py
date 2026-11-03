@@ -510,3 +510,16 @@ def test_closed_loop_episodes_runs_every_variant_with_shift(episodes):
         runs.append(closed_loop_episodes(pol, [ep], [stiff], ctx, shift=False).runs[0])
     assert all(r.close_frame == 50 for r in runs)
     assert all(r.success is True for r in runs), [r.grasp_error_cm for r in runs]
+
+
+def test_grasp_context_reads_states_in_the_robots_own_units(episodes):
+    """so101_deg logs degrees: the grasp point must come out of FK on degrees,
+    not on the MJCF's normalized -100..100 default."""
+    from antares.policy import GraspContext, real_grasp
+
+    deg = GraspContext.for_dataset(episodes, "so101_deg")
+    norm = GraspContext.for_dataset(episodes, "so101")
+    np.testing.assert_allclose(deg.unit_map.scale, Arm(robot="so101_deg").unit_map.scale)
+    np.testing.assert_allclose(norm.unit_map.scale, Arm(robot="so101").unit_map.scale)
+    assert not np.allclose(deg.unit_map.scale[:5], norm.unit_map.scale[:5])
+    assert real_grasp(episodes[0], deg).xyz != real_grasp(episodes[0], norm).xyz
