@@ -115,7 +115,7 @@ Bring your own dataset, in short (details in [Bring your own dataset](#bring-you
 * **Parameter values are fits, not measurements.** `kp`, `kv`, damping, armature and friction trade off at the same tracking error (seeds on one arm span 25× in `kp`); only latency and the sensor map are pinned by pick-and-place logs. `--seeds 3` records which parameters the seeds agree on, and everything downstream reads only those as physical.
 * **The leftover elbow error is step-shaped**, not a slope in gravity load, so the six servo parameters do not express it; the contact detector sees that pose dependence, not contact with a light object.
 * **Payload mass is below the noise.** The residual resolves 13 g per encoder step with a noise floor of 40–60 g; a 30 g object comes out at 22 g with a 69 g IQR, so the export uses an assumed 30 g and says so.
-* **Some SO-100 numbers predate its degrees fix.** The SO-100 demo dataset is recorded in degrees and was first replayed as LeRobot's normalized units. Its locks, the per-joint and sensor tables, the two-arm `antares cross` numbers, and the camera, scene, object and payload fits were redone on `so101_deg` (2026-10-18). Still on the old reading: the robot-specificity study and the seed spread quoted from it (`antares specificity` builds one simulator for every dataset, so it cannot yet replay one in degrees), the gravity/deadband and STS3215 servo-model tables, drift over a session, contact detection, lag compensation, domain randomization, the video-delay table, both policy experiments, and the fleet scan's copy of this dataset. Their SO-100 stock baseline is 2.74° rather than 2.61°.
+* **Two policy experiments predate the SO-100 degrees fix.** The SO-100 demo dataset is recorded in degrees and was first replayed as LeRobot's normalized units. Every SO-100 number in this README was rerun on `so101_deg` except the sim-to-sim policy transfer (`antares transfer`, whose `so100` arm takes the old kp 1427 lock as its truth) and the controller experiment (`experiments/policy_transfer.py`, which converted every fleet arm's references with the SO-101 unit map and used the old fleet copy of this dataset). Both need a multi-hour run that has not finished yet; the code they run is fixed.
 * **Camera fits are loose in depth.** Silhouettes pin the viewing direction but trade distance against field of view; the SO-101 `side` camera's rays meet 2.6 cm below the object plane. The table height assumes a 15 mm object half-height and a horizontal plane.
 
 ## Reference map
@@ -2010,6 +2010,8 @@ The grasp-point goal is not needed then; the images carry it.
 
 ### Does calibration help a policy transfer?
 
+> Still on the old SO-100 reading (see Honest limits): this section has not been rerun since the degrees fix.
+
 The replay numbers above are a proxy. What a user wants to know is whether
 a policy trained in the calibrated sim works better on the real arm than
 one trained in the default sim, and nothing with a physical arm can run in
@@ -2109,6 +2111,8 @@ budgets in about a second and is what the tests exercise.
 ```
 
 ### Does a calibrated sim train a better controller? (sim-to-sim)
+
+> Still on the old SO-100 reading (see Honest limits): this section has not been rerun since the degrees fix.
 
 A LeRobot policy hands the servos a short future path (its action chunk);
 underneath, something has to make the arm actually follow it.
